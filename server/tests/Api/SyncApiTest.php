@@ -139,6 +139,55 @@ final class SyncApiTest extends DatabaseWebTestCase
         self::assertNotSame($grandma->getUuid(), $result['links'][0]['serverId']);
     }
 
+    public function testDeletionOnDeviceIsOnlyMarked(): void
+    {
+        $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис'], ['externalId' => 'b', 'name' => 'Вера']]);
+
+        $result = $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис']]);
+
+        self::assertSame(1, $result['deleted']);
+        // На телефоны больше не восстанавливается…
+        self::assertSame(['Борис'], array_column($this->personal(), 'name'));
+        // …но на сервере остаётся с отметкой.
+        $vera = $this->em->getRepository(Contact::class)->findOneBy(['name' => 'Вера']);
+        self::assertNotNull($vera);
+        self::assertNotNull($vera->getDeletedAt());
+    }
+
+    public function testDeletionByAdminRemovesContactFromDevice(): void
+    {
+        $serverId = $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис'], ['externalId' => 'b', 'name' => 'Вера']])['links'][0]['serverId'];
+
+        // Администратор удаляет контакт.
+        $this->em->remove($this->em->getRepository(Contact::class)->findOneBy(['uuid' => $serverId]));
+        $this->em->flush();
+
+        // Телефон ещё не знает об этом и присылает контакт со своим serverId — сервер велит удалить его.
+        $result = $this->sync(self::PHONE_A, [
+            ['externalId' => 'a', 'serverId' => $serverId, 'name' => 'Борис'],
+            ['externalId' => 'b', 'name' => 'Вера'],
+        ]);
+
+        self::assertSame(['a'], $result['removed']);
+        self::assertSame([0, 1], [$result['created'], $result['total']]);
+        self::assertSame(['Вера'], array_column($this->personal(), 'name'));
+    }
+
+    public function testContactDeletedOnOnePhoneButKeptOnAnotherIsRevived(): void
+    {
+        $serverId = $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис']])['links'][0]['serverId'];
+        $this->sync(self::PHONE_B, [['externalId' => 'b', 'serverId' => $serverId, 'name' => 'Борис']]);
+
+        $this->sync(self::PHONE_A, []);
+        self::assertSame([], $this->personal());
+
+        // На телефоне B контакт по-прежнему есть — значит, он нужен.
+        $result = $this->sync(self::PHONE_B, [['externalId' => 'b', 'serverId' => $serverId, 'name' => 'Борис']]);
+
+        self::assertSame(1, $result['updated']);
+        self::assertSame([$serverId], array_column($this->personal(), 'serverId'));
+    }
+
     public function testDeletingUserRemovesTheirData(): void
     {
         $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис']], googleAccounts: ['anna@gmail.com']);
@@ -148,7 +197,7 @@ final class SyncApiTest extends DatabaseWebTestCase
         $this->em->flush();
 
         $connection = $this->em->getConnection();
-        foreach (['contact', 'contact_link', 'device', 'google_account', 'api_token'] as $table) {
+        foreach (['contact', 'contact_link', 'contact_tombstone', 'device', 'google_account', 'api_token'] as $table) {
             self::assertSame(0, (int) $connection->fetchOne("SELECT COUNT(*) FROM $table"), $table);
         }
     }

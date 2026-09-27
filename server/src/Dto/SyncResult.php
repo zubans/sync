@@ -5,7 +5,9 @@ namespace App\Dto;
 final class SyncResult
 {
     /**
-     * @param list<array{externalId: string, serverId: string}> $links соответствие локальных контактов серверным
+     * @param list<array{externalId: string, serverId: string}> $links   соответствие локальных контактов серверным
+     * @param list<string>                                       $removed externalId контактов, удалённых администратором:
+     *                                                                    устройство должно удалить их у себя
      */
     public function __construct(
         public readonly int $created,
@@ -13,6 +15,7 @@ final class SyncResult
         public readonly int $deleted,
         public readonly int $total,
         public readonly array $links,
+        public readonly array $removed = [],
     ) {
     }
 }

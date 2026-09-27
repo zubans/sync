@@ -127,4 +127,12 @@ class SyncPlannerTest {
 
         assertEquals(mapOf(10L to "s1", 11L to "s1"), mapped)
     }
+
+    @Test
+    fun `contacts removed by admin are deleted with all their raw contacts`() {
+        val local = listOf(local(1, "Иван", raw = listOf(10, 11)), local(2, "Мария"))
+
+        assertEquals(listOf(10L, 11L), SyncPlanner.rawIdsToRemove(local, listOf("lk-1", "lk-unknown")))
+        assertTrue(SyncPlanner.rawIdsToRemove(local, emptyList()).isEmpty())
+    }
 }

@@ -33,7 +33,7 @@ final class DashboardController extends AbstractDashboardController
             'stats' => [
                 ['Пользователи', $count(User::class), 'admin_user_index'],
                 ['Семьи', $count(Family::class), 'admin_family_index'],
-                ['Личные контакты', $count(Contact::class, 'e.user IS NOT NULL'), 'admin_contact_index'],
+                ['Личные контакты', $count(Contact::class, 'e.user IS NOT NULL AND e.deletedAt IS NULL'), 'admin_contact_index'],
                 ['Семейные контакты', $count(Contact::class, 'e.family IS NOT NULL'), 'admin_family_contact_index'],
                 ['Устройства', $count(Device::class), 'admin_device_index'],
                 ['Приложения (установлено)', $count(InstalledApp::class, 'e.removedAt IS NULL'), 'admin_installed_app_index'],

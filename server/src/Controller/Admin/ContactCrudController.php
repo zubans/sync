@@ -18,6 +18,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\ArrayField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\AssociationField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\DateTimeField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
+use EasyCorp\Bundle\EasyAdminBundle\Filter\NullFilter;
 use EasyCorp\Bundle\EasyAdminBundle\Router\AdminUrlGeneratorInterface;
 
 /**
@@ -48,7 +49,12 @@ final class ContactCrudController extends AbstractCrudController
             ->setEntityLabelInPlural('Личные контакты')
             ->setDefaultSort(['name' => 'ASC'])
             ->setSearchFields(['name', 'user.email'])
-            ->setPaginatorPageSize(50);
+            ->setPaginatorPageSize(50)
+            ->setHelp(
+                Crud::PAGE_INDEX,
+                'Контакт, удалённый на телефоне, остаётся здесь с отметкой «Удалён на устройстве». '
+                .'Удаление здесь — окончательное: контакт удалится и с телефонов пользователя при их следующей синхронизации.',
+            );
     }
 
     public function configureActions(Actions $actions): Actions
@@ -58,7 +64,10 @@ final class ContactCrudController extends AbstractCrudController
 
     public function configureFilters(Filters $filters): Filters
     {
-        return $filters->add('user')->add('updatedAt');
+        return $filters
+            ->add('user')
+            ->add(NullFilter::new('deletedAt', 'Удалён на устройстве')->setChoiceLabels('Нет', 'Да'))
+            ->add('updatedAt');
     }
 
     public function createIndexQueryBuilder(SearchDto $searchDto, EntityDto $entityDto, FieldCollection $fields, FilterCollection $filters): QueryBuilder
@@ -74,6 +83,11 @@ final class ContactCrudController extends AbstractCrudController
         yield ArrayField::new('emails', 'Email')->setRequired(false);
         yield AssociationField::new('user', 'Владелец')->setRequired(true);
         yield DateTimeField::new('updatedAt', 'Изменён')->hideOnForm();
+        // Строковое свойство + formatValue: так вместо бейджа «Null» у живых контактов выводится «—».
+        yield TextField::new('uuid', 'Удалён на устройстве')
+            ->formatValue(static fn ($value, Contact $contact) => $contact->getDeletedAt()?->format('d.m.Y H:i') ?? '—')
+            ->setSortable(false)
+            ->hideOnForm();
         yield TextField::new('uuid', 'UUID')->onlyOnDetail();
     }
 }

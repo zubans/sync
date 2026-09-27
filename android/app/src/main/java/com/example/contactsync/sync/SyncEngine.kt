@@ -22,6 +22,8 @@ data class SyncReport(
     val updated: Int,
     val deleted: Int,
     val restored: Int = 0,
+    /** Удалено с телефона, потому что администратор удалил на сервере. */
+    val removedByAdmin: Int = 0,
     val familyAdded: Int = 0,
     val familyUpdated: Int = 0,
     val familyRemoved: Int = 0,
@@ -30,6 +32,7 @@ data class SyncReport(
     fun summary(): String = buildList {
         if (restored > 0) add("восстановлено $restored")
         add("выгружено $uploaded (новых $created, изменено $updated, удалено $deleted)")
+        if (removedByAdmin > 0) add("удалено администратором $removedByAdmin")
         if (familyAdded + familyUpdated + familyRemoved > 0) {
             add("семейные: +$familyAdded, изменено $familyUpdated, убрано $familyRemoved")
         }
@@ -61,7 +64,7 @@ class SyncEngine(
             val restored = restorePersonal()
             val report = upload()
             val family = pullFamily()
-            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, restored = restored, googleAccounts = report.googleAccounts))
+            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, removedByAdmin = report.removedByAdmin, restored = restored, googleAccounts = report.googleAccounts))
         }
     }
 
@@ -70,7 +73,7 @@ class SyncEngine(
         withContext(Dispatchers.IO) {
             val report = upload()
             val family = pullFamily()
-            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, googleAccounts = report.googleAccounts))
+            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, removedByAdmin = report.removedByAdmin, googleAccounts = report.googleAccounts))
         }
     }
 
@@ -103,11 +106,19 @@ class SyncEngine(
                 contacts = SyncPlanner.buildUpload(local, mappings),
             ),
         )
+        // Контакты, которые администратор удалил на сервере, удаляем и из телефонной книги.
+        val toRemove = SyncPlanner.rawIdsToRemove(local, result.removed)
+        toRemove.forEach(phone::delete)
+
         // Соответствия пересобираем по ответу: так же уходят записи удалённых контактов.
         val links = result.links.associate { it.externalId to it.serverId }
         store.save(mappings.copy(personal = SyncPlanner.applyLinks(local, links)))
 
-        return SyncReport(result.total, result.created, result.updated, result.deleted, googleAccounts = accounts)
+        return SyncReport(
+            result.total, result.created, result.updated, result.deleted,
+            removedByAdmin = result.removed.size,
+            googleAccounts = accounts,
+        )
     }
 
     private suspend fun pullFamily(): SyncReport {

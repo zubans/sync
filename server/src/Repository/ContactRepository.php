@@ -38,10 +38,10 @@ class ContactRepository extends ServiceEntityRepository
             ->getResult();
     }
 
-    /** @return list<Contact> */
+    /** @return list<Contact> личные контакты, кроме удалённых на устройствах */
     public function findPersonal(User $user): array
     {
-        return $this->findBy(['user' => $user], ['name' => 'ASC', 'id' => 'ASC']);
+        return $this->findBy(['user' => $user, 'deletedAt' => null], ['name' => 'ASC', 'id' => 'ASC']);
     }
 
     /** @return list<Contact> */

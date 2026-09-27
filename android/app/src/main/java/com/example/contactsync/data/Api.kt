@@ -57,6 +57,8 @@ data class SyncResult(
     val deleted: Int,
     val total: Int,
     val links: List<SyncLink> = emptyList(),
+    /** externalId контактов, удалённых администратором: их нужно удалить из телефонной книги. */
+    val removed: List<String> = emptyList(),
 )
 
 /** Контакт, хранящийся на сервере. */

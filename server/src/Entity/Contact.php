@@ -46,6 +46,10 @@ class Contact
     #[ORM\Column(type: Types::JSON)]
     private array $emails = [];
 
+    /** Контакт удалили на устройстве: на сервере он остаётся, но не восстанавливается на телефоны. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $deletedAt = null;
+
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
 
@@ -93,6 +97,32 @@ class Contact
         $this->touch();
 
         return true;
+    }
+
+    public function markDeleted(): void
+    {
+        $this->deletedAt ??= new \DateTimeImmutable();
+    }
+
+    /** Контакт снова пришёл с устройства — значит, он там есть. */
+    public function undelete(): bool
+    {
+        if ($this->deletedAt === null) {
+            return false;
+        }
+        $this->deletedAt = null;
+
+        return true;
+    }
+
+    public function isDeleted(): bool
+    {
+        return $this->deletedAt !== null;
+    }
+
+    public function getDeletedAt(): ?\DateTimeImmutable
+    {
+        return $this->deletedAt;
     }
 
     #[ORM\PreUpdate]

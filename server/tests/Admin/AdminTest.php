@@ -3,6 +3,7 @@
 namespace App\Tests\Admin;
 
 use App\Entity\Contact;
+use App\Entity\ContactTombstone;
 use App\Entity\Device;
 use App\Entity\Family;
 use App\Entity\InstalledApp;
@@ -76,6 +77,7 @@ final class AdminTest extends DatabaseWebTestCase
 
         $this->client->request('GET', '/admin/contact');
         self::assertSelectorTextContains('table', 'Борис');
+        self::assertSelectorTextNotContains('table', 'Null');
         self::assertSelectorTextNotContains('table', 'Бабушка');
 
         $this->client->request('GET', '/admin/family-contact');
@@ -140,5 +142,27 @@ final class AdminTest extends DatabaseWebTestCase
         self::assertSame($family->getId(), $contact->getFamily()->getId());
         self::assertNull($contact->getUser());
         self::assertSame(['+7 900 111-11-11'], $contact->getPhones());
+    }
+
+    public function testDeletingContactInAdminLeavesTombstone(): void
+    {
+        $anna = $this->createUser('anna@example.com');
+        $contact = Contact::personal($anna)->setName('Борис');
+        $this->em->persist($contact);
+        $this->em->flush();
+        $uuid = $contact->getUuid();
+        $this->client->loginUser($this->createUser('admin@example.com', admin: true));
+
+        // Кнопка «Удалить» в EasyAdmin отправляет общую форму подтверждения с CSRF-токеном ea-delete.
+        $crawler = $this->client->request('GET', '/admin/contact');
+        $token = $crawler->filter('#action-confirmation-modal form input[name="token"], form[method="post"] input[name="token"]')->first()->attr('value');
+        $this->client->request('POST', '/admin/contact/'.$contact->getId().'/delete', ['token' => $token]);
+
+        self::assertResponseRedirects();
+        $this->em->clear();
+        self::assertNull($this->em->getRepository(Contact::class)->findOneBy(['uuid' => $uuid]));
+        $tombstone = $this->em->getRepository(ContactTombstone::class)->findOneBy(['uuid' => $uuid]);
+        self::assertNotNull($tombstone);
+        self::assertSame('anna@example.com', $tombstone->getUser()->getEmail());
     }
 }

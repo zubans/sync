@@ -126,6 +126,13 @@ object SyncPlanner {
             }
     }
 
+    /** raw-контакты телефона, которые нужно удалить: их контакты администратор удалил на сервере. */
+    fun rawIdsToRemove(local: List<LocalContact>, removedExternalIds: Collection<String>): List<Long> {
+        if (removedExternalIds.isEmpty()) return emptyList()
+        val removed = removedExternalIds.toSet()
+        return local.filter { it.lookupKey in removed }.flatMap { it.rawContactIds }
+    }
+
     /** Обновляет соответствие rawId → serverId по ответу сервера на выгрузку. */
     fun applyLinks(
         local: List<LocalContact>,
