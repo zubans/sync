@@ -3,8 +3,11 @@
 namespace App\Tests\Admin;
 
 use App\Entity\Contact;
+use App\Entity\Device;
 use App\Entity\Family;
+use App\Entity\InstalledApp;
 use App\Entity\User;
+use App\Entity\Vault;
 use App\Tests\DatabaseWebTestCase;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 
@@ -48,14 +51,28 @@ final class AdminTest extends DatabaseWebTestCase
         $family = (new Family())->setName('Ивановы');
         $this->em->persist($family);
         $this->em->persist((new Contact())->setFamily($family)->setName('Бабушка'));
+        $device = new Device($anna, 'install-aaaa-0001');
+        $this->em->persist($device);
+        $app = new InstalledApp($device, 'org.example.notes');
+        $app->update('Заметки', '2.1', 21, null, null, [['name' => 'base.apk', 'sha256' => str_repeat('a', 64), 'size' => 5242880]]);
+        $this->em->persist($app);
+        $this->em->persist(new Vault($anna, Vault::KDF_PBKDF2_SHA256, 600000, 'c2FsdA==', 'a2V5'));
         $this->em->flush();
 
         $this->client->loginUser($this->createUser('admin@example.com', admin: true));
 
-        foreach (['/admin', '/admin/user', '/admin/family', '/admin/device', '/admin/google-account'] as $url) {
+        foreach (['/admin', '/admin/user', '/admin/family', '/admin/device', '/admin/google-account', '/admin/installed-app', '/admin/vault'] as $url) {
             $this->client->request('GET', $url);
             self::assertResponseIsSuccessful($url);
         }
+
+        $this->client->request('GET', '/admin/installed-app');
+        self::assertSelectorTextContains('table', 'Заметки');
+        self::assertSelectorTextContains('table', 'ожидает загрузки');
+        self::assertSelectorTextContains('table', '5');
+
+        $this->client->request('GET', '/admin/vault');
+        self::assertSelectorTextContains('table', 'anna@example.com');
 
         $this->client->request('GET', '/admin/contact');
         self::assertSelectorTextContains('table', 'Борис');

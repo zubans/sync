@@ -1,0 +1,164 @@
+<?php
+
+namespace App\Tests\Api;
+
+use App\Tests\DatabaseWebTestCase;
+use Symfony\Component\Filesystem\Filesystem;
+
+final class AppApiTest extends DatabaseWebTestCase
+{
+    private const DEVICE = ['installId' => 'install-aaaa-0001', 'model' => 'Pixel'];
+
+    private string $token;
+    private string $apk;
+    private string $apkSha;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        (new Filesystem())->remove(static::getContainer()->getParameter('kernel.project_dir').'/var/storage/apk_test');
+
+        $this->createUser('anna@example.com');
+        $this->token = $this->login('anna@example.com');
+        $this->apk = random_bytes(3000);
+        $this->apkSha = hash('sha256', $this->apk);
+    }
+
+    public function testOnlyNonPlayApksAreRequested(): void
+    {
+        $response = $this->inventory([
+            $this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk), installer: null),
+            $this->app('com.whatsapp', str_repeat('a', 64), 100, installer: 'com.android.vending'),
+        ]);
+
+        self::assertSame([$this->apkSha], $response['missing']);
+    }
+
+    public function testChunkedUploadWithResumeAndDownload(): void
+    {
+        $this->inventory([$this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk))]);
+        $url = '/api/apk/uploads/'.$this->apkSha;
+
+        self::assertSame(0, $this->api('GET', $url, token: $this->token)['offset']);
+
+        $this->putChunk($url, 0, substr($this->apk, 0, 1000));
+        self::assertResponseIsSuccessful();
+
+        // Обрыв связи: клиент спрашивает, с какого места продолжать.
+        self::assertSame(1000, $this->api('GET', $url, token: $this->token)['offset']);
+
+        // Неверное смещение — 409 и правильное место.
+        $this->putChunk($url, 500, substr($this->apk, 500));
+        self::assertResponseStatusCodeSame(409);
+        self::assertSame(1000, json_decode($this->client->getResponse()->getContent(), true)['offset']);
+
+        $this->putChunk($url, 1000, substr($this->apk, 1000));
+        self::assertSame(3000, json_decode($this->client->getResponse()->getContent(), true)['offset']);
+
+        $this->api('POST', $url.'/complete', token: $this->token);
+        self::assertResponseStatusCodeSame(201);
+
+        // Повторная инвентаризация больше не просит этот файл.
+        self::assertSame([], $this->inventory([$this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk))])['missing']);
+
+        $apps = $this->api('GET', '/api/apps', token: $this->token)['apps'];
+        self::assertTrue($apps[0]['backedUp']);
+
+        $this->client->request('GET', '/api/apk/'.$this->apkSha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$this->token]);
+        self::assertResponseIsSuccessful();
+        self::assertSame($this->apk, $this->client->getInternalResponse()->getContent());
+    }
+
+    public function testCorruptedUploadIsRejected(): void
+    {
+        $this->inventory([$this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk))]);
+        $url = '/api/apk/uploads/'.$this->apkSha;
+
+        $this->putChunk($url, 0, str_repeat('x', \strlen($this->apk)));
+        $this->api('POST', $url.'/complete', token: $this->token);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSame(0, $this->api('GET', $url, token: $this->token)['offset']);
+    }
+
+    public function testOversizedUploadIsRejected(): void
+    {
+        $this->inventory([$this->app('org.example.sideloaded', $this->apkSha, 10)]);
+
+        $this->putChunk('/api/apk/uploads/'.$this->apkSha, 0, $this->apk);
+
+        self::assertResponseStatusCodeSame(413);
+    }
+
+    public function testCannotUploadOrDownloadForeignFiles(): void
+    {
+        $this->inventory([$this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk))]);
+
+        $this->createUser('boris@example.com');
+        $boris = $this->login('boris@example.com');
+
+        $this->api('GET', '/api/apk/uploads/'.$this->apkSha, token: $boris);
+        self::assertResponseStatusCodeSame(404);
+        $this->client->request('GET', '/api/apk/'.$this->apkSha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$boris]);
+        self::assertResponseStatusCodeSame(404);
+
+        // Приложения из Play по умолчанию не загружаются.
+        $playSha = str_repeat('b', 64);
+        $this->inventory([$this->app('com.whatsapp', $playSha, 100, installer: 'com.android.vending')]);
+        $this->api('GET', '/api/apk/uploads/'.$playSha, token: $this->token);
+        self::assertResponseStatusCodeSame(404);
+    }
+
+    public function testListShowsLatestVersionAndHidesRemoved(): void
+    {
+        $this->inventory([
+            $this->app('org.example.a', str_repeat('1', 64), 10, versionCode: 5),
+            $this->app('org.example.removed', str_repeat('2', 64), 10),
+        ]);
+        $this->inventory([$this->app('org.example.a', str_repeat('3', 64), 10, versionCode: 7)], ['installId' => 'install-bbbb-0002'] + self::DEVICE);
+        // На первом устройстве удалили org.example.removed.
+        $this->inventory([$this->app('org.example.a', str_repeat('1', 64), 10, versionCode: 5)]);
+
+        $apps = $this->api('GET', '/api/apps', token: $this->token)['apps'];
+
+        self::assertSame(['org.example.a'], array_column($apps, 'packageName'));
+        self::assertSame(7, $apps[0]['versionCode']);
+        self::assertFalse($apps[0]['backedUp']);
+    }
+
+    /** @return array<string, mixed> */
+    private function app(string $package, string $sha, int $size, ?string $installer = null, int $versionCode = 1): array
+    {
+        return [
+            'packageName' => $package,
+            'label' => $package,
+            'versionName' => '1.0',
+            'versionCode' => $versionCode,
+            'installer' => $installer,
+            'signingSha256' => str_repeat('c', 64),
+            'files' => [['name' => 'base.apk', 'sha256' => $sha, 'size' => $size]],
+        ];
+    }
+
+    /**
+     * @param list<array<string, mixed>> $apps
+     * @param array<string, string>      $device
+     *
+     * @return array<string, mixed>
+     */
+    private function inventory(array $apps, array $device = self::DEVICE): array
+    {
+        $response = $this->api('POST', '/api/apps/inventory', ['device' => $device, 'apps' => $apps], $this->token);
+        self::assertResponseIsSuccessful();
+
+        return $response;
+    }
+
+    private function putChunk(string $url, int $offset, string $bytes): void
+    {
+        $this->client->request('PUT', $url.'?offset='.$offset, server: [
+            'CONTENT_TYPE' => 'application/octet-stream',
+            'HTTP_AUTHORIZATION' => 'Bearer '.$this->token,
+        ], content: $bytes);
+    }
+}

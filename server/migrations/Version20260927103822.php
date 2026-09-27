@@ -4,24 +4,15 @@ declare(strict_types=1);
 
 namespace DoctrineMigrations;
 
-use Doctrine\DBAL\Schema\Column;
-use Doctrine\DBAL\Schema\ForeignKeyConstraint;
+use App\Doctrine\Migration\PortableSchema;
 use Doctrine\DBAL\Schema\ForeignKeyConstraint\ReferentialAction;
-use Doctrine\DBAL\Schema\Index;
-use Doctrine\DBAL\Schema\Index\IndexType;
-use Doctrine\DBAL\Schema\PrimaryKeyConstraint;
 use Doctrine\DBAL\Schema\Schema;
-use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\Migrations\AbstractMigration;
 
-/**
- * Схема описана через Schema API, а SQL генерируется под текущую платформу,
- * поэтому миграция работает и на SQLite, и на PostgreSQL/MySQL.
- */
 final class Version20260927103822 extends AbstractMigration
 {
-    private const TABLES = ['google_account', 'contact_link', 'contact', 'device', 'api_token', 'app_user', 'family'];
+    use PortableSchema;
 
     public function getDescription(): string
     {
@@ -30,7 +21,7 @@ final class Version20260927103822 extends AbstractMigration
 
     public function up(Schema $schema): void
     {
-        $target = Schema::editor()->setTables(
+        $this->createTables(
             self::table('family', [
                 self::id(),
                 self::col('name', Types::STRING, 120),
@@ -121,69 +112,11 @@ final class Version20260927103822 extends AbstractMigration
                 self::fk('FK_83726B22A76ED395', 'user_id', 'app_user', ReferentialAction::CASCADE),
                 self::fk('FK_83726B2294A4C7D4', 'device_id', 'device', ReferentialAction::SET_NULL),
             ]),
-        )->create();
-
-        foreach ($target->toSql($this->platform) as $sql) {
-            $this->addSql($sql);
-        }
+        );
     }
 
     public function down(Schema $schema): void
     {
-        foreach (self::TABLES as $table) {
-            $this->addSql($this->platform->getDropTableSQL($table));
-        }
-    }
-
-    /**
-     * @param list<Column>               $columns
-     * @param list<Index>                $indexes
-     * @param list<ForeignKeyConstraint> $foreignKeys
-     */
-    private static function table(string $name, array $columns, array $indexes = [], array $foreignKeys = []): Table
-    {
-        return Table::editor()
-            ->setUnquotedName($name)
-            ->setColumns(...$columns)
-            ->setPrimaryKeyConstraint(PrimaryKeyConstraint::editor()->setUnquotedColumnNames('id')->create())
-            ->setIndexes(...$indexes)
-            ->setForeignKeyConstraints(...$foreignKeys)
-            ->create();
-    }
-
-    private static function id(): Column
-    {
-        return Column::editor()->setUnquotedName('id')->setTypeName(Types::INTEGER)->setAutoincrement(true)->create();
-    }
-
-    private static function col(string $name, string $type, ?int $length = null, bool $nullable = false): Column
-    {
-        return Column::editor()
-            ->setUnquotedName($name)
-            ->setTypeName($type)
-            ->setLength($length)
-            ->setNotNull(!$nullable)
-            ->create();
-    }
-
-    /** @param non-empty-list<non-empty-string> $columns */
-    private static function index(string $name, array $columns, bool $unique = false): Index
-    {
-        return Index::editor()
-            ->setUnquotedName($name)
-            ->setUnquotedColumnNames(...$columns)
-            ->setType($unique ? IndexType::UNIQUE : IndexType::REGULAR)
-            ->create();
-    }
-
-    private static function fk(string $name, string $column, string $refTable, ReferentialAction $onDelete): ForeignKeyConstraint
-    {
-        return ForeignKeyConstraint::editor()
-            ->setUnquotedName($name)
-            ->setUnquotedReferencingColumnNames($column)
-            ->setUnquotedReferencedTableName($refTable)
-            ->setUnquotedReferencedColumnNames('id')
-            ->setOnDeleteAction($onDelete)
-            ->create();
+        $this->dropTables('google_account', 'contact_link', 'contact', 'device', 'api_token', 'app_user', 'family');
     }
 }

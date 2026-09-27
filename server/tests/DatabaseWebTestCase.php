@@ -23,7 +23,11 @@ abstract class DatabaseWebTestCase extends WebTestCase
 
         $schemaTool = new SchemaTool($this->em);
         $metadata = $this->em->getMetadataFactory()->getAllMetadata();
+        // В SQLite с включёнными внешними ключами таблицы не удалить в произвольном порядке.
+        $connection = $this->em->getConnection();
+        $connection->executeStatement('PRAGMA foreign_keys = OFF');
         $schemaTool->dropDatabase();
+        $connection->executeStatement('PRAGMA foreign_keys = ON');
         $schemaTool->createSchema($metadata);
     }
 
