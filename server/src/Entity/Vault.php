@@ -13,6 +13,7 @@ use Doctrine\ORM\Mapping as ORM;
 class Vault
 {
     public const KDF_PBKDF2_SHA256 = 'pbkdf2-sha256';
+    public const KDF_ARGON2ID = 'argon2id';
 
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -26,8 +27,17 @@ class Vault
     #[ORM\Column(length: 32)]
     private string $kdfAlgorithm;
 
+    /** PBKDF2 — число итераций; Argon2id — число проходов (time cost). */
     #[ORM\Column]
     private int $kdfIterations;
+
+    /** Argon2id: память, КиБ. */
+    #[ORM\Column(nullable: true)]
+    private ?int $kdfMemory = null;
+
+    /** Argon2id: число потоков. */
+    #[ORM\Column(nullable: true)]
+    private ?int $kdfParallelism = null;
 
     /** Соль KDF, base64. */
     #[ORM\Column(length: 64)]
@@ -47,18 +57,35 @@ class Vault
     #[ORM\Column]
     private \DateTimeImmutable $updatedAt;
 
-    public function __construct(User $user, string $kdfAlgorithm, int $kdfIterations, string $kdfSalt, string $protectedKey)
-    {
+    public function __construct(
+        User $user,
+        string $kdfAlgorithm,
+        int $kdfIterations,
+        string $kdfSalt,
+        string $protectedKey,
+        ?int $kdfMemory = null,
+        ?int $kdfParallelism = null,
+    ) {
         $this->user = $user;
         $this->createdAt = new \DateTimeImmutable();
-        $this->setKey($kdfAlgorithm, $kdfIterations, $kdfSalt, $protectedKey);
+        $this->setKey($kdfAlgorithm, $kdfIterations, $kdfSalt, $protectedKey, $kdfMemory, $kdfParallelism);
     }
 
-    /** Смена мастер-пароля: ключ хранилища тот же, меняется только его «обёртка». */
-    public function setKey(string $kdfAlgorithm, int $kdfIterations, string $kdfSalt, string $protectedKey): void
-    {
+    /**
+     * Смена мастер-пароля или параметров KDF: ключ хранилища тот же, меняется только его «обёртка».
+     */
+    public function setKey(
+        string $kdfAlgorithm,
+        int $kdfIterations,
+        string $kdfSalt,
+        string $protectedKey,
+        ?int $kdfMemory = null,
+        ?int $kdfParallelism = null,
+    ): void {
         $this->kdfAlgorithm = $kdfAlgorithm;
         $this->kdfIterations = $kdfIterations;
+        $this->kdfMemory = $kdfMemory;
+        $this->kdfParallelism = $kdfParallelism;
         $this->kdfSalt = $kdfSalt;
         $this->protectedKey = $protectedKey;
         $this->updatedAt = new \DateTimeImmutable();
@@ -94,6 +121,16 @@ class Vault
     public function getKdfIterations(): int
     {
         return $this->kdfIterations;
+    }
+
+    public function getKdfMemory(): ?int
+    {
+        return $this->kdfMemory;
+    }
+
+    public function getKdfParallelism(): ?int
+    {
+        return $this->kdfParallelism;
     }
 
     public function getKdfSalt(): string

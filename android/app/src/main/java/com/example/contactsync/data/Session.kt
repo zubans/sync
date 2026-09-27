@@ -44,8 +44,13 @@ class Session(context: Context) {
         get() = prefs.getString(KEY_APPS_BACKUP_SUMMARY, null)
         set(value) = prefs.edit().putString(KEY_APPS_BACKUP_SUMMARY, value).apply()
 
+    /** После входа контакты ещё не восстановлены (переживает перезапуск приложения). */
+    var restorePending: Boolean
+        get() = prefs.getBoolean(KEY_RESTORE_PENDING, false)
+        set(value) = prefs.edit().putBoolean(KEY_RESTORE_PENDING, value).apply()
+
     fun signIn(token: String, user: UserDto) {
-        prefs.edit().putString(KEY_TOKEN, token).apply()
+        prefs.edit().putString(KEY_TOKEN, token).putBoolean(KEY_RESTORE_PENDING, true).apply()
         updateUser(user)
     }
 
@@ -69,6 +74,7 @@ class Session(context: Context) {
             .remove(KEY_LAST_SUMMARY)
             .remove(KEY_APPS_BACKUP_AT)
             .remove(KEY_APPS_BACKUP_SUMMARY)
+            .remove(KEY_RESTORE_PENDING)
             .apply()
     }
 
@@ -83,5 +89,6 @@ class Session(context: Context) {
         const val KEY_LAST_SUMMARY = "last_sync_summary"
         const val KEY_APPS_BACKUP_AT = "apps_backup_at"
         const val KEY_APPS_BACKUP_SUMMARY = "apps_backup_summary"
+        const val KEY_RESTORE_PENDING = "restore_pending"
     }
 }

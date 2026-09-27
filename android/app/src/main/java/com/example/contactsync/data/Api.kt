@@ -90,6 +90,8 @@ data class VaultKeyDto(
     val kdfSalt: String,
     val protectedKey: String,
     val revision: Int = 0,
+    val kdfMemory: Int? = null,
+    val kdfParallelism: Int? = null,
 )
 
 @Serializable

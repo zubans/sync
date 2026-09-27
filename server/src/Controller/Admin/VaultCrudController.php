@@ -53,7 +53,8 @@ final class VaultCrudController extends AbstractCrudController
             ->setSortable(false);
         yield IntegerField::new('revision', 'Изменений');
         yield TextField::new('kdfAlgorithm', 'KDF')->onlyOnDetail();
-        yield IntegerField::new('kdfIterations', 'Итераций KDF')->onlyOnDetail();
+        yield IntegerField::new('kdfIterations', 'Итераций / проходов KDF')->onlyOnDetail();
+        yield IntegerField::new('kdfMemory', 'Память KDF, КиБ')->onlyOnDetail();
         yield DateTimeField::new('createdAt', 'Создано');
         yield DateTimeField::new('updatedAt', 'Изменено');
     }

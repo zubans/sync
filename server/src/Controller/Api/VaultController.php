@@ -48,19 +48,19 @@ final class VaultController extends AbstractController
             return $this->json(['error' => 'Хранилище уже создано.'], Response::HTTP_CONFLICT);
         }
 
-        $vault = new Vault($user, $input->kdfAlgorithm, $input->kdfIterations, $input->kdfSalt, $input->protectedKey);
+        $vault = new Vault($user, $input->kdfAlgorithm, $input->kdfIterations, $input->kdfSalt, $input->protectedKey, $input->kdfMemory, $input->kdfParallelism);
         $this->em->persist($vault);
         $this->em->flush();
 
         return $this->json(self::keyView($vault), Response::HTTP_CREATED);
     }
 
-    /** Смена мастер-пароля: клиент перешифровал ключ хранилища новым паролем. */
+    /** Смена мастер-пароля или параметров KDF: клиент перешифровал ключ хранилища. */
     #[Route('/key', name: 'api_vault_rekey', methods: ['PUT'])]
     public function rekey(#[CurrentUser] User $user, #[MapRequestPayload] VaultKeyInput $input): JsonResponse
     {
         $vault = $this->requireVault($user);
-        $vault->setKey($input->kdfAlgorithm, $input->kdfIterations, $input->kdfSalt, $input->protectedKey);
+        $vault->setKey($input->kdfAlgorithm, $input->kdfIterations, $input->kdfSalt, $input->protectedKey, $input->kdfMemory, $input->kdfParallelism);
         $this->em->flush();
 
         return $this->json(self::keyView($vault));
@@ -118,6 +118,8 @@ final class VaultController extends AbstractController
         return [
             'kdfAlgorithm' => $vault->getKdfAlgorithm(),
             'kdfIterations' => $vault->getKdfIterations(),
+            'kdfMemory' => $vault->getKdfMemory(),
+            'kdfParallelism' => $vault->getKdfParallelism(),
             'kdfSalt' => $vault->getKdfSalt(),
             'protectedKey' => $vault->getProtectedKey(),
             'revision' => $vault->getRevision(),

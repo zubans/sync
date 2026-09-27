@@ -5,15 +5,19 @@ import com.example.contactsync.data.VaultItemDto
 import com.example.contactsync.data.VaultItemsResponse
 import com.example.contactsync.data.VaultKeyDto
 import com.example.contactsync.data.VaultPushResponse
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.IOException
 import java.util.UUID
 import javax.crypto.AEADBadTagException
 import javax.crypto.SecretKey
@@ -46,7 +50,8 @@ interface VaultBackend {
 class VaultRepository(
     private val store: VaultStorage,
     private val api: VaultBackend,
-    private val kdfIterations: Int = VaultCrypto.KDF_ITERATIONS,
+    /** С какими параметрами KDF создавать хранилище и менять мастер-пароль. */
+    private val kdf: KdfParams = KdfParams.DEFAULT,
     /** Разблокировка по отпечатку; null — недоступна (в тестах). */
     val biometric: BiometricUnlock? = null,
 ) {
@@ -85,23 +90,46 @@ class VaultRepository(
         val salt = VaultCrypto.newSalt()
         val vaultKey = VaultCrypto.newVaultKey()
         val protectedKey = withContext(Dispatchers.Default) {
-            VaultCrypto.wrapKey(VaultCrypto.deriveMasterKey(masterPassword, salt, kdfIterations), vaultKey)
+            VaultCrypto.wrapKey(VaultCrypto.deriveMasterKey(masterPassword, salt, kdf), vaultKey)
         }
-        val created = api.createVault(VaultKeyDto(VaultCrypto.KDF_ALGORITHM, kdfIterations, salt, protectedKey))
+        val created = api.createVault(keyDto(salt, protectedKey))
         store.save(VaultSnapshot(key = created))
         setUnlocked(vaultKey)
     }
 
     suspend fun unlock(masterPassword: CharArray) {
-        val params = store.load().key ?: refreshKey() ?: error("Хранилище не создано")
-        val key = withContext(Dispatchers.Default) {
+        val cached = store.load().key ?: refreshKey() ?: error("Хранилище не создано")
+        var params = cached
+        val key = try {
+            unwrap(masterPassword, cached)
+        } catch (e: WrongMasterPasswordException) {
+            // Мастер-пароль могли сменить на другом устройстве, а здесь ещё старые параметры ключа.
+            val fresh = runCatching { refreshKey() }.getOrNull()
+            if (fresh == null || fresh == cached) throw e
+            params = fresh
+            unwrap(masterPassword, fresh)
+        }
+        // Хранилище со старыми параметрами KDF (например, PBKDF2) переводим на текущие тем же мастер-паролем.
+        // Делаем до открытия: вызывающий экран после разблокировки уходит, и его корутина отменяется.
+        // Не вышло (нет сети) — попробуем при следующей разблокировке.
+        if (KdfParams.of(params) != kdf) {
             try {
-                VaultCrypto.unwrapKey(VaultCrypto.deriveMasterKey(masterPassword, params.kdfSalt, params.kdfIterations), params.protectedKey)
-            } catch (e: AEADBadTagException) {
-                throw WrongMasterPasswordException()
+                withTimeout(UPGRADE_TIMEOUT_MS) { rewrap(key, masterPassword) }
+            } catch (e: CancellationException) {
+                if (e !is TimeoutCancellationException) throw e
+            } catch (e: IOException) {
+                // Нет сети — повторим в следующий раз.
             }
         }
         setUnlocked(key)
+    }
+
+    private suspend fun unwrap(masterPassword: CharArray, params: VaultKeyDto): SecretKey = withContext(Dispatchers.Default) {
+        try {
+            VaultCrypto.unwrapKey(VaultCrypto.deriveMasterKey(masterPassword, params.kdfSalt, KdfParams.of(params)), params.protectedKey)
+        } catch (e: AEADBadTagException) {
+            throw WrongMasterPasswordException()
+        }
     }
 
     /** Разблокировка ключом, полученным по отпечатку. */
@@ -114,15 +142,28 @@ class VaultRepository(
     }
 
     /** Смена мастер-пароля: ключ хранилища тот же, записи не перешифровываются. */
-    suspend fun changeMasterPassword(newPassword: CharArray) = mutex.withLock {
-        val key = key() ?: error("Хранилище заблокировано")
+    suspend fun changeMasterPassword(newPassword: CharArray) {
+        rewrap(key() ?: error("Хранилище заблокировано"), newPassword)
+    }
+
+    /** Заново шифрует ключ хранилища ключом из [password] с текущими параметрами KDF. */
+    private suspend fun rewrap(key: SecretKey, password: CharArray) = mutex.withLock {
         val salt = VaultCrypto.newSalt()
         val protectedKey = withContext(Dispatchers.Default) {
-            VaultCrypto.wrapKey(VaultCrypto.deriveMasterKey(newPassword, salt, kdfIterations), key)
+            VaultCrypto.wrapKey(VaultCrypto.deriveMasterKey(password, salt, kdf), key)
         }
-        val updated = api.rekeyVault(VaultKeyDto(VaultCrypto.KDF_ALGORITHM, kdfIterations, salt, protectedKey))
+        val updated = api.rekeyVault(keyDto(salt, protectedKey))
         store.update { it.copy(key = updated) }
     }
+
+    private fun keyDto(salt: String, protectedKey: String) = VaultKeyDto(
+        kdfAlgorithm = kdf.algorithm,
+        kdfIterations = kdf.iterations,
+        kdfSalt = salt,
+        protectedKey = protectedKey,
+        kdfMemory = kdf.memoryKiB,
+        kdfParallelism = kdf.parallelism,
+    )
 
     /** Сброс (забыт мастер-пароль): удаляет хранилище на сервере и на устройстве. */
     suspend fun reset() = mutex.withLock {
@@ -297,6 +338,7 @@ class VaultRepository(
         /** Автоблокировка после 5 минут бездействия. */
         const val AUTO_LOCK_MS = 5 * 60 * 1000L
         private const val MAX_PUSH_ROUNDS = 3
+        private const val UPGRADE_TIMEOUT_MS = 15_000L
         private val DROP = PendingChange(null)
     }
 }

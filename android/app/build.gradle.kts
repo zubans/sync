@@ -54,6 +54,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.biometric)
+    implementation(libs.bouncycastle)
+    implementation(libs.androidx.fragment.ktx)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
 }

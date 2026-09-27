@@ -47,8 +47,31 @@ final class VaultApiTest extends DatabaseWebTestCase
     public function testWeakKdfIsRejected(): void
     {
         $this->api('POST', '/api/vault', ['kdfIterations' => 1000] + self::KEY, $this->token);
-
         self::assertResponseStatusCodeSame(422);
+
+        $argon = ['kdfAlgorithm' => 'argon2id', 'kdfIterations' => 2, 'kdfMemory' => 19456, 'kdfParallelism' => 1] + self::KEY;
+        $this->api('POST', '/api/vault', ['kdfMemory' => 1024] + $argon, $this->token);
+        self::assertResponseStatusCodeSame(422);
+        $this->api('POST', '/api/vault', ['kdfIterations' => 1] + $argon, $this->token);
+        self::assertResponseStatusCodeSame(422);
+        $this->api('POST', '/api/vault', ['kdfMemory' => null] + $argon, $this->token);
+        self::assertResponseStatusCodeSame(422);
+    }
+
+    public function testArgon2idVaultAndUpgradeFromPbkdf2(): void
+    {
+        $this->createVault();
+
+        // Клиент перешифровал ключ хранилища тем же мастер-паролем, но через Argon2id.
+        $argon = ['kdfAlgorithm' => 'argon2id', 'kdfIterations' => 2, 'kdfMemory' => 19456, 'kdfParallelism' => 1] + self::KEY;
+        $this->api('PUT', '/api/vault/key', $argon, $this->token);
+        self::assertResponseIsSuccessful();
+
+        $vault = $this->api('GET', '/api/vault', token: $this->token);
+        self::assertSame('argon2id', $vault['kdfAlgorithm']);
+        self::assertSame(19456, $vault['kdfMemory']);
+        self::assertSame(1, $vault['kdfParallelism']);
+        self::assertSame(2, $vault['kdfIterations']);
     }
 
     public function testConcurrentEditProducesConflictWithCurrentVersion(): void

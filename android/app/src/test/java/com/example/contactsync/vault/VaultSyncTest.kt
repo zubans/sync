@@ -61,10 +61,15 @@ private class MemoryStorage : VaultStorage {
 
 class VaultSyncTest {
 
+    private companion object {
+        /** Настоящий Argon2id, но лёгкий — чтобы тесты шли быстро. */
+        val LIGHT_ARGON2 = KdfParams(VaultCrypto.KDF_ARGON2ID, iterations = 1, memoryKiB = 64, parallelism = 1)
+    }
+
     private val server = FakeServer()
     private val master = "master-password".toCharArray()
 
-    private fun device() = VaultRepository(MemoryStorage(), server, kdfIterations = 1000)
+    private fun device(kdf: KdfParams = LIGHT_ARGON2) = VaultRepository(MemoryStorage(), server, kdf = kdf)
 
     private fun login(password: String, at: Long) =
         VaultEntry("Example", "anna", password, listOf("https://example.com"), createdAt = 1, modifiedAt = at, passwordChangedAt = at)
@@ -160,6 +165,37 @@ class VaultSyncTest {
         b.sync()
 
         assertThrows(WrongMasterPasswordException::class.java) { runBlocking { b.unlock(master) } }
+        b.unlock("new-master".toCharArray())
+        assertEquals("v1", b.records.value.single().entry.password)
+    }
+
+    @Test
+    fun `legacy pbkdf2 vault is upgraded to argon2id on unlock`() = runBlocking {
+        val old = device(KdfParams(VaultCrypto.KDF_PBKDF2, iterations = 1000)).apply { setUp(master) }
+        val id = old.upsert(null, login("v1", 10))
+        old.sync()
+        assertEquals(VaultCrypto.KDF_PBKDF2, server.key!!.kdfAlgorithm)
+
+        // Новая версия приложения разблокирует тем же паролем и переводит ключ на Argon2id.
+        val upgraded = device().apply { unlock(master) }
+        assertEquals(VaultCrypto.KDF_ARGON2ID, server.key!!.kdfAlgorithm)
+        upgraded.sync()
+        assertEquals("v1", upgraded.records.value.single { it.id == id }.entry.password)
+
+        // Другие устройства открывают его тем же мастер-паролем уже через Argon2id.
+        val other = device()
+        other.sync()
+        other.unlock(master)
+        assertEquals("v1", other.records.value.single().entry.password)
+    }
+
+    @Test
+    fun `new master password works on a phone that has not synced yet`() = runBlocking {
+        val (a, b, _) = twoDevices()
+        a.changeMasterPassword("new-master".toCharArray())
+        b.lock()
+
+        // b не синхронизировался и держит старые параметры ключа — новый пароль всё равно подходит.
         b.unlock("new-master".toCharArray())
         assertEquals("v1", b.records.value.single().entry.password)
     }

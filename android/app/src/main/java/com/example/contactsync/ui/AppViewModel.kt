@@ -53,7 +53,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         app.engine.clearLocalState()
         app.vault.clearLocal()
         session.signIn(response.token, response.user)
-        _state.update { snapshot().copy(pendingRestore = true) }
         null
     }
 
@@ -62,14 +61,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val restore = _state.value.pendingRestore
         launchTask {
             val report = if (restore) app.engine.restoreAndSync() else app.engine.sync()
+            session.restorePending = false
             if (session.backgroundSync) SyncScheduler.enable(app)
-            _state.update { it.copy(pendingRestore = false, googleAccounts = report.googleAccounts) }
-            report.summary()
+            _state.update { it.copy(googleAccounts = report.googleAccounts) }
+            // Итог уже показан в карточке (lastSyncSummary) — отдельное сообщение его бы дублировало.
+            null
         }
     }
 
     fun restore() {
-        launchTask { app.engine.restoreAndSync().summary() }
+        launchTask {
+            app.engine.restoreAndSync()
+            null
+        }
     }
 
     fun onPermissionsDenied() {
@@ -102,7 +106,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val message = block()
-                _state.update { snapshot().copy(pendingRestore = it.pendingRestore, googleAccounts = it.googleAccounts, message = message) }
+                _state.update { snapshot().copy(googleAccounts = it.googleAccounts, message = message) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: UnauthorizedException) {
@@ -123,5 +127,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         backgroundSync = session.backgroundSync,
         lastSyncAt = session.lastSyncAt,
         lastSyncSummary = session.lastSyncSummary,
+        pendingRestore = session.isLoggedIn && session.restorePending,
     )
 }

@@ -1,5 +1,8 @@
 package com.example.contactsync.vault
 
+import com.example.contactsync.data.VaultKeyDto
+import org.bouncycastle.crypto.generators.Argon2BytesGenerator
+import org.bouncycastle.crypto.params.Argon2Parameters
 import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Cipher
@@ -10,9 +13,25 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
+ * Параметры получения мастер-ключа из мастер-пароля. Хранятся на сервере вместе с хранилищем,
+ * поэтому их можно усилить позже, а старые хранилища — перевести на новые параметры.
+ */
+data class KdfParams(val algorithm: String, val iterations: Int, val memoryKiB: Int? = null, val parallelism: Int? = null) {
+    companion object {
+        /**
+         * Argon2id по рекомендации OWASP (19 МиБ, 2 прохода, 1 поток). На слабом планшете (MT8788) — ~0,5 с,
+         * тогда как PBKDF2 с 600 000 итераций — ~7 с при меньшей стойкости к подбору на GPU.
+         */
+        val DEFAULT = KdfParams(VaultCrypto.KDF_ARGON2ID, iterations = 2, memoryKiB = 19456, parallelism = 1)
+
+        fun of(key: VaultKeyDto) = KdfParams(key.kdfAlgorithm, key.kdfIterations, key.kdfMemory, key.kdfParallelism)
+    }
+}
+
+/**
  * Криптография хранилища.
  *
- * - мастер-ключ = PBKDF2-HMAC-SHA256(мастер-пароль, соль, итерации); из устройства не уходит;
+ * - мастер-ключ = Argon2id(мастер-пароль, соль) (у старых хранилищ — PBKDF2-HMAC-SHA256); из устройства не уходит;
  * - ключ хранилища — случайный AES-256; на сервере лежит зашифрованным мастер-ключом («обёртка»);
  * - записи шифруются ключом хранилища AES-256-GCM, id записи идёт в AAD —
  *   шифротекст одной записи нельзя незаметно подставить на место другой.
@@ -21,8 +40,8 @@ import javax.crypto.spec.SecretKeySpec
  */
 object VaultCrypto {
 
-    const val KDF_ALGORITHM = "pbkdf2-sha256"
-    const val KDF_ITERATIONS = 600_000
+    const val KDF_ARGON2ID = "argon2id"
+    const val KDF_PBKDF2 = "pbkdf2-sha256"
 
     private const val IV_BYTES = 12
     private const val TAG_BITS = 128
@@ -35,8 +54,31 @@ object VaultCrypto {
 
     fun newVaultKey(): SecretKey = SecretKeySpec(randomBytes(32), "AES")
 
-    fun deriveMasterKey(password: CharArray, saltB64: String, iterations: Int): SecretKey {
-        val spec = PBEKeySpec(password, unb64(saltB64), iterations, 256)
+    fun deriveMasterKey(password: CharArray, saltB64: String, params: KdfParams): SecretKey = when (params.algorithm) {
+        KDF_ARGON2ID -> argon2id(password, unb64(saltB64), params)
+        KDF_PBKDF2 -> pbkdf2(password, unb64(saltB64), params.iterations)
+        else -> throw IllegalArgumentException("Неизвестный KDF: ${params.algorithm}")
+    }
+
+    private fun argon2id(password: CharArray, salt: ByteArray, params: KdfParams): SecretKey {
+        val generator = Argon2BytesGenerator().apply {
+            init(
+                Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
+                    .withVersion(Argon2Parameters.ARGON2_VERSION_13)
+                    .withSalt(salt)
+                    .withIterations(params.iterations)
+                    .withMemoryAsKB(requireNotNull(params.memoryKiB) { "Не задана память Argon2id" })
+                    .withParallelism(params.parallelism ?: 1)
+                    .build(),
+            )
+        }
+        val key = ByteArray(32)
+        generator.generateBytes(password, key)
+        return SecretKeySpec(key, "AES")
+    }
+
+    private fun pbkdf2(password: CharArray, salt: ByteArray, iterations: Int): SecretKey {
+        val spec = PBEKeySpec(password, salt, iterations, 256)
         try {
             val bytes = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
             return SecretKeySpec(bytes, "AES")
