@@ -1,0 +1,139 @@
+package com.example.contactsync.sync
+
+import com.example.contactsync.contacts.ContactData
+import com.example.contactsync.contacts.Fingerprint
+import com.example.contactsync.contacts.LocalContact
+import com.example.contactsync.data.ContactUpload
+import com.example.contactsync.data.ServerContact
+
+fun ServerContact.toData() = ContactData(name, phones, emails)
+
+val ServerContact.fingerprint: String get() = Fingerprint.of(name, phones, emails)
+
+/** Что сделать, чтобы восстановить личные контакты с сервера. */
+data class RestorePlan(
+    /** Контактов нет на телефоне — создать. */
+    val toInsert: List<ServerContact>,
+    /** Уже есть на телефоне (по отпечатку) — только запомнить соответствие rawId → serverId. */
+    val matched: Map<Long, String>,
+)
+
+/** Что сделать, чтобы семейные контакты на телефоне совпали с серверными. */
+data class FamilyPlan(
+    val toInsert: List<ServerContact>,
+    /** rawId → новые данные (контакт создан нами и изменён в админке). */
+    val toUpdate: Map<Long, ServerContact>,
+    /** raw-контакты, созданные нами для семейных контактов, которых больше нет. */
+    val toDelete: List<Long>,
+    /** Соответствия, которые остаются (без учёта вставок — их id известны только после записи). */
+    val keep: Map<String, FamilyEntry>,
+)
+
+/**
+ * Чистая логика сопоставления контактов телефона и сервера — без Android API, покрыта unit-тестами.
+ */
+object SyncPlanner {
+
+    fun planRestore(
+        server: List<ServerContact>,
+        local: List<LocalContact>,
+        mappings: Mappings,
+    ): RestorePlan {
+        val localRawIds = local.flatMap { it.rawContactIds }.toSet()
+        val alreadyOnPhone = mappings.personal.filterKeys { it in localRawIds }.values.toSet()
+        val familyRawIds = mappings.family.values.map { it.rawContactId }.toSet()
+        val byFingerprint = local.groupBy { it.fingerprint }
+
+        val toInsert = mutableListOf<ServerContact>()
+        val matched = mutableMapOf<Long, String>()
+        val usedContacts = mutableSetOf<Long>()
+        for (contact in server) {
+            if (contact.serverId in alreadyOnPhone) continue
+            val twin = byFingerprint[contact.fingerprint]?.firstOrNull { it.contactId !in usedContacts }
+            when {
+                twin == null || twin.rawContactIds.isEmpty() -> toInsert += contact
+                // Такой же контакт уже лежит на телефоне как семейный — второй не нужен.
+                twin.rawContactIds.any { it in familyRawIds } -> usedContacts += twin.contactId
+                else -> {
+                    usedContacts += twin.contactId
+                    twin.rawContactIds.forEach { matched[it] = contact.serverId }
+                }
+            }
+        }
+        return RestorePlan(toInsert, matched)
+    }
+
+    fun planFamily(
+        server: List<ServerContact>,
+        local: List<LocalContact>,
+        current: Map<String, FamilyEntry>,
+    ): FamilyPlan {
+        val localRawIds = local.flatMap { it.rawContactIds }.toSet()
+        val serverIds = server.map { it.serverId }.toSet()
+        val usedRawIds = current.values.map { it.rawContactId }.toMutableSet()
+        // Совпавший по отпечатку контакт телефона (в т. ч. личный) становится копией семейного,
+        // чтобы не держать на телефоне дубль. Из личных он при следующей выгрузке уйдёт.
+        val candidates = local
+            .filter { c -> c.rawContactIds.none { it in usedRawIds } }
+            .groupBy { it.fingerprint }
+            .mapValues { it.value.toMutableList() }
+
+        val toInsert = mutableListOf<ServerContact>()
+        val toUpdate = mutableMapOf<Long, ServerContact>()
+        val toDelete = mutableListOf<Long>()
+        val keep = mutableMapOf<String, FamilyEntry>()
+
+        for ((serverId, entry) in current) {
+            if (serverId !in serverIds && entry.createdByUs && entry.rawContactId in localRawIds) {
+                toDelete += entry.rawContactId
+            }
+        }
+
+        for (contact in server) {
+            val entry = current[contact.serverId]?.takeIf { it.rawContactId in localRawIds }
+            when {
+                entry == null -> {
+                    val twin = candidates[contact.fingerprint]?.removeFirstOrNull()
+                    if (twin != null && twin.rawContactIds.isNotEmpty()) {
+                        keep[contact.serverId] = FamilyEntry(twin.rawContactIds.first(), contact.updatedAt, createdByUs = false)
+                    } else {
+                        toInsert += contact
+                    }
+                }
+                entry.updatedAt != contact.updatedAt && entry.createdByUs -> {
+                    toUpdate[entry.rawContactId] = contact
+                    keep[contact.serverId] = entry.copy(updatedAt = contact.updatedAt)
+                }
+                else -> keep[contact.serverId] = entry.copy(updatedAt = contact.updatedAt)
+            }
+        }
+        return FamilyPlan(toInsert, toUpdate, toDelete, keep)
+    }
+
+    /** Личные контакты для выгрузки: всё, кроме копий семейных контактов. */
+    fun buildUpload(local: List<LocalContact>, mappings: Mappings): List<ContactUpload> {
+        val familyRawIds = mappings.family.values.map { it.rawContactId }.toSet()
+        return local
+            .filter { c -> c.rawContactIds.none { it in familyRawIds } }
+            .map { c ->
+                ContactUpload(
+                    externalId = c.lookupKey,
+                    serverId = c.rawContactIds.firstNotNullOfOrNull { mappings.personal[it] },
+                    name = c.name,
+                    phones = c.phones,
+                    emails = c.emails,
+                )
+            }
+    }
+
+    /** Обновляет соответствие rawId → serverId по ответу сервера на выгрузку. */
+    fun applyLinks(
+        local: List<LocalContact>,
+        links: Map<String, String>,
+    ): Map<Long, String> = buildMap {
+        for (contact in local) {
+            val serverId = links[contact.lookupKey] ?: continue
+            contact.rawContactIds.forEach { put(it, serverId) }
+        }
+    }
+}
