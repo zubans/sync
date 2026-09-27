@@ -17,6 +17,9 @@ object SyncScheduler {
 
     private const val PERIODIC = "sync-periodic"
     private const val ON_CHANGE = "sync-on-contacts-change"
+    private const val VAULT_NOW = "vault-sync-now"
+    private const val APPS_PERIODIC = "apps-backup-periodic"
+    private const val APPS_NOW = "apps-backup-now"
 
     private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
@@ -27,14 +30,47 @@ object SyncScheduler {
             .build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, periodic)
         observeContacts(context, ExistingWorkPolicy.KEEP)
+
+        // APK — тяжёлые файлы: раз в сутки, только по Wi-Fi и на зарядке.
+        val apps = PeriodicWorkRequestBuilder<ApkBackupWorker>(1, TimeUnit.DAYS)
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.UNMETERED)
+                    .setRequiresCharging(true)
+                    .build(),
+            )
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 15, TimeUnit.MINUTES)
+            .build()
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(APPS_PERIODIC, ExistingPeriodicWorkPolicy.KEEP, apps)
     }
 
     fun disable(context: Context) {
         WorkManager.getInstance(context).apply {
             cancelUniqueWork(PERIODIC)
             cancelUniqueWork(ON_CHANGE)
+            cancelUniqueWork(APPS_PERIODIC)
         }
     }
+
+    /** Отправить правки хранилища сразу, как будет сеть. */
+    fun syncVaultNow(context: Context) {
+        val request = OneTimeWorkRequestBuilder<VaultSyncWorker>()
+            .setConstraints(network)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(VAULT_NOW, ExistingWorkPolicy.REPLACE, request)
+    }
+
+    /** Бэкап приложений по кнопке: только Wi-Fi, без требования зарядки. */
+    fun backupAppsNow(context: Context) {
+        val request = OneTimeWorkRequestBuilder<ApkBackupWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 1, TimeUnit.MINUTES)
+            .build()
+        WorkManager.getInstance(context).enqueueUniqueWork(APPS_NOW, ExistingWorkPolicy.KEEP, request)
+    }
+
+    fun appsBackupState(context: Context) = WorkManager.getInstance(context).getWorkInfosForUniqueWorkFlow(APPS_NOW)
 
     /**
      * Синхронизация после изменения контактов. Задержки собирают серию правок в один запуск.

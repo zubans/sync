@@ -3,6 +3,7 @@
 namespace App\Tests;
 
 use App\Entity\User;
+use Doctrine\DBAL\Platforms\SQLitePlatform;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Tools\SchemaTool;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
@@ -25,9 +26,14 @@ abstract class DatabaseWebTestCase extends WebTestCase
         $metadata = $this->em->getMetadataFactory()->getAllMetadata();
         // В SQLite с включёнными внешними ключами таблицы не удалить в произвольном порядке.
         $connection = $this->em->getConnection();
-        $connection->executeStatement('PRAGMA foreign_keys = OFF');
+        $sqlite = $connection->getDatabasePlatform() instanceof SQLitePlatform;
+        if ($sqlite) {
+            $connection->executeStatement('PRAGMA foreign_keys = OFF');
+        }
         $schemaTool->dropDatabase();
-        $connection->executeStatement('PRAGMA foreign_keys = ON');
+        if ($sqlite) {
+            $connection->executeStatement('PRAGMA foreign_keys = ON');
+        }
         $schemaTool->createSchema($metadata);
     }
 

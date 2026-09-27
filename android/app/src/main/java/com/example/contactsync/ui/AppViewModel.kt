@@ -51,6 +51,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun authenticate(call: suspend () -> AuthResponse) = launchTask {
         val response = call()
         app.engine.clearLocalState()
+        app.vault.clearLocal()
         session.signIn(response.token, response.user)
         _state.update { snapshot().copy(pendingRestore = true) }
         null
@@ -91,9 +92,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissMessage() = _state.update { it.copy(message = null, error = null) }
 
     private fun signOutLocally(error: String? = null) {
-        SyncScheduler.disable(app)
-        session.signOut()
-        app.engine.clearLocalState()
+        app.clearAccountData()
         _state.value = snapshot().copy(error = error)
     }
 

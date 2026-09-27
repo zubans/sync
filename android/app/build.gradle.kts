@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.contactsync"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
@@ -53,6 +53,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.androidx.biometric)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
 }

@@ -36,6 +36,14 @@ class Session(context: Context) {
         get() = prefs.getString(KEY_LAST_SUMMARY, null)
         set(value) = prefs.edit().putString(KEY_LAST_SUMMARY, value).apply()
 
+    var lastAppsBackupAt: Long
+        get() = prefs.getLong(KEY_APPS_BACKUP_AT, 0)
+        set(value) = prefs.edit().putLong(KEY_APPS_BACKUP_AT, value).apply()
+
+    var lastAppsBackupSummary: String?
+        get() = prefs.getString(KEY_APPS_BACKUP_SUMMARY, null)
+        set(value) = prefs.edit().putString(KEY_APPS_BACKUP_SUMMARY, value).apply()
+
     fun signIn(token: String, user: UserDto) {
         prefs.edit().putString(KEY_TOKEN, token).apply()
         updateUser(user)
@@ -59,6 +67,8 @@ class Session(context: Context) {
             .remove(KEY_FAMILY)
             .remove(KEY_LAST_SYNC_AT)
             .remove(KEY_LAST_SUMMARY)
+            .remove(KEY_APPS_BACKUP_AT)
+            .remove(KEY_APPS_BACKUP_SUMMARY)
             .apply()
     }
 
@@ -71,5 +81,7 @@ class Session(context: Context) {
         const val KEY_BACKGROUND = "background_sync"
         const val KEY_LAST_SYNC_AT = "last_sync_at"
         const val KEY_LAST_SUMMARY = "last_sync_summary"
+        const val KEY_APPS_BACKUP_AT = "apps_backup_at"
+        const val KEY_APPS_BACKUP_SUMMARY = "apps_backup_summary"
     }
 }

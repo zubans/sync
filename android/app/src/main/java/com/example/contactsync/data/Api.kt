@@ -1,5 +1,6 @@
 package com.example.contactsync.data
 
+import com.example.contactsync.vault.VaultBackend
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -78,7 +79,83 @@ data class FamilyContactsResponse(val family: FamilyDto? = null, val contacts: L
 class UnauthorizedException : IOException("Сессия истекла, войдите заново")
 
 /** Ошибка, текст которой можно показать пользователю. */
-class ApiException(message: String) : IOException(message)
+class ApiException(message: String, val code: Int = 0) : IOException(message)
+
+// --- Хранилище паролей ---
+
+@Serializable
+data class VaultKeyDto(
+    val kdfAlgorithm: String,
+    val kdfIterations: Int,
+    val kdfSalt: String,
+    val protectedKey: String,
+    val revision: Int = 0,
+)
+
+@Serializable
+data class VaultItemDto(val id: String, val revision: Int, val data: String? = null, val deleted: Boolean = false)
+
+@Serializable
+data class VaultItemsResponse(val revision: Int, val items: List<VaultItemDto>)
+
+@Serializable
+data class VaultChange(val id: String, val baseRevision: Int?, val data: String?, val deleted: Boolean)
+
+@Serializable
+data class VaultChangesRequest(val changes: List<VaultChange>)
+
+@Serializable
+data class VaultChangeResult(
+    val id: String,
+    val status: String,
+    val revision: Int = 0,
+    val current: VaultItemDto? = null,
+    val error: String? = null,
+)
+
+@Serializable
+data class VaultPushResponse(val revision: Int, val results: List<VaultChangeResult>)
+
+// --- Резервные копии приложений ---
+
+@Serializable
+data class ApkFileDto(val name: String, val sha256: String, val size: Long)
+
+@Serializable
+data class AppDto(
+    val packageName: String,
+    val label: String? = null,
+    val versionName: String? = null,
+    val versionCode: Long,
+    val installer: String? = null,
+    val signingSha256: String? = null,
+    val files: List<ApkFileDto>,
+)
+
+@Serializable
+data class InventoryRequest(val device: DeviceDto, val apps: List<AppDto>)
+
+@Serializable
+data class InventoryResponse(val missing: List<String>)
+
+@Serializable
+data class BackedUpApp(
+    val packageName: String,
+    val label: String? = null,
+    val versionName: String? = null,
+    val versionCode: Long,
+    val fromPlay: Boolean,
+    val signingSha256: String? = null,
+    val files: List<ApkFileDto>,
+    val size: Long,
+    val backedUp: Boolean,
+)
+
+@Serializable
+data class AppsResponse(val apps: List<BackedUpApp>)
+
+@Serializable
+data class UploadState(val complete: Boolean = false, val offset: Long = 0)
 
 class Api(
     private val session: Session,
@@ -86,7 +163,7 @@ class Api(
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build(),
-) {
+) : VaultBackend {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
     suspend fun login(email: String, password: String): AuthResponse =
@@ -106,6 +183,63 @@ class Api(
     suspend fun personalContacts(): List<ServerContact> = get<ContactsResponse>("/api/contacts").contacts
 
     suspend fun familyContacts(): FamilyContactsResponse = get("/api/family/contacts")
+
+    /** null — хранилище ещё не создано. */
+    override suspend fun vault(): VaultKeyDto? = try {
+        get("/api/vault")
+    } catch (e: ApiException) {
+        if (e.code == 404) null else throw e
+    }
+
+    override suspend fun createVault(key: VaultKeyDto): VaultKeyDto = post("/api/vault", json.encodeToString(key))
+
+    override suspend fun rekeyVault(key: VaultKeyDto): VaultKeyDto =
+        execute(request("/api/vault/key", auth = true).put(json.encodeToString(key).toRequestBody(JSON)).build())
+
+    override suspend fun deleteVault() {
+        execute<JsonObject?>(request("/api/vault", auth = true).delete().build())
+    }
+
+    override suspend fun vaultItems(since: Int): VaultItemsResponse = get("/api/vault/items?since=$since")
+
+    override suspend fun pushVault(changes: List<VaultChange>): VaultPushResponse =
+        post("/api/vault/items", json.encodeToString(VaultChangesRequest(changes)))
+
+    suspend fun inventory(request: InventoryRequest): InventoryResponse =
+        post("/api/apps/inventory", json.encodeToString(request))
+
+    suspend fun backedUpApps(): List<BackedUpApp> = get<AppsResponse>("/api/apps").apps
+
+    suspend fun uploadState(sha256: String): UploadState = get("/api/apk/uploads/$sha256")
+
+    /** Отправляет часть файла. При неверном смещении сервер отвечает 409 с верным — его и возвращаем. */
+    suspend fun uploadChunk(sha256: String, offset: Long, bytes: ByteArray, length: Int): UploadState =
+        withContext(Dispatchers.IO) {
+            val request = request("/api/apk/uploads/$sha256?offset=$offset", auth = true)
+                .put(bytes.toRequestBody(OCTET, 0, length))
+                .build()
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                when {
+                    response.code == 401 -> throw UnauthorizedException()
+                    response.isSuccessful || response.code == 409 -> json.decodeFromString<UploadState>(body)
+                    else -> throw ApiException(errorMessage(response.code, body), response.code)
+                }
+            }
+        }
+
+    suspend fun completeUpload(sha256: String) {
+        post<JsonObject?>("/api/apk/uploads/$sha256/complete", "{}")
+    }
+
+    /** Скачивает APK в файл. */
+    suspend fun downloadApk(sha256: String, target: java.io.File) = withContext(Dispatchers.IO) {
+        client.newCall(request("/api/apk/$sha256", auth = true).get().build()).execute().use { response ->
+            if (response.code == 401) throw UnauthorizedException()
+            if (!response.isSuccessful) throw ApiException("Не удалось скачать APK (HTTP ${response.code})", response.code)
+            target.outputStream().use { out -> response.body!!.byteStream().copyTo(out) }
+        }
+    }
 
     private suspend inline fun <reified T> get(path: String): T =
         execute(request(path, auth = true).get().build())
@@ -129,7 +263,7 @@ class Api(
             val body = response.body?.string().orEmpty()
             when {
                 response.code == 401 && request.header("Authorization") != null -> throw UnauthorizedException()
-                !response.isSuccessful -> throw ApiException(errorMessage(response.code, body))
+                !response.isSuccessful -> throw ApiException(errorMessage(response.code, body), response.code)
                 body.isBlank() -> null as T
                 else -> json.decodeFromString<T>(body)
             }
@@ -146,5 +280,6 @@ class Api(
 
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
+        val OCTET = "application/octet-stream".toMediaType()
     }
 }

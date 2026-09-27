@@ -18,15 +18,18 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val observer = inputData.getBoolean(KEY_OBSERVER, false)
         try {
             if (!app.session.isLoggedIn || !app.session.backgroundSync) return Result.success()
-            if (!app.engine.hasPermissions()) return Result.success()
+            if (!app.engine.hasPermissions()) {
+                runCatching { app.vault.sync() }
+                return Result.success()
+            }
 
             app.engine.sync()
+            // Хранилище паролей — заодно: без ключа, только шифротекст. Его сбой не должен ломать контакты.
+            runCatching { app.vault.sync() }.onFailure { Log.w(TAG, "Хранилище не синхронизировано", it) }
             return Result.success()
         } catch (e: UnauthorizedException) {
             Log.w(TAG, "Токен отклонён, фоновая синхронизация остановлена")
-            app.session.signOut()
-            app.engine.clearLocalState()
-            SyncScheduler.disable(applicationContext)
+            app.clearAccountData()
             return Result.failure()
         } catch (e: IOException) {
             Log.w(TAG, "Сеть недоступна, повторим позже", e)
