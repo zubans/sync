@@ -4,7 +4,7 @@
 
 ```
 android/   Android-клиент (Kotlin, Jetpack Compose, WorkManager, OkHttp, Autofill Framework)
-server/    API и админка (PHP 8.2+, Symfony 7.4, Doctrine ORM, EasyAdmin 5)
+server/    API и админка (PHP 8.4+, Symfony 7.4, Doctrine ORM, EasyAdmin 5)
 docs/      Проектные документы
 ```
 
@@ -95,7 +95,42 @@ POST /api/sync
 
 ## Запуск сервера
 
-Нужны PHP 8.2+ (с `pdo_sqlite` или `pdo_pgsql`) и Composer.
+Нужны Docker (с Compose) и make. Сервер (Symfony на FrankenPHP) и PostgreSQL запускаются в контейнерах.
+
+```bash
+make up
+```
+
+При первом запуске `make up` сам создаёт `.env` в корне проекта со случайными `APP_SECRET` и паролем базы, собирает образ, поднимает контейнеры, применяет миграции и ждёт готовности сервера. API будет на http://localhost:8000, админка — на http://localhost:8000/admin.
+
+Первый администратор (пароль команда спросит):
+
+```bash
+make admin EMAIL=admin@example.com
+```
+
+Основные команды (полный список — `make help`):
+
+| Команда | Что делает |
+|---|---|
+| `make up` / `make down` | запустить / остановить; данные сохраняются в томах Docker |
+| `make restart` | перезапустить |
+| `make logs` | логи сервера и базы |
+| `make admin EMAIL=…` | создать администратора (или сменить пароль) |
+| `make user EMAIL=…` | создать пользователя (или сменить пароль) |
+| `make test` | тесты сервера в контейнере |
+| `make sh`, `make psql` | shell в контейнере сервера, консоль PostgreSQL |
+| `make clean CONFIRM=yes` | удалить контейнеры **и все данные** (база, сохранённые APK) |
+
+Настройки — в `.env` в корне проекта: `HTTP_PORT` (по умолчанию 8000), `APK_BACKUP_INCLUDE_PLAY` (сохранять ли APK приложений из Google Play). После правки `.env` выполните `make restart`.
+
+Данные лежат в томах Docker: `database_data` — PostgreSQL, `apk_storage` — сохранённые APK. Миграции применяются автоматически при каждом старте контейнера.
+
+Для продакшена сервер нужно поставить за обратный прокси с HTTPS: release-сборка клиента ходит только по HTTPS.
+
+### Без Docker
+
+Для разработки сервер можно запустить и локально: PHP 8.4+ с `pdo_sqlite` и Composer.
 
 ```bash
 cd server
@@ -105,32 +140,23 @@ php bin/console app:user:create admin@example.com --admin
 php -S 0.0.0.0:8000 -t public
 ```
 
-Админка: http://localhost:8000/admin.
-
-По умолчанию используется SQLite (`var/data_dev.db`). Для PostgreSQL укажите `DATABASE_URL` в `.env.local` и поднимите БД из `compose.yaml` (`docker compose up -d`). Миграции переносимые, они и тесты проверены на PostgreSQL 16.
-
-Настройки бэкапа приложений (`.env`): `APK_STORAGE_DIR` — где хранить APK, `APK_BACKUP_INCLUDE_PLAY` — сохранять ли APK приложений из Google Play (по умолчанию нет), `APK_MAX_SIZE` — предел на приложение.
-
-Для файлов APK на сотни мегабайт веб-серверу нужен лимит тела запроса не меньше 4 МБ (размер части загрузки). Для отдачи больших файлов лучше X-Sendfile / X-Accel-Redirect.
-
-`app:user:create` создаёт пользователя или меняет пароль существующему; `--admin` выдаёт роль администратора.
-
-Тесты: `php bin/phpunit`.
+Так используется SQLite (`var/data_dev.db`). Тесты: `php bin/phpunit`. Миграции переносимые: они и тесты проверены на SQLite и PostgreSQL 16.
 
 ## Запуск клиента
 
-Откройте `android/` в Android Studio или соберите из консоли:
+Клиент собирается локально (нужен Android SDK), не в Docker. Откройте `android/` в Android Studio или соберите из консоли:
 
 ```bash
-cd android
-./gradlew installDebug
+make install-apk
 ```
+
+Команда соберёт debug APK, поставит его на подключённое по USB устройство и пробросит на него порт сервера (`adb reverse`). В приложении укажите адрес `http://127.0.0.1:8000`. Проброс сбрасывается при переподключении устройства — тогда выполните `make reverse`.
 
 Unit-тесты (сопоставление контактов, шифрование, правила обновления паролей, синхронизация хранилища двух телефонов с фейковым сервером): `./gradlew testDebugUnitTest`.
 
 Минимальная версия Android — 8.0 (API 26): ниже нет Autofill Framework.
 
-Адрес сервера вводится на экране входа. По умолчанию — `http://10.0.2.2:8000` (хост-машина из эмулятора). Для реального телефона укажите IP компьютера в локальной сети. HTTP без TLS разрешён только в debug-сборке, release ходит только по HTTPS.
+Адрес сервера вводится на экране входа. По умолчанию — `http://10.0.2.2:8000` (хост-машина из эмулятора). Для телефона — `http://127.0.0.1:8000` через `make reverse` или IP компьютера в локальной сети. HTTP без TLS разрешён только в debug-сборке, release ходит только по HTTPS.
 
 Разрешения: `READ_CONTACTS`, `WRITE_CONTACTS`, `GET_ACCOUNTS` (запрашиваются сразу после входа); `QUERY_ALL_PACKAGES` и `REQUEST_INSTALL_PACKAGES` — для бэкапа и восстановления приложений; `USE_BIOMETRIC` — разблокировка паролей по отпечатку. Автозаполнение включается в системных настройках (кнопка на экране «Пароли»).
 

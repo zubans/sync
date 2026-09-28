@@ -1,0 +1,46 @@
+# Сервер Contact Sync и PostgreSQL. Управление — через make (см. make help).
+# Секреты берутся из .env в корне проекта (создаётся командой make init).
+
+services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Запустите make init}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-d", "app", "-U", "app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - database_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ./server
+      target: prod
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      APP_ENV: prod
+      APP_SECRET: ${APP_SECRET:?Запустите make init}
+      DATABASE_URL: postgresql://app:${POSTGRES_PASSWORD}@database:5432/app?serverVersion=16&charset=utf8
+      APK_STORAGE_DIR: /app/var/storage/apk
+      APK_BACKUP_INCLUDE_PLAY: ${APK_BACKUP_INCLUDE_PLAY:-0}
+      DEFAULT_URI: http://localhost:${HTTP_PORT:-8000}
+    ports:
+      - "${HTTP_PORT:-8000}:80"
+    volumes:
+      - apk_storage:/app/var/storage
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  database_data:
+  apk_storage:
+  caddy_data:
+  caddy_config:
