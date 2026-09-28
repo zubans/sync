@@ -69,7 +69,13 @@ clean: ## Удалить контейнеры и ВСЕ данные (база, 
 
 # --- Android-клиент (нужны Android SDK и подключённое устройство) ---
 
-apk: ## Собрать debug APK
+ANDROID_SDK ?= $(or $(ANDROID_HOME),$(ANDROID_SDK_ROOT),$(HOME)/Library/Android/sdk)
+
+android/local.properties:
+	@test -d "$(ANDROID_SDK)" || { echo "Android SDK не найден в $(ANDROID_SDK) — укажите ANDROID_SDK=/путь/к/sdk"; exit 1; }
+	echo "sdk.dir=$(ANDROID_SDK)" > $@
+
+apk: android/local.properties ## Собрать debug APK
 	cd android && ./gradlew assembleDebug
 
 install-apk: apk reverse ## Поставить APK на подключённое устройство
