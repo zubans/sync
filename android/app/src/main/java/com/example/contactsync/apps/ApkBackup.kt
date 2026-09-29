@@ -26,7 +26,7 @@ class ApkBackup(
 ) {
     private val inventory = AppInventory(context)
 
-    suspend fun run(onProgress: (String) -> Unit = {}): ApkBackupReport = withContext(Dispatchers.IO) {
+    suspend fun run(onProgress: suspend (String) -> Unit = {}): ApkBackupReport = withContext(Dispatchers.IO) {
         onProgress("Составляю список приложений…")
         val apps = inventory.collect()
         val missing = api.inventory(

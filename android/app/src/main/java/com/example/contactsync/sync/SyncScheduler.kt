@@ -9,7 +9,9 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.WorkQuery
 import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
@@ -20,6 +22,7 @@ object SyncScheduler {
     private const val VAULT_NOW = "vault-sync-now"
     private const val APPS_PERIODIC = "apps-backup-periodic"
     private const val APPS_NOW = "apps-backup-now"
+    private const val APPS_NOW_TAG = "apps-backup-manual"
 
     private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
@@ -64,13 +67,18 @@ object SyncScheduler {
     /** Бэкап приложений по кнопке: только Wi-Fi, без требования зарядки. */
     fun backupAppsNow(context: Context) {
         val request = OneTimeWorkRequestBuilder<ApkBackupWorker>()
+            .addTag(APPS_NOW_TAG)
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
             .setBackoffCriteria(BackoffPolicy.LINEAR, 1, TimeUnit.MINUTES)
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork(APPS_NOW, ExistingWorkPolicy.KEEP, request)
     }
 
-    fun appsBackupState(context: Context) = WorkManager.getInstance(context).getWorkInfosForUniqueWorkFlow(APPS_NOW)
+    /** Состояние бэкапа приложений: ручной запуск и ежесуточный. */
+    fun appsBackupState(context: Context) =
+        WorkManager.getInstance(context).getWorkInfosFlow(WorkQuery.fromUniqueWorkNames(APPS_NOW, APPS_PERIODIC))
+
+    fun isManualAppsBackup(info: WorkInfo) = APPS_NOW_TAG in info.tags
 
     /**
      * Синхронизация после изменения контактов. Задержки собирают серию правок в один запуск.

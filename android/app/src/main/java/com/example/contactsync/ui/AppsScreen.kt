@@ -37,6 +37,7 @@ import androidx.work.WorkInfo
 import com.example.contactsync.App
 import com.example.contactsync.apps.AppInventory
 import com.example.contactsync.data.BackedUpApp
+import com.example.contactsync.sync.ApkBackupWorker
 import com.example.contactsync.sync.SyncScheduler
 import kotlinx.coroutines.launch
 
@@ -52,7 +53,17 @@ fun AppsScreen() {
     var error by remember { mutableStateOf<String?>(null) }
     val installing = remember { mutableStateMapOf<String, String>() }
     val backupWork by SyncScheduler.appsBackupState(context).collectAsState(initial = emptyList())
-    val backupRunning = backupWork.any { it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED }
+    val running = backupWork.firstOrNull { it.state == WorkInfo.State.RUNNING }
+    // Ежесуточная задача всегда «в очереди» — это нормальное состояние; блокирует кнопку только ручной запуск.
+    val manualPending = backupWork.firstOrNull { SyncScheduler.isManualAppsBackup(it) && it.state == WorkInfo.State.ENQUEUED }
+    val backupRunning = running != null || manualPending != null
+    val backupStatus = when {
+        running != null -> running.progress.getString(ApkBackupWorker.PROGRESS) ?: "Выполняется…"
+        manualPending != null && manualPending.runAttemptCount > 0 ->
+            "Повтор после ошибки" + (app.session.lastAppsBackupError?.let { ": $it" } ?: "")
+        manualPending != null -> "Ждёт Wi-Fi"
+        else -> null
+    }
 
     fun load() {
         loading = true
@@ -87,9 +98,15 @@ fun AppsScreen() {
                     if (last > 0) "Последняя: ${DateUtils.getRelativeTimeSpanString(last)}. ${app.session.lastAppsBackupSummary.orEmpty()}" else "Ещё не выполнялась",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                if (backupRunning) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (running != null) LinearProgressIndicator(Modifier.fillMaxWidth())
+                backupStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                if (backupStatus == null) {
+                    app.session.lastAppsBackupError?.let {
+                        Text("Последняя попытка не удалась: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
                 Button(enabled = !backupRunning, onClick = { SyncScheduler.backupAppsNow(context) }) {
-                    Text(if (backupRunning) "Выполняется (ждёт Wi-Fi)…" else "Сохранить сейчас")
+                    Text("Сохранить сейчас")
                 }
             }
         }

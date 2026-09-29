@@ -44,6 +44,11 @@ class Session(context: Context) {
         get() = prefs.getString(KEY_APPS_BACKUP_SUMMARY, null)
         set(value) = prefs.edit().putString(KEY_APPS_BACKUP_SUMMARY, value).apply()
 
+    /** Причина последнего сбоя бэкапа приложений (null — последний запуск успешен). */
+    var lastAppsBackupError: String?
+        get() = prefs.getString(KEY_APPS_BACKUP_ERROR, null)
+        set(value) = prefs.edit().putString(KEY_APPS_BACKUP_ERROR, value).apply()
+
     /** После входа контакты ещё не восстановлены (переживает перезапуск приложения). */
     var restorePending: Boolean
         get() = prefs.getBoolean(KEY_RESTORE_PENDING, false)
@@ -75,6 +80,7 @@ class Session(context: Context) {
             .remove(KEY_APPS_BACKUP_AT)
             .remove(KEY_APPS_BACKUP_SUMMARY)
             .remove(KEY_RESTORE_PENDING)
+            .remove(KEY_APPS_BACKUP_ERROR)
             .apply()
     }
 
@@ -90,5 +96,6 @@ class Session(context: Context) {
         const val KEY_APPS_BACKUP_AT = "apps_backup_at"
         const val KEY_APPS_BACKUP_SUMMARY = "apps_backup_summary"
         const val KEY_RESTORE_PENDING = "restore_pending"
+        const val KEY_APPS_BACKUP_ERROR = "apps_backup_error"
     }
 }
