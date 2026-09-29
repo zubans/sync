@@ -1,5 +1,6 @@
 package com.example.contactsync.sync
 
+import com.example.contactsync.contacts.ExternalId
 import com.example.contactsync.contacts.Fingerprint
 import com.example.contactsync.contacts.LocalContact
 import com.example.contactsync.data.ServerContact
@@ -134,5 +135,32 @@ class SyncPlannerTest {
 
         assertEquals(listOf(10L, 11L), SyncPlanner.rawIdsToRemove(local, listOf("lk-1", "lk-unknown")))
         assertTrue(SyncPlanner.rawIdsToRemove(local, emptyList()).isEmpty())
+    }
+
+    @Test
+    fun `long lookup keys are replaced by a stable hash that fits the server limit`() {
+        val longKey = "0r1-" + "3F2B4A".repeat(60)
+        val contact = LocalContact(1, longKey, listOf(10), "Иван", listOf("+79001234567"), emptyList())
+
+        val upload = SyncPlanner.buildUpload(listOf(contact, local(2, "Мария")), Mappings())
+
+        assertTrue(upload[0].externalId.startsWith("sha256:"))
+        assertTrue(upload[0].externalId.length <= ExternalId.MAX_LENGTH)
+        assertEquals(upload[0].externalId, ExternalId.of(longKey))
+        assertEquals("lk-2", upload[1].externalId)
+        // Ответ сервера сопоставляется с контактом по тому же идентификатору.
+        assertEquals(mapOf(10L to "s1"), SyncPlanner.applyLinks(listOf(contact), mapOf(upload[0].externalId to "s1")))
+        assertEquals(listOf(10L), SyncPlanner.rawIdsToRemove(listOf(contact), listOf(upload[0].externalId)))
+    }
+
+    @Test
+    fun `values over server limits are trimmed instead of failing the whole sync`() {
+        val contact = LocalContact(1, "lk", listOf(10), "Я".repeat(300), List(60) { "+7900000${"%04d".format(it)}" } + "1".repeat(70), emptyList())
+
+        val upload = SyncPlanner.buildUpload(listOf(contact), Mappings()).single()
+
+        assertEquals(255, upload.name!!.length)
+        assertEquals(50, upload.phones.size)
+        assertTrue(upload.phones.all { it.length <= 64 })
     }
 }

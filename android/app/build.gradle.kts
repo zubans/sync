@@ -16,8 +16,10 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        // 10.0.2.2 — адрес хост-машины из эмулятора Android.
-        buildConfigField("String", "DEFAULT_SERVER_URL", "\"http://10.0.2.2:8000\"")
+        // Адрес сервера по умолчанию: ./gradlew assembleDebug -PserverUrl=http://host:port
+        // Без параметра — 10.0.2.2, адрес хост-машины из эмулятора Android.
+        val serverUrl = providers.gradleProperty("serverUrl").getOrElse("http://10.0.2.2:8000")
+        buildConfigField("String", "DEFAULT_SERVER_URL", "\"$serverUrl\"")
     }
 
     buildTypes {

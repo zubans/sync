@@ -21,6 +21,28 @@ data class LocalContact(
     val emails: List<String>,
 ) {
     val fingerprint: String get() = Fingerprint.of(name, phones, emails)
+
+    /** Идентификатор контакта для сервера (не длиннее [ExternalId.MAX_LENGTH]). */
+    val externalId: String get() = ExternalId.of(lookupKey)
+}
+
+/**
+ * LOOKUP_KEY контакта, склеенного из нескольких raw-контактов (Google, телефон, мессенджеры),
+ * складывается из ключей всех частей и бывает длиннее 255 символов — сервер такой не примет.
+ * Длинный ключ заменяем его SHA-256: он стабилен, пока стабилен сам ключ. Короткие не трогаем,
+ * чтобы не ломать уже сохранённые на сервере связи.
+ */
+object ExternalId {
+    const val MAX_LENGTH = 128
+
+    fun of(lookupKey: String): String =
+        if (lookupKey.length <= MAX_LENGTH) {
+            lookupKey
+        } else {
+            "sha256:" + java.security.MessageDigest.getInstance("SHA-256")
+                .digest(lookupKey.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+        }
 }
 
 /** Данные контакта для записи в телефонную книгу. */

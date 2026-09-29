@@ -116,12 +116,14 @@ object SyncPlanner {
         return local
             .filter { c -> c.rawContactIds.none { it in familyRawIds } }
             .map { c ->
+                // Подрезаем под ограничения сервера: один нестандартный контакт не должен
+                // валить синхронизацию всех остальных (сервер отклоняет пакет целиком).
                 ContactUpload(
-                    externalId = c.lookupKey,
+                    externalId = c.externalId,
                     serverId = c.rawContactIds.firstNotNullOfOrNull { mappings.personal[it] },
-                    name = c.name,
-                    phones = c.phones,
-                    emails = c.emails,
+                    name = c.name?.take(MAX_NAME),
+                    phones = c.phones.filter { it.length <= MAX_PHONE }.take(MAX_VALUES),
+                    emails = c.emails.filter { it.length <= MAX_EMAIL }.take(MAX_VALUES),
                 )
             }
     }
@@ -130,7 +132,7 @@ object SyncPlanner {
     fun rawIdsToRemove(local: List<LocalContact>, removedExternalIds: Collection<String>): List<Long> {
         if (removedExternalIds.isEmpty()) return emptyList()
         val removed = removedExternalIds.toSet()
-        return local.filter { it.lookupKey in removed }.flatMap { it.rawContactIds }
+        return local.filter { it.externalId in removed }.flatMap { it.rawContactIds }
     }
 
     /** Обновляет соответствие rawId → serverId по ответу сервера на выгрузку. */
@@ -139,8 +141,14 @@ object SyncPlanner {
         links: Map<String, String>,
     ): Map<Long, String> = buildMap {
         for (contact in local) {
-            val serverId = links[contact.lookupKey] ?: continue
+            val serverId = links[contact.externalId] ?: continue
             contact.rawContactIds.forEach { put(it, serverId) }
         }
     }
+
+    // Ограничения сервера (server/src/Dto/ContactInput.php).
+    private const val MAX_NAME = 255
+    private const val MAX_PHONE = 64
+    private const val MAX_EMAIL = 255
+    private const val MAX_VALUES = 50
 }
