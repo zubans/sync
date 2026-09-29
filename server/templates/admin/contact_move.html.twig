@@ -1,0 +1,163 @@
+{% extends '@EasyAdmin/page/content.html.twig' %}
+
+{% block content_title 'Перенос в семью' %}
+
+{% block main %}
+<style>
+    .cm-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 1.5rem; align-items: start; }
+    @media (max-width: 900px) { .cm-layout { grid-template-columns: 1fr; } }
+    .cm-toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: 1rem; }
+    .cm-list { display: flex; flex-direction: column; gap: .4rem; }
+    .cm-card { display: flex; gap: .75rem; align-items: center; padding: .5rem .75rem; border: 1px solid var(--border-color, #ddd);
+               border-radius: 8px; background: var(--bs-body-bg, #fff); cursor: grab; user-select: none; }
+    .cm-card.cm-selected { outline: 2px solid var(--bs-primary, #4f46e5); }
+    .cm-card.cm-dragging { opacity: .5; }
+    .cm-photo { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex: none; background: var(--gray-200, #eee); }
+    .cm-meta { color: var(--text-muted, #6c757d); font-size: .85em; }
+    .cm-families { position: sticky; top: 1rem; display: flex; flex-direction: column; gap: .75rem; }
+    .cm-family { padding: 1rem; border: 2px dashed var(--border-color, #ccc); border-radius: 10px; transition: background .15s, border-color .15s; }
+    .cm-family.cm-over { border-color: var(--bs-primary, #4f46e5); background: rgba(79, 70, 229, .08); }
+    .cm-family h3 { font-size: 1rem; margin: 0 0 .25rem; }
+</style>
+
+<p class="cm-meta">
+    Перетащите личные контакты на семью (или отметьте несколько и перетащите любой из отмеченных).
+    Контакт станет семейным и появится на телефонах всех членов семьи, а личная копия удалится с телефона владельца
+    при следующей синхронизации. Если такой контакт в семье уже есть, дубль не создаётся.
+</p>
+
+<form class="cm-toolbar" method="get">
+    <select name="user" class="form-select" style="max-width: 260px" onchange="this.form.submit()">
+        <option value="">Все владельцы</option>
+        {% for u in users %}
+            <option value="{{ u.id }}" {{ selected_user == u.id ? 'selected' }}>{{ u.email }}{{ u.family ? ' — ' ~ u.family.name }}</option>
+        {% endfor %}
+    </select>
+    <input type="search" name="q" value="{{ q }}" placeholder="Поиск по имени" class="form-control" style="max-width: 240px">
+    <button class="btn btn-secondary">Найти</button>
+</form>
+
+<div class="cm-layout">
+    <section>
+        <div class="cm-toolbar">
+            <strong>Выбрано: <span id="cm-count">0</span></strong>
+            <select id="cm-target" class="form-select" style="max-width: 220px">
+                <option value="">Перенести в…</option>
+                {% for f in families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}
+            </select>
+            <button type="button" id="cm-move" class="btn btn-primary" disabled>Перенести</button>
+            <button type="button" id="cm-all" class="btn btn-link">Выбрать все</button>
+        </div>
+        <div id="cm-message" class="alert d-none" role="status"></div>
+
+        <div class="cm-list" id="cm-list">
+            {% for c in contacts %}
+                <div class="cm-card" draggable="true" data-id="{{ c.id }}">
+                    <input type="checkbox" class="form-check-input cm-check" aria-label="Выбрать {{ c.name }}">
+                    {% if c.photoSha256 %}
+                        <img class="cm-photo" src="{{ path('admin_contact_photo', {sha256: c.photoSha256}) }}" alt="">
+                    {% else %}
+                        <span class="cm-photo"></span>
+                    {% endif %}
+                    <div>
+                        <div>{{ c.name ?? '(без имени)' }}</div>
+                        <div class="cm-meta">{{ c.phones|join(', ') }} · {{ c.user.email }}{{ c.user.family ? ' (семья ' ~ c.user.family.name ~ ')' }}</div>
+                    </div>
+                </div>
+            {% else %}
+                <p>Личных контактов не найдено.</p>
+            {% endfor %}
+        </div>
+        {% if truncated %}<p class="cm-meta mt-2">Показаны первые {{ contacts|length }} — уточните поиск или выберите владельца.</p>{% endif %}
+    </section>
+
+    <aside class="cm-families">
+        {% for f in families %}
+            <div class="cm-family" data-family-id="{{ f.id }}">
+                <h3><i class="fa fa-people-roof"></i> {{ f.name }}</h3>
+                <div class="cm-meta">Контактов: <span class="cm-family-count">{{ f.contacts|length }}</span></div>
+                <div class="cm-meta">{{ f.members|map(m => m.email)|join(', ') ?: 'нет участников' }}</div>
+            </div>
+        {% else %}
+            <p>Семей нет — создайте семью в разделе «Семьи».</p>
+        {% endfor %}
+    </aside>
+</div>
+
+<script>
+(() => {
+    const moveUrl = {{ path('admin_contact_move_move')|json_encode|raw }};
+    const token = {{ csrf_token(csrf_intention)|json_encode|raw }};
+    const list = document.getElementById('cm-list');
+    const count = document.getElementById('cm-count');
+    const moveButton = document.getElementById('cm-move');
+    const target = document.getElementById('cm-target');
+    const message = document.getElementById('cm-message');
+
+    const cards = () => [...list.querySelectorAll('.cm-card')];
+    const selected = () => cards().filter(c => c.querySelector('.cm-check').checked);
+
+    function refresh() {
+        cards().forEach(c => c.classList.toggle('cm-selected', c.querySelector('.cm-check').checked));
+        count.textContent = selected().length;
+        moveButton.disabled = selected().length === 0 || !target.value;
+    }
+
+    function show(text, ok) {
+        message.textContent = text;
+        message.className = 'alert ' + (ok ? 'alert-success' : 'alert-danger');
+    }
+
+    async function move(ids, familyId) {
+        const response = await fetch(moveUrl, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: JSON.stringify({token, familyId: Number(familyId), contactIds: ids.map(Number)}),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            show(result.error || 'Не удалось перенести', false);
+            return;
+        }
+        ids.forEach(id => list.querySelector(`.cm-card[data-id="${id}"]`)?.remove());
+        const counter = document.querySelector(`.cm-family[data-family-id="${familyId}"] .cm-family-count`);
+        if (counter) counter.textContent = result.familyContacts;
+        const parts = [`Перенесено: ${result.moved}`];
+        if (result.merged) parts.push(`уже были в семье: ${result.merged}`);
+        show(parts.join(', '), true);
+        refresh();
+    }
+
+    list.addEventListener('change', refresh);
+    target.addEventListener('change', refresh);
+    document.getElementById('cm-all').addEventListener('click', () => {
+        const all = selected().length !== cards().length;
+        cards().forEach(c => c.querySelector('.cm-check').checked = all);
+        refresh();
+    });
+    moveButton.addEventListener('click', () => move(selected().map(c => c.dataset.id), target.value));
+
+    // Перетаскивание: тащим отмеченные, а если карточка не отмечена — только её.
+    list.addEventListener('dragstart', event => {
+        const card = event.target.closest('.cm-card');
+        if (!card) return;
+        const ids = card.querySelector('.cm-check').checked ? selected().map(c => c.dataset.id) : [card.dataset.id];
+        event.dataTransfer.setData('application/json', JSON.stringify(ids));
+        event.dataTransfer.effectAllowed = 'move';
+        ids.forEach(id => list.querySelector(`.cm-card[data-id="${id}"]`)?.classList.add('cm-dragging'));
+    });
+    list.addEventListener('dragend', () => cards().forEach(c => c.classList.remove('cm-dragging')));
+
+    document.querySelectorAll('.cm-family').forEach(zone => {
+        zone.addEventListener('dragover', event => { event.preventDefault(); zone.classList.add('cm-over'); });
+        zone.addEventListener('dragleave', () => zone.classList.remove('cm-over'));
+        zone.addEventListener('drop', event => {
+            event.preventDefault();
+            zone.classList.remove('cm-over');
+            const ids = JSON.parse(event.dataTransfer.getData('application/json') || '[]');
+            if (ids.length) move(ids, zone.dataset.familyId);
+        });
+    });
+})();
+</script>
+{% endblock %}

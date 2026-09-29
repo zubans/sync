@@ -56,6 +56,7 @@ final class DashboardController extends AbstractDashboardController
         yield MenuItem::section('Справочник');
         yield MenuItem::linkTo(ContactCrudController::class, 'Личные контакты', 'fa fa-address-book');
         yield MenuItem::linkTo(FamilyContactCrudController::class, 'Семейные контакты', 'fa fa-people-roof');
+        yield MenuItem::linkTo(ContactMoveController::class, 'Перенос в семью', 'fa fa-right-left')->setAction('index');
 
         yield MenuItem::section('Аккаунты');
         yield MenuItem::linkTo(UserCrudController::class, 'Пользователи', 'fa fa-user');
