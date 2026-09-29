@@ -17,8 +17,11 @@ android {
         versionName = "1.0"
 
         // Адрес сервера по умолчанию: ./gradlew assembleDebug -PserverUrl=http://host:port
-        // Без параметра — 10.0.2.2, адрес хост-машины из эмулятора Android.
-        val serverUrl = providers.gradleProperty("serverUrl").getOrElse("http://10.0.2.2:8000")
+        // Без параметра — 10.0.2.2 (хост-машина из эмулятора Android) и HTTP_PORT из корневого .env.
+        val httpPort = rootProject.file("../.env").takeIf { it.exists() }?.readLines()
+            ?.firstNotNullOfOrNull { it.trim().removePrefix("HTTP_PORT=").takeIf { p -> p != it.trim() } }
+            ?.takeIf { it.isNotBlank() } ?: "8000"
+        val serverUrl = providers.gradleProperty("serverUrl").getOrElse("http://10.0.2.2:$httpPort")
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"$serverUrl\"")
     }
 
