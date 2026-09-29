@@ -54,17 +54,16 @@ fun AppsScreen() {
     val installing = remember { mutableStateMapOf<String, String>() }
     val backupWork by SyncScheduler.appsBackupState(context).collectAsState(initial = emptyList())
     val running = backupWork.firstOrNull { it.state == WorkInfo.State.RUNNING }
-    // Ежесуточная задача всегда «в очереди» — это нормальное состояние; блокирует кнопку только ручной запуск.
-    val manualPending = backupWork.firstOrNull { SyncScheduler.isManualAppsBackup(it) && it.state == WorkInfo.State.ENQUEUED }
-    val backupRunning = running != null || manualPending != null
+    val retrying = backupWork.firstOrNull { it.state == WorkInfo.State.ENQUEUED && it.runAttemptCount > 0 }
+    val manualWaiting = backupWork.firstOrNull {
+        SyncScheduler.isManualAppsBackup(it) && it.state == WorkInfo.State.ENQUEUED && it.runAttemptCount == 0
+    }
     val backupStatus = when {
         running != null -> running.progress.getString(ApkBackupWorker.PROGRESS) ?: "Выполняется…"
-        manualPending != null && manualPending.runAttemptCount > 0 ->
-            "Повтор после ошибки" + (app.session.lastAppsBackupError?.let { ": $it" } ?: "")
-        manualPending != null -> "Ждёт Wi-Fi"
+        retrying != null -> "Повтор после ошибки" + (app.session.lastAppsBackupError?.let { ": $it" } ?: "")
+        manualWaiting != null -> "Ждёт Wi-Fi"
         else -> null
     }
-
     fun load() {
         loading = true
         error = null
@@ -105,8 +104,9 @@ fun AppsScreen() {
                         Text("Последняя попытка не удалась: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     }
                 }
-                Button(enabled = !backupRunning, onClick = { SyncScheduler.backupAppsNow(context) }) {
-                    Text("Сохранить сейчас")
+                // Недоступна только во время загрузки; при ожидании повтора — перезапускает сразу.
+                Button(enabled = running == null, onClick = { SyncScheduler.backupAppsNow(context) }) {
+                    Text(if (retrying != null) "Повторить сейчас" else "Сохранить сейчас")
                 }
             }
         }

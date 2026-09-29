@@ -52,6 +52,8 @@ object SyncScheduler {
             cancelUniqueWork(PERIODIC)
             cancelUniqueWork(ON_CHANGE)
             cancelUniqueWork(APPS_PERIODIC)
+            cancelUniqueWork(APPS_NOW)
+            cancelUniqueWork(VAULT_NOW)
         }
     }
 
@@ -64,14 +66,18 @@ object SyncScheduler {
         WorkManager.getInstance(context).enqueueUniqueWork(VAULT_NOW, ExistingWorkPolicy.REPLACE, request)
     }
 
-    /** Бэкап приложений по кнопке: только Wi-Fi, без требования зарядки. */
+    /**
+     * Бэкап приложений по кнопке: только Wi-Fi, без требования зарядки.
+     * REPLACE: нажатие — явная просьба начать сейчас, поэтому сбрасываем ожидание повтора после сбоя
+     * (с KEEP нажатие молча игнорировалось, пока предыдущая задача ждала повтора).
+     */
     fun backupAppsNow(context: Context) {
         val request = OneTimeWorkRequestBuilder<ApkBackupWorker>()
             .addTag(APPS_NOW_TAG)
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
             .setBackoffCriteria(BackoffPolicy.LINEAR, 1, TimeUnit.MINUTES)
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(APPS_NOW, ExistingWorkPolicy.KEEP, request)
+        WorkManager.getInstance(context).enqueueUniqueWork(APPS_NOW, ExistingWorkPolicy.REPLACE, request)
     }
 
     /** Состояние бэкапа приложений: ручной запуск и ежесуточный. */
