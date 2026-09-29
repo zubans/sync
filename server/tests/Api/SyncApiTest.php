@@ -13,6 +13,9 @@ final class SyncApiTest extends DatabaseWebTestCase
     private const PHONE_A = 'install-aaaa-0001';
     private const PHONE_B = 'install-bbbb-0002';
 
+    /** Минимальный валидный JPEG 1×1. */
+    private const JPEG_1X1 = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=';
+
     private string $token;
 
     protected function setUp(): void
@@ -188,6 +191,56 @@ final class SyncApiTest extends DatabaseWebTestCase
         self::assertSame([$serverId], array_column($this->personal(), 'serverId'));
     }
 
+    public function testContactsWithoutPhonesAreNotSynced(): void
+    {
+        // Служебные записи мессенджеров (Telegram и т. п.): только имя, без телефона — их нет в телефонной книге.
+        $result = $this->api('POST', '/api/sync', [
+            'device' => ['installId' => self::PHONE_A],
+            'contacts' => [
+                ['externalId' => 'tg', 'name' => 'Из Telegram', 'phones' => [], 'emails' => []],
+                ['externalId' => 'mail', 'name' => 'Только email', 'phones' => ['  '], 'emails' => ['a@b.c']],
+                ['externalId' => 'real', 'name' => 'С телефоном', 'phones' => ['+7 900 111-22-33']],
+            ],
+        ], $this->token);
+
+        self::assertSame([1, 1], [$result['created'], $result['total']]);
+        self::assertSame(['real'], array_column($result['links'], 'externalId'));
+        self::assertSame(['С телефоном'], array_column($this->personal(), 'name'));
+    }
+
+    public function testContactPhotoIsRequestedUploadedAndServed(): void
+    {
+        $jpeg = base64_decode(self::JPEG_1X1);
+        $sha = hash('sha256', $jpeg);
+
+        $result = $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис', 'photo' => $sha]]);
+        self::assertSame([$sha], $result['missingPhotos']);
+
+        $upload = fn (string $bytes, string $as = '') => $this->client->request('PUT', '/api/contact-photos/'.($as ?: $sha), server: [
+            'CONTENT_TYPE' => 'image/jpeg',
+            'HTTP_AUTHORIZATION' => 'Bearer '.$this->token,
+        ], content: $bytes);
+
+        $upload('not an image at all');
+        self::assertResponseStatusCodeSame(422);
+        $upload($jpeg, str_repeat('a', 64));
+        self::assertResponseStatusCodeSame(404);
+        $upload($jpeg);
+        self::assertResponseStatusCodeSame(204);
+
+        // Второй раз сервер фото уже не просит, а при восстановлении отдаёт.
+        self::assertSame([], $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис', 'photo' => $sha]])['missingPhotos']);
+        self::assertSame($sha, $this->personal()[0]['photo']);
+        $this->client->request('GET', '/api/contact-photos/'.$sha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$this->token]);
+        self::assertResponseIsSuccessful();
+        self::assertSame($jpeg, $this->client->getInternalResponse()->getContent());
+
+        // Чужое фото недоступно.
+        $this->createUser('boris@example.com');
+        $this->client->request('GET', '/api/contact-photos/'.$sha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$this->login('boris@example.com')]);
+        self::assertResponseStatusCodeSame(404);
+    }
+
     public function testDeletingUserRemovesTheirData(): void
     {
         $this->sync(self::PHONE_A, [['externalId' => 'a', 'name' => 'Борис']], googleAccounts: ['anna@gmail.com']);
@@ -222,6 +275,9 @@ final class SyncApiTest extends DatabaseWebTestCase
      */
     private function sync(string $installId, array $contacts, array $googleAccounts = [], ?string $token = null): array
     {
+        // Синхронизируются только контакты с телефоном — тестам, где номер не важен, подставляем его.
+        $contacts = array_map(static fn (array $c) => $c + ['phones' => ['+7 900 000-00-00']], $contacts);
+
         $result = $this->api('POST', '/api/sync', [
             'device' => ['installId' => $installId, 'model' => 'Pixel'],
             'googleAccounts' => $googleAccounts,

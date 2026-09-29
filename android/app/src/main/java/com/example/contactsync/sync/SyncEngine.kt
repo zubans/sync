@@ -7,14 +7,17 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import com.example.contactsync.contacts.GoogleAccounts
 import com.example.contactsync.contacts.PhoneContacts
+import com.example.contactsync.contacts.PhotoHashes
 import com.example.contactsync.data.Api
 import com.example.contactsync.data.DeviceDto
 import com.example.contactsync.data.Session
 import com.example.contactsync.data.SyncRequest
+import com.example.contactsync.data.UnauthorizedException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class SyncReport(
     val uploaded: Int,
@@ -50,6 +53,7 @@ class SyncEngine(
 ) {
     private val phone = PhoneContacts(context.contentResolver)
     private val store = MappingStore(context)
+    private val photoHashes = PhotoHashes(phone, File(context.filesDir, "photo-hashes.json"))
 
     fun hasPermissions(): Boolean = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
@@ -89,7 +93,7 @@ class SyncEngine(
         val personal = mappings.personal.toMutableMap()
         personal += plan.matched
         for (contact in plan.toInsert) {
-            personal[phone.insert(contact.toData())] = contact.serverId
+            personal[phone.insert(contact.toData(downloadPhoto(contact.photo)))] = contact.serverId
         }
         store.save(mappings.copy(personal = personal))
         return plan.toInsert.size
@@ -99,13 +103,15 @@ class SyncEngine(
         val local = phone.readAll()
         val mappings = store.load()
         val accounts = GoogleAccounts.collect(context, phone)
+        val photos = photoHashes.hashes(local)
         val result = api.sync(
             SyncRequest(
                 device = DeviceDto(session.installId, "${Build.MANUFACTURER} ${Build.MODEL}"),
                 googleAccounts = accounts,
-                contacts = SyncPlanner.buildUpload(local, mappings),
+                contacts = SyncPlanner.buildUpload(local, mappings, photos),
             ),
         )
+        uploadPhotos(result.missingPhotos, photos)
         // Контакты, которые администратор удалил на сервере, удаляем и из телефонной книги.
         val toRemove = SyncPlanner.rawIdsToRemove(local, result.removed)
         toRemove.forEach(phone::delete)
@@ -121,6 +127,19 @@ class SyncEngine(
         )
     }
 
+    /** Загружает фото, которых нет на сервере. Сбой с фото не должен ломать синхронизацию контактов. */
+    private suspend fun uploadPhotos(missing: List<String>, photos: Map<Long, String>) {
+        for (sha in missing) {
+            val contactId = photos.entries.firstOrNull { it.value == sha }?.key ?: continue
+            val bytes = phone.photoBytes(contactId)?.takeIf { PhotoHashes.sha256(it) == sha } ?: continue
+            runCatching { api.uploadContactPhoto(sha, bytes) }
+                .onFailure { if (it is UnauthorizedException) throw it }
+        }
+    }
+
+    private suspend fun downloadPhoto(sha: String?): ByteArray? =
+        sha?.let { runCatching { api.downloadContactPhoto(it) }.getOrNull() }
+
     private suspend fun pullFamily(): SyncReport {
         val response = api.familyContacts()
         session.updateFamily(response.family)
@@ -132,7 +151,7 @@ class SyncEngine(
         plan.toUpdate.forEach { (rawId, contact) -> phone.update(rawId, contact.toData()) }
         val family = plan.keep.toMutableMap()
         for (contact in plan.toInsert) {
-            family[contact.serverId] = FamilyEntry(phone.insert(contact.toData()), contact.updatedAt, createdByUs = true)
+            family[contact.serverId] = FamilyEntry(phone.insert(contact.toData(downloadPhoto(contact.photo))), contact.updatedAt, createdByUs = true)
         }
         store.save(mappings.copy(family = family))
 

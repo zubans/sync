@@ -20,7 +20,7 @@ use Doctrine\ORM\EntityManagerInterface;
 /**
  * Синхронизация личных контактов одного устройства.
  *
- * Присланный список — актуальное состояние личных контактов устройства:
+ * Присланный список — актуальное состояние личных контактов устройства (учитываются только контакты с телефоном):
  * - контакт, уже связанный с устройством (по externalId), обновляется;
  * - контакт с serverId (восстановлен с сервера) привязывается к существующему серверному;
  * - остальные создаются;
@@ -39,7 +39,19 @@ final class ContactSyncService
         private readonly DeviceRepository $devices,
         private readonly GoogleAccountRepository $googleAccounts,
         private readonly ContactTombstoneRepository $tombstones,
+        private readonly ContactPhotoStorage $photos,
     ) {
+    }
+
+    private static function hasPhone(ContactInput $input): bool
+    {
+        foreach ($input->phones as $phone) {
+            if (trim($phone) !== '') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function sync(User $user, SyncRequest $request): SyncResult
@@ -48,11 +60,14 @@ final class ContactSyncService
             $device = $this->resolveDevice($user, $request->device->installId, $request->device->model);
             $this->saveGoogleAccounts($user, $device, $request->googleAccounts);
 
-            // При дублях externalId побеждает последний.
+            // При дублях externalId побеждает последний. Контакты без телефонов не синхронизируем:
+            // это служебные записи приложений (например, Telegram), которых нет в телефонной книге.
             /** @var array<string, ContactInput> $incoming */
             $incoming = [];
             foreach ($request->contacts as $input) {
-                $incoming[$input->externalId] = $input;
+                if (self::hasPhone($input)) {
+                    $incoming[$input->externalId] = $input;
+                }
             }
 
             $links = $device->getId() === null ? [] : $this->links->findByDeviceIndexed($device);
@@ -90,7 +105,7 @@ final class ContactSyncService
                 $isNew = $contact->getId() === null;
                 // Контакт удалили на другом устройстве, но здесь он есть — значит, он ещё нужен.
                 $revived = $contact->undelete();
-                if (($contact->apply($input->name, $input->phones, $input->emails) || $revived) && !$isNew) {
+                if (($contact->apply($input->name, $input->phones, $input->emails, $input->photo) || $revived) && !$isNew) {
                     ++$updated;
                 }
                 $seenContacts[spl_object_id($contact)] = true;
@@ -112,7 +127,10 @@ final class ContactSyncService
             $device->markSynced();
             $this->em->flush();
 
-            return new SyncResult($created, $updated, $deleted, \count($incoming) - \count($removed), $resultLinks, $removed);
+            $photos = array_unique(array_filter(array_map(static fn (ContactInput $i) => $i->photo, $incoming)));
+            $missingPhotos = array_values(array_filter($photos, fn (string $sha) => !$this->photos->has($sha)));
+
+            return new SyncResult($created, $updated, $deleted, \count($incoming) - \count($removed), $resultLinks, $removed, $missingPhotos);
         });
     }
 

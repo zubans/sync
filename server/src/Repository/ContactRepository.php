@@ -49,4 +49,20 @@ class ContactRepository extends ServiceEntityRepository
     {
         return $this->findBy(['family' => $family], ['name' => 'ASC', 'id' => 'ASC']);
     }
+
+    /** Есть ли у пользователя (лично или через семью) контакт с таким фото. */
+    public function userCanSeePhoto(User $user, string $sha256): bool
+    {
+        $qb = $this->createQueryBuilder('c')
+            ->select('COUNT(c.id)')
+            ->where('c.photoSha256 = :sha')
+            ->andWhere($user->getFamily() === null ? 'c.user = :user' : '(c.user = :user OR c.family = :family)')
+            ->setParameter('sha', $sha256)
+            ->setParameter('user', $user);
+        if ($user->getFamily() !== null) {
+            $qb->setParameter('family', $user->getFamily());
+        }
+
+        return (int) $qb->getQuery()->getSingleScalarResult() > 0;
+    }
 }

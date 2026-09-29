@@ -15,7 +15,7 @@ class SyncPlannerTest {
         LocalContact(id, "lk-$id", raw, name, phones.toList(), emptyList())
 
     private fun server(id: String, name: String, vararg phones: String, updatedAt: String = "t1") =
-        ServerContact(id, name, phones.toList(), emptyList(), updatedAt)
+        ServerContact(id, name, phones.toList(), emptyList(), updatedAt = updatedAt)
 
     @Test
     fun `fingerprint ignores phone formatting and name case`() {
@@ -109,7 +109,7 @@ class SyncPlannerTest {
     @Test
     fun `upload excludes family copies and passes known server ids`() {
         val upload = SyncPlanner.buildUpload(
-            local = listOf(local(1, "Личный"), local(2, "Восстановленный"), local(3, "Семейный")),
+            local = listOf(local(1, "Личный", "+79000000001"), local(2, "Восстановленный", "+79000000002"), local(3, "Семейный", "+79000000003")),
             mappings = Mappings(
                 personal = mapOf(20L to "s2"),
                 family = mapOf("f1" to FamilyEntry(30, "t1", createdByUs = true)),
@@ -142,7 +142,7 @@ class SyncPlannerTest {
         val longKey = "0r1-" + "3F2B4A".repeat(60)
         val contact = LocalContact(1, longKey, listOf(10), "Иван", listOf("+79001234567"), emptyList())
 
-        val upload = SyncPlanner.buildUpload(listOf(contact, local(2, "Мария")), Mappings())
+        val upload = SyncPlanner.buildUpload(listOf(contact, local(2, "Мария", "+79000000002")), Mappings())
 
         assertTrue(upload[0].externalId.startsWith("sha256:"))
         assertTrue(upload[0].externalId.length <= ExternalId.MAX_LENGTH)
@@ -162,5 +162,17 @@ class SyncPlannerTest {
         assertEquals(255, upload.name!!.length)
         assertEquals(50, upload.phones.size)
         assertTrue(upload.phones.all { it.length <= 64 })
+    }
+
+    @Test
+    fun `contacts without phones are not uploaded`() {
+        val telegramOnly = LocalContact(1, "tg", listOf(10), "Из Telegram", emptyList(), emptyList())
+        val emailOnly = LocalContact(2, "mail", listOf(20), "Только email", listOf(" "), listOf("a@b.c"))
+        val real = LocalContact(3, "real", listOf(30), "С телефоном", listOf("+79001234567"), emptyList(), photoKey = "5:1")
+
+        val upload = SyncPlanner.buildUpload(listOf(telegramOnly, emailOnly, real), Mappings(), photos = mapOf(3L to "abc"))
+
+        assertEquals(listOf("real"), upload.map { it.externalId })
+        assertEquals("abc", upload.single().photo)
     }
 }

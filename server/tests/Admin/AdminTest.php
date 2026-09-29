@@ -49,6 +49,9 @@ final class AdminTest extends DatabaseWebTestCase
     {
         $anna = $this->createUser('anna@example.com');
         $this->em->persist(Contact::personal($anna)->setName('Борис')->setPhones(['+7 900 000-00-01']));
+        $withPhoto = Contact::personal($anna);
+        $withPhoto->apply('С фото', ['+7 900 000-00-02'], [], str_repeat('ab', 32));
+        $this->em->persist($withPhoto);
         $family = (new Family())->setName('Ивановы');
         $this->em->persist($family);
         $this->em->persist((new Contact())->setFamily($family)->setName('Бабушка'));
@@ -78,6 +81,7 @@ final class AdminTest extends DatabaseWebTestCase
         $this->client->request('GET', '/admin/contact');
         self::assertSelectorTextContains('table', 'Борис');
         self::assertSelectorTextNotContains('table', 'Null');
+        self::assertSelectorExists('table img[src="/admin/contact-photo/'.str_repeat('ab', 32).'"]');
         self::assertSelectorTextNotContains('table', 'Бабушка');
 
         $this->client->request('GET', '/admin/family-contact');

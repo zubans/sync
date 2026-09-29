@@ -8,6 +8,7 @@ use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Tools\SchemaTool;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
+use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
 
 abstract class DatabaseWebTestCase extends WebTestCase
@@ -20,6 +21,7 @@ abstract class DatabaseWebTestCase extends WebTestCase
     protected function setUp(): void
     {
         $this->client = static::createClient();
+        (new Filesystem())->remove(static::getContainer()->getParameter('kernel.project_dir').'/var/storage/photos_test');
         $this->em = static::getContainer()->get(EntityManagerInterface::class);
 
         $schemaTool = new SchemaTool($this->em);

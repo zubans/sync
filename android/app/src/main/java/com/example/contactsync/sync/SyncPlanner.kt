@@ -6,7 +6,7 @@ import com.example.contactsync.contacts.LocalContact
 import com.example.contactsync.data.ContactUpload
 import com.example.contactsync.data.ServerContact
 
-fun ServerContact.toData() = ContactData(name, phones, emails)
+fun ServerContact.toData(photo: ByteArray? = null) = ContactData(name, phones, emails, photo)
 
 val ServerContact.fingerprint: String get() = Fingerprint.of(name, phones, emails)
 
@@ -110,10 +110,17 @@ object SyncPlanner {
         return FamilyPlan(toInsert, toUpdate, toDelete, keep)
     }
 
-    /** Личные контакты для выгрузки: всё, кроме копий семейных контактов. */
-    fun buildUpload(local: List<LocalContact>, mappings: Mappings): List<ContactUpload> {
+    /**
+     * Личные контакты для выгрузки: только с телефоном и кроме копий семейных контактов.
+     * Контакты без телефона — обычно скрытые служебные записи мессенджеров (Telegram и т. п.),
+     * которых нет в телефонной книге.
+     *
+     * @param photos SHA-256 фото по contactId
+     */
+    fun buildUpload(local: List<LocalContact>, mappings: Mappings, photos: Map<Long, String> = emptyMap()): List<ContactUpload> {
         val familyRawIds = mappings.family.values.map { it.rawContactId }.toSet()
         return local
+            .filter { c -> c.phones.any { it.isNotBlank() } }
             .filter { c -> c.rawContactIds.none { it in familyRawIds } }
             .map { c ->
                 // Подрезаем под ограничения сервера: один нестандартный контакт не должен
@@ -124,6 +131,7 @@ object SyncPlanner {
                     name = c.name?.take(MAX_NAME),
                     phones = c.phones.filter { it.length <= MAX_PHONE }.take(MAX_VALUES),
                     emails = c.emails.filter { it.length <= MAX_EMAIL }.take(MAX_VALUES),
+                    photo = photos[c.contactId],
                 )
             }
     }

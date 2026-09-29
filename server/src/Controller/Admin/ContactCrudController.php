@@ -78,6 +78,18 @@ final class ContactCrudController extends AbstractCrudController
 
     public function configureFields(string $pageName): iterable
     {
+        // ImageField без фото показывает бейдж «Null»; строковое поле + formatValue даёт миниатюру или «—».
+        // В HTML попадает только SHA-256 (hex), экранировать нечего.
+        yield TextField::new('uuid', 'Фото')
+            ->formatValue(fn ($value, Contact $contact) => $contact->getPhotoSha256() === null
+                ? '—'
+                : \sprintf(
+                    '<img src="%s" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:50%%">',
+                    $this->generateUrl('admin_contact_photo', ['sha256' => $contact->getPhotoSha256()]),
+                ))
+            ->renderAsHtml()
+            ->setSortable(false)
+            ->hideOnForm();
         yield TextField::new('name', 'Имя');
         yield ArrayField::new('phones', 'Телефоны')->setRequired(false);
         yield ArrayField::new('emails', 'Email')->setRequired(false);

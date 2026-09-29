@@ -46,6 +46,10 @@ class Contact
     #[ORM\Column(type: Types::JSON)]
     private array $emails = [];
 
+    /** SHA-256 фото контакта; сам файл — в хранилище фото (ContactPhotoStorage). */
+    #[ORM\Column(length: 64, nullable: true)]
+    private ?string $photoSha256 = null;
+
     /** Контакт удалили на устройстве: на сервере он остаётся, но не восстанавливается на телефоны. */
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $deletedAt = null;
@@ -82,21 +86,27 @@ class Contact
      *
      * @return bool были ли изменения
      */
-    public function apply(?string $name, array $phones, array $emails): bool
+    public function apply(?string $name, array $phones, array $emails, ?string $photoSha256 = null): bool
     {
         $name = self::normalizeName($name);
         $phones = self::normalizePhones($phones);
         $emails = self::normalizeEmails($emails);
-        if ($this->name === $name && $this->phones === $phones && $this->emails === $emails) {
+        if ($this->name === $name && $this->phones === $phones && $this->emails === $emails && $this->photoSha256 === $photoSha256) {
             return false;
         }
 
         $this->name = $name;
         $this->phones = $phones;
         $this->emails = $emails;
+        $this->photoSha256 = $photoSha256;
         $this->touch();
 
         return true;
+    }
+
+    public function getPhotoSha256(): ?string
+    {
+        return $this->photoSha256;
     }
 
     public function markDeleted(): void

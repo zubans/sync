@@ -38,6 +38,8 @@ data class ContactUpload(
     val name: String?,
     val phones: List<String>,
     val emails: List<String>,
+    /** SHA-256 фото; сам файл загружается, если сервер попросит (missingPhotos). */
+    val photo: String? = null,
 )
 
 @Serializable
@@ -59,6 +61,8 @@ data class SyncResult(
     val links: List<SyncLink> = emptyList(),
     /** externalId контактов, удалённых администратором: их нужно удалить из телефонной книги. */
     val removed: List<String> = emptyList(),
+    /** SHA-256 фото, которых на сервере нет: их нужно загрузить. */
+    val missingPhotos: List<String> = emptyList(),
 )
 
 /** Контакт, хранящийся на сервере. */
@@ -68,6 +72,7 @@ data class ServerContact(
     val name: String? = null,
     val phones: List<String> = emptyList(),
     val emails: List<String> = emptyList(),
+    val photo: String? = null,
     val updatedAt: String,
 )
 
@@ -185,6 +190,18 @@ class Api(
     suspend fun sync(request: SyncRequest): SyncResult = post("/api/sync", json.encodeToString(request))
 
     suspend fun personalContacts(): List<ServerContact> = get<ContactsResponse>("/api/contacts").contacts
+
+    suspend fun uploadContactPhoto(sha256: String, bytes: ByteArray) {
+        execute<JsonObject?>(request("/api/contact-photos/$sha256", auth = true).put(bytes.toRequestBody(OCTET)).build())
+    }
+
+    suspend fun downloadContactPhoto(sha256: String): ByteArray = withContext(Dispatchers.IO) {
+        client.newCall(request("/api/contact-photos/$sha256", auth = true).get().build()).execute().use { response ->
+            if (response.code == 401) throw UnauthorizedException()
+            if (!response.isSuccessful) throw ApiException("Не удалось скачать фото (HTTP ${response.code})", response.code)
+            response.body!!.bytes()
+        }
+    }
 
     suspend fun familyContacts(): FamilyContactsResponse = get("/api/family/contacts")
 

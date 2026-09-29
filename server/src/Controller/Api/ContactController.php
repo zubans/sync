@@ -6,9 +6,13 @@ use App\Dto\SyncRequest;
 use App\Entity\Contact;
 use App\Entity\User;
 use App\Repository\ContactRepository;
+use App\Service\ContactPhotoStorage;
 use App\Service\ContactSyncService;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Attribute\MapRequestPayload;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\CurrentUser;
@@ -45,6 +49,43 @@ final class ContactController extends AbstractController
         ]);
     }
 
+    /**
+     * Загрузка фото контакта. Принимается только фото, которое сервер попросил в missingPhotos:
+     * хэш должен совпасть с фото одного из контактов пользователя.
+     */
+    #[Route('/contact-photos/{sha256}', name: 'api_contact_photo_upload', requirements: ['sha256' => '[0-9a-f]{64}'], methods: ['PUT'])]
+    public function uploadPhoto(
+        #[CurrentUser] User $user,
+        string $sha256,
+        Request $request,
+        ContactRepository $contacts,
+        ContactPhotoStorage $photos,
+    ): JsonResponse {
+        if (!$contacts->userCanSeePhoto($user, $sha256)) {
+            throw $this->createNotFoundException();
+        }
+        if (!$photos->has($sha256) && ($error = $photos->store($sha256, $request->getContent())) !== null) {
+            return $this->json(['error' => $error], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+
+        return $this->json(null, Response::HTTP_NO_CONTENT);
+    }
+
+    /** Фото для восстановления на телефон — только своих и семейных контактов. */
+    #[Route('/contact-photos/{sha256}', name: 'api_contact_photo', requirements: ['sha256' => '[0-9a-f]{64}'], methods: ['GET'])]
+    public function photo(
+        #[CurrentUser] User $user,
+        string $sha256,
+        ContactRepository $contacts,
+        ContactPhotoStorage $photos,
+    ): BinaryFileResponse {
+        if (!$contacts->userCanSeePhoto($user, $sha256) || !$photos->has($sha256)) {
+            throw $this->createNotFoundException();
+        }
+
+        return (new BinaryFileResponse($photos->path($sha256)))->setPrivate();
+    }
+
     /** @return array<string, mixed> */
     private static function view(Contact $c): array
     {
@@ -53,6 +94,7 @@ final class ContactController extends AbstractController
             'name' => $c->getName(),
             'phones' => $c->getPhones(),
             'emails' => $c->getEmails(),
+            'photo' => $c->getPhotoSha256(),
             'updatedAt' => $c->getUpdatedAt()->format(\DATE_ATOM),
         ];
     }

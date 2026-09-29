@@ -6,6 +6,7 @@ import android.content.ContentUris
 import android.provider.ContactsContract
 import android.provider.ContactsContract.CommonDataKinds.Email
 import android.provider.ContactsContract.CommonDataKinds.Phone
+import android.provider.ContactsContract.CommonDataKinds.Photo
 import android.provider.ContactsContract.CommonDataKinds.StructuredName
 import android.provider.ContactsContract.Contacts
 import android.provider.ContactsContract.Data
@@ -19,6 +20,8 @@ data class LocalContact(
     val name: String?,
     val phones: List<String>,
     val emails: List<String>,
+    /** «Версия» фото (id строки фото + её DATA_VERSION): меняется, когда меняется фото. null — фото нет. */
+    val photoKey: String? = null,
 ) {
     val fingerprint: String get() = Fingerprint.of(name, phones, emails)
 
@@ -46,7 +49,13 @@ object ExternalId {
 }
 
 /** Данные контакта для записи в телефонную книгу. */
-data class ContactData(val name: String?, val phones: List<String>, val emails: List<String>) {
+data class ContactData(
+    val name: String?,
+    val phones: List<String>,
+    val emails: List<String>,
+    /** Фото (JPEG/PNG), ставится только при создании контакта. */
+    val photo: ByteArray? = null,
+) {
     val fingerprint: String get() = Fingerprint.of(name, phones, emails)
 }
 
@@ -101,16 +110,27 @@ class PhoneContacts(private val resolver: ContentResolver) {
             }
         }
 
+        // DATA_VERSION строки фото растёт при каждой её правке — по нему кэшируется хэш фото.
+        val photoVersions = mutableMapOf<Long, Int>()
+        resolver.query(
+            Data.CONTENT_URI,
+            arrayOf(Data._ID, Data.DATA_VERSION),
+            "${Data.MIMETYPE} = ?",
+            arrayOf(Photo.CONTENT_ITEM_TYPE),
+            null,
+        )?.use { c -> while (c.moveToNext()) photoVersions[c.getLong(0)] = c.getInt(1) }
+
         val result = mutableListOf<LocalContact>()
         resolver.query(
             Contacts.CONTENT_URI,
-            arrayOf(Contacts._ID, Contacts.LOOKUP_KEY, Contacts.DISPLAY_NAME_PRIMARY),
+            arrayOf(Contacts._ID, Contacts.LOOKUP_KEY, Contacts.DISPLAY_NAME_PRIMARY, Contacts.PHOTO_ID),
             null,
             null,
             "${Contacts.DISPLAY_NAME_PRIMARY} ASC",
         )?.use { c ->
             while (c.moveToNext()) {
                 val id = c.getLong(0)
+                val photoId = if (c.isNull(3)) null else c.getLong(3)
                 result += LocalContact(
                     contactId = id,
                     // LOOKUP_KEY стабильнее _ID: переживает агрегацию и пересоздание строк контакта.
@@ -119,11 +139,17 @@ class PhoneContacts(private val resolver: ContentResolver) {
                     name = c.getString(2),
                     phones = phones[id]?.distinct().orEmpty(),
                     emails = emails[id]?.distinct().orEmpty(),
+                    photoKey = photoId?.let { "$it:${photoVersions[it] ?: 0}" },
                 )
             }
         }
         return result
     }
+
+    /** Полноразмерное фото контакта (или миниатюра, если большого нет). */
+    fun photoBytes(contactId: Long): ByteArray? =
+        Contacts.openContactPhotoInputStream(resolver, ContentUris.withAppendedId(Contacts.CONTENT_URI, contactId), true)
+            ?.use { it.readBytes() }
 
     /** Создаёт контакт в памяти телефона (без привязки к аккаунту). Возвращает id raw-контакта. */
     fun insert(data: ContactData): Long {
@@ -211,6 +237,14 @@ class PhoneContacts(private val resolver: ContentResolver) {
                     .build(),
             )
         }
+        data.photo?.takeIf { it.size <= MAX_PHOTO_BYTES }?.let { photo ->
+            add(
+                bindRaw(ContentProviderOperation.newInsert(Data.CONTENT_URI))
+                    .withValue(Data.MIMETYPE, Photo.CONTENT_ITEM_TYPE)
+                    .withValue(Photo.PHOTO, photo)
+                    .build(),
+            )
+        }
         data.emails.forEach { email ->
             add(
                 bindRaw(ContentProviderOperation.newInsert(Data.CONTENT_URI))
@@ -224,5 +258,8 @@ class PhoneContacts(private val resolver: ContentResolver) {
 
     companion object {
         const val GOOGLE_ACCOUNT_TYPE = "com.google"
+
+        /** Операции с контактами идут через Binder (лимит ~1 МБ на транзакцию) — крупнее не пишем. */
+        private const val MAX_PHOTO_BYTES = 800 * 1024
     }
 }
