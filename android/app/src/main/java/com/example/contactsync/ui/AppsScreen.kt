@@ -7,12 +7,14 @@ import android.text.format.DateUtils
 import android.text.format.Formatter
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
@@ -52,6 +54,7 @@ fun AppsScreen() {
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val installing = remember { mutableStateMapOf<String, String>() }
+    var rollbackBlocked by remember { mutableStateOf<BackedUpApp?>(null) }
     val backupWork by SyncScheduler.appsBackupState(context).collectAsState(initial = emptyList())
     val running = backupWork.firstOrNull { it.state == WorkInfo.State.RUNNING }
     val retrying = backupWork.firstOrNull { it.state == WorkInfo.State.ENQUEUED && it.runAttemptCount > 0 }
@@ -150,15 +153,60 @@ fun AppsScreen() {
                                 .onFailure { installing[item.packageName] = "Ошибка: ${it.message}" }
                         }
                     },
+                    onRollback = rollback@{
+                        val previous = item.previous ?: return@rollback
+                        if (installed != null && installed > previous.versionCode) {
+                            rollbackBlocked = item
+                            return@rollback
+                        }
+                        if (!app.apkInstaller.canInstall()) {
+                            context.startActivity(app.apkInstaller.permissionSettingsIntent())
+                            return@rollback
+                        }
+                        installing[item.packageName] = "Скачиваю версию ${previous.versionName ?: previous.versionCode}…"
+                        app.scope.launch {
+                            runCatching { app.apkInstaller.install(item, previous = true) }
+                                .onSuccess { installing[item.packageName] = "Ожидает подтверждения" }
+                                .onFailure { installing[item.packageName] = "Ошибка: ${it.message}" }
+                        }
+                    },
                 )
             }
         }
         if (apps?.isEmpty() == true) Text("На сервере пока нет сохранённых приложений.")
     }
+
+    // Android не ставит старую версию поверх новой: сначала нужно удалить текущую.
+    rollbackBlocked?.let { item ->
+        AlertDialog(
+            onDismissRequest = { rollbackBlocked = null },
+            title = { Text("Откат ${item.label ?: item.packageName}") },
+            text = {
+                Text(
+                    "Android не устанавливает старую версию поверх новой. Удалите приложение " +
+                        "(его данные на телефоне будут удалены), затем снова нажмите «Прошлая версия».",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    context.startActivity(app.apkInstaller.uninstallIntent(item.packageName))
+                    rollbackBlocked = null
+                }) { Text("Удалить приложение") }
+            },
+            dismissButton = { TextButton(onClick = { rollbackBlocked = null }) { Text("Отмена") } },
+        )
+    }
 }
 
 @Composable
-private fun AppRow(item: BackedUpApp, installed: Boolean, status: String?, onPlay: () -> Unit, onInstall: () -> Unit) {
+private fun AppRow(
+    item: BackedUpApp,
+    installed: Boolean,
+    status: String?,
+    onPlay: () -> Unit,
+    onInstall: () -> Unit,
+    onRollback: () -> Unit,
+) {
     val context = LocalContext.current
     Card(Modifier.fillMaxWidth()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -170,6 +218,11 @@ private fun AppRow(item: BackedUpApp, installed: Boolean, status: String?, onPla
                     style = MaterialTheme.typography.bodySmall,
                 )
                 status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                item.previous?.let { previous ->
+                    TextButton(onClick = onRollback, contentPadding = PaddingValues(0.dp)) {
+                        Text("Прошлая версия ${previous.versionName ?: previous.versionCode}", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
             when {
                 installed -> Text("Установлено", style = MaterialTheme.typography.bodySmall)

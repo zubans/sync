@@ -147,6 +147,15 @@ data class InventoryRequest(val device: DeviceDto, val apps: List<AppDto>)
 @Serializable
 data class InventoryResponse(val missing: List<String>)
 
+/** Сохранённая на сервере версия приложения (для отката). */
+@Serializable
+data class AppVersionDto(
+    val versionName: String? = null,
+    val versionCode: Long,
+    val files: List<ApkFileDto>,
+    val size: Long,
+)
+
 @Serializable
 data class BackedUpApp(
     val packageName: String,
@@ -158,6 +167,8 @@ data class BackedUpApp(
     val files: List<ApkFileDto>,
     val size: Long,
     val backedUp: Boolean,
+    /** Прошлая сохранённая версия; null — откатываться не на что. */
+    val previous: AppVersionDto? = null,
 )
 
 @Serializable

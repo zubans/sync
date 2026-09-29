@@ -57,36 +57,65 @@ final class AppController extends AbstractController
 
     /**
      * Приложения пользователя для восстановления: по каждому пакету — самая свежая версия
-     * среди устройств, где он ещё установлен.
+     * среди устройств, где он ещё установлен, и прошлая сохранённая версия для отката.
      */
     #[Route('/apps', name: 'api_apps', methods: ['GET'])]
     public function list(#[CurrentUser] User $user, ApkBlobRepository $blobs): JsonResponse
     {
-        $latest = [];
+        /** @var array<string, list<InstalledApp>> $byPackage */
+        $byPackage = [];
         foreach ($this->apps->findByUser($user) as $app) {
-            if ($app->getRemovedAt() !== null) {
-                continue;
-            }
-            $current = $latest[$app->getPackageName()] ?? null;
-            if ($current === null || $app->getVersionCode() > $current->getVersionCode()) {
-                $latest[$app->getPackageName()] = $app;
+            if ($app->getRemovedAt() === null) {
+                $byPackage[$app->getPackageName()][] = $app;
             }
         }
 
-        $hashes = array_merge([], ...array_map(static fn (InstalledApp $a) => $a->getFileHashes(), array_values($latest)));
-        $stored = array_flip(array_map(static fn (ApkBlob $b) => $b->getSha256(), $blobs->findBy(['sha256' => $hashes])));
+        $hashes = [];
+        foreach ($byPackage as $apps) {
+            foreach ($apps as $app) {
+                array_push($hashes, ...$app->getAllFileHashes());
+            }
+        }
+        $stored = array_flip(array_map(static fn (ApkBlob $b) => $b->getSha256(), $blobs->findBy(['sha256' => array_values(array_unique($hashes))])));
+        $isStored = static fn (array $files): bool => $files !== [] && array_diff(array_column($files, 'sha256'), array_keys($stored)) === [];
 
-        $result = array_map(static fn (InstalledApp $a) => [
-            'packageName' => $a->getPackageName(),
-            'label' => $a->getLabel(),
-            'versionName' => $a->getVersionName(),
-            'versionCode' => $a->getVersionCode(),
-            'fromPlay' => $a->isFromPlay(),
-            'signingSha256' => $a->getSigningSha256(),
-            'files' => $a->getFiles(),
-            'size' => $a->getTotalSize(),
-            'backedUp' => array_diff($a->getFileHashes(), array_keys($stored)) === [],
-        ], array_values($latest));
+        $result = [];
+        foreach ($byPackage as $apps) {
+            usort($apps, static fn (InstalledApp $a, InstalledApp $b) => $b->getVersionCode() <=> $a->getVersionCode());
+            $latest = $apps[0];
+
+            // Кандидаты на откат: текущие и прошлые версии со всех устройств, старше текущей и сохранённые.
+            $previous = null;
+            foreach ($apps as $app) {
+                $candidates = [
+                    [$app->getVersionName(), $app->getVersionCode(), $app->getFiles()],
+                    [$app->getPreviousVersionName(), $app->getPreviousVersionCode(), $app->getPreviousFiles()],
+                ];
+                foreach ($candidates as [$name, $code, $files]) {
+                    if ($code !== null && $code < $latest->getVersionCode() && $isStored($files) && ($previous === null || $code > $previous['versionCode'])) {
+                        $previous = [
+                            'versionName' => $name,
+                            'versionCode' => $code,
+                            'files' => $files,
+                            'size' => array_sum(array_column($files, 'size')),
+                        ];
+                    }
+                }
+            }
+
+            $result[] = [
+                'packageName' => $latest->getPackageName(),
+                'label' => $latest->getLabel(),
+                'versionName' => $latest->getVersionName(),
+                'versionCode' => $latest->getVersionCode(),
+                'fromPlay' => $latest->isFromPlay(),
+                'signingSha256' => $latest->getSigningSha256(),
+                'files' => $latest->getFiles(),
+                'size' => $latest->getTotalSize(),
+                'backedUp' => $isStored($latest->getFiles()),
+                'previous' => $previous,
+            ];
+        }
         usort($result, static fn (array $a, array $b) => strcasecmp($a['label'] ?? $a['packageName'], $b['label'] ?? $b['packageName']));
 
         return $this->json(['apps' => $result]);

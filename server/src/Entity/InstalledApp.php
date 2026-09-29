@@ -51,6 +51,17 @@ class InstalledApp
     #[ORM\Column(type: Types::JSON)]
     private array $files = [];
 
+    /** Прошлая версия (для отката): что стояло до последнего обновления и сохранено на сервере. */
+    #[ORM\Column(length: 100, nullable: true)]
+    private ?string $previousVersionName = null;
+
+    #[ORM\Column(type: Types::BIGINT, nullable: true)]
+    private ?string $previousVersionCode = null;
+
+    /** @var list<array{name: string, sha256: string, size: int}>|null */
+    #[ORM\Column(type: Types::JSON, nullable: true)]
+    private ?array $previousFiles = null;
+
     #[ORM\Column]
     private \DateTimeImmutable $firstSeenAt;
 
@@ -85,6 +96,25 @@ class InstalledApp
         $this->removedAt = null;
     }
 
+    /**
+     * @param list<array{name: string, sha256: string, size: int}> $files
+     */
+    public function isSameVersion(int $versionCode, array $files): bool
+    {
+        return $this->getVersionCode() === $versionCode && $this->getFileHashes() === array_column($files, 'sha256');
+    }
+
+    /** Перед обновлением: текущая версия становится прошлой. */
+    public function rememberCurrentAsPrevious(): void
+    {
+        if ($this->files === []) {
+            return;
+        }
+        $this->previousVersionName = $this->versionName;
+        $this->previousVersionCode = $this->versionCode;
+        $this->previousFiles = $this->files;
+    }
+
     public function markRemoved(): void
     {
         $this->removedAt ??= new \DateTimeImmutable();
@@ -99,6 +129,28 @@ class InstalledApp
     public function getFileHashes(): array
     {
         return array_column($this->files, 'sha256');
+    }
+
+    /** @return list<string> APK текущей и прошлой версии — всё, что нужно хранить для этого приложения */
+    public function getAllFileHashes(): array
+    {
+        return [...$this->getFileHashes(), ...array_column($this->previousFiles ?? [], 'sha256')];
+    }
+
+    public function getPreviousVersionName(): ?string
+    {
+        return $this->previousVersionName;
+    }
+
+    public function getPreviousVersionCode(): ?int
+    {
+        return $this->previousVersionCode === null ? null : (int) $this->previousVersionCode;
+    }
+
+    /** @return list<array{name: string, sha256: string, size: int}> */
+    public function getPreviousFiles(): array
+    {
+        return $this->previousFiles ?? [];
     }
 
     public function getTotalSize(): int

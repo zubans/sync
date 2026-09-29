@@ -58,6 +58,10 @@ final class InstalledAppCrudController extends AbstractCrudController
         yield TextField::new('label', 'Название');
         yield TextField::new('packageName', 'Пакет');
         yield TextField::new('versionName', 'Версия');
+        // Строковое поле + formatValue: без прошлой версии показываем «—», а не бейдж «Null».
+        yield TextField::new('packageName', 'Прошлая версия')
+            ->formatValue(static fn ($value, InstalledApp $app) => $app->getPreviousVersionName() ?? '—')
+            ->setSortable(false);
         yield AssociationField::new('user', 'Пользователь');
         yield AssociationField::new('device', 'Устройство');
         yield TextField::new('installer', 'Источник')

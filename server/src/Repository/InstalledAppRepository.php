@@ -38,7 +38,7 @@ class InstalledAppRepository extends ServiceEntityRepository
     public function userHasFile(User $user, string $sha256): bool
     {
         foreach ($this->findBy(['user' => $user]) as $app) {
-            if (\in_array($sha256, $app->getFileHashes(), true)) {
+            if (\in_array($sha256, $app->getAllFileHashes(), true)) {
                 return true;
             }
         }

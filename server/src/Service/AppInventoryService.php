@@ -54,13 +54,19 @@ final class AppInventoryService
                     $app = new InstalledApp($device, $appInput->packageName);
                     $this->em->persist($app);
                 }
+                $files = array_map(static fn (AppFileInput $f) => ['name' => $f->name, 'sha256' => $f->sha256, 'size' => $f->size], $appInput->files);
+                // Обновилось — текущая версия становится прошлой (для отката), но только если её APK
+                // сохранён: иначе держим прежнюю прошлую, чтобы не остаться без рабочей копии.
+                if (!$app->isSameVersion($appInput->versionCode, $files) && $this->isStored($app->getFileHashes())) {
+                    $app->rememberCurrentAsPrevious();
+                }
                 $app->update(
                     $appInput->label,
                     $appInput->versionName,
                     $appInput->versionCode,
                     $appInput->installer,
                     $appInput->signingSha256,
-                    array_map(static fn (AppFileInput $f) => ['name' => $f->name, 'sha256' => $f->sha256, 'size' => $f->size], $appInput->files),
+                    $files,
                 );
 
                 if ($this->shouldBackUp($app)) {
@@ -79,6 +85,12 @@ final class AppInventoryService
 
             return array_values(array_diff(array_map('strval', array_keys($wanted)), $stored));
         });
+    }
+
+    /** @param list<string> $hashes */
+    private function isStored(array $hashes): bool
+    {
+        return $hashes !== [] && \count($this->blobs->findBy(['sha256' => $hashes])) === \count(array_unique($hashes));
     }
 
     public function shouldBackUp(InstalledApp $app): bool

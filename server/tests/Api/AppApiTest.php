@@ -128,26 +128,58 @@ final class AppApiTest extends DatabaseWebTestCase
         self::assertFalse($apps[0]['backedUp']);
     }
 
-    public function testOldVersionIsRemovedOnlyWhenNoDeviceHasItAnymore(): void
+    public function testCurrentAndPreviousVersionsAreKeptOlderAreDeleted(): void
     {
         $storage = static::getContainer()->get(ApkStorage::class);
-        $v1 = $this->apkSha;
-        $this->inventory([$this->app('org.example.sideloaded', $v1, \strlen($this->apk))]);
-        $this->uploadWhole($v1, $this->apk);
-        // Второй телефон с той же версией.
-        $phoneB = ['installId' => 'install-bbbb-0002'] + self::DEVICE;
-        $this->inventory([$this->app('org.example.sideloaded', $v1, \strlen($this->apk))], $phoneB);
+        [$v1, $v1sha] = [$this->apk, $this->apkSha];
+        $this->inventory([$this->app('org.example.sideloaded', $v1sha, \strlen($v1))]);
+        $this->uploadWhole($v1sha, $v1);
 
-        // Первый телефон обновил приложение — v1 ещё стоит на втором, её не трогаем.
-        $v2apk = random_bytes(2000);
-        $v2 = hash('sha256', $v2apk);
-        self::assertSame([$v2], $this->inventory([$this->app('org.example.sideloaded', $v2, 2000, versionCode: 2)])['missing']);
-        self::assertTrue($storage->has($v1));
+        // Обновили до v2: v1 становится прошлой и остаётся на сервере.
+        [$v2, $v2sha] = $this->version(2000);
+        self::assertSame([$v2sha], $this->inventory([$this->app('org.example.sideloaded', $v2sha, 2000, versionCode: 2)])['missing']);
+        $this->uploadWhole($v2sha, $v2);
+        self::assertTrue($storage->has($v1sha));
 
-        // Второй тоже обновился — v1 больше нигде не нужна.
-        $this->inventory([$this->app('org.example.sideloaded', $v2, 2000, versionCode: 2)], $phoneB);
-        self::assertFalse($storage->has($v1));
-        self::assertNull($this->em->getRepository(ApkBlob::class)->findOneBy(['sha256' => $v1]));
+        $app = $this->api('GET', '/api/apps', token: $this->token)['apps'][0];
+        self::assertSame(2, $app['versionCode']);
+        self::assertSame(1, $app['previous']['versionCode']);
+        self::assertSame($v1sha, $app['previous']['files'][0]['sha256']);
+        // Прошлую версию можно скачать для отката.
+        $this->client->request('GET', '/api/apk/'.$v1sha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$this->token]);
+        self::assertResponseIsSuccessful();
+
+        // Обновили до v3: прошлой становится v2, а v1 больше не нужна.
+        [, $v3sha] = $this->version(1500);
+        $this->inventory([$this->app('org.example.sideloaded', $v3sha, 1500, versionCode: 3)]);
+        self::assertFalse($storage->has($v1sha));
+        self::assertTrue($storage->has($v2sha));
+        self::assertSame(2, $this->api('GET', '/api/apps', token: $this->token)['apps'][0]['previous']['versionCode']);
+    }
+
+    public function testPreviousVersionIsNotLostIfNewOneWasNotUploaded(): void
+    {
+        $storage = static::getContainer()->get(ApkStorage::class);
+        $this->inventory([$this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk))]);
+        $this->uploadWhole($this->apkSha, $this->apk);
+
+        // v2 так и не загрузилась (обрыв связи), а приложение уже обновилось до v3.
+        [, $v2sha] = $this->version(2000);
+        $this->inventory([$this->app('org.example.sideloaded', $v2sha, 2000, versionCode: 2)]);
+        [, $v3sha] = $this->version(1500);
+        $this->inventory([$this->app('org.example.sideloaded', $v3sha, 1500, versionCode: 3)]);
+
+        // Откатиться всё ещё можно на v1 — единственную сохранённую.
+        self::assertTrue($storage->has($this->apkSha));
+        self::assertSame(1, $this->api('GET', '/api/apps', token: $this->token)['apps'][0]['previous']['versionCode']);
+    }
+
+    /** @return array{string, string} байты и SHA-256 «новой версии» APK */
+    private function version(int $size): array
+    {
+        $bytes = random_bytes($size);
+
+        return [$bytes, hash('sha256', $bytes)];
     }
 
     public function testApkOfRemovedAppIsDeleted(): void

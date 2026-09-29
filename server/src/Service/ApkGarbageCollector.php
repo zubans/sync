@@ -7,9 +7,9 @@ use App\Repository\InstalledAppRepository;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * Удаляет APK, которые больше не нужны для восстановления: их нет ни в одном приложении,
- * установленном сейчас на каком-либо устройстве. Так уходят старые версии после обновления
- * приложения и копии удалённых приложений — сервер хранит только то, что стоит на телефонах.
+ * Удаляет APK, которые больше не нужны для восстановления: их нет ни в текущей, ни в прошлой версии
+ * приложений, установленных сейчас на каком-либо устройстве. Так уходят версии старше прошлой
+ * и копии удалённых приложений — сервер хранит текущую и прошлую (для отката) версии.
  */
 final class ApkGarbageCollector
 {
@@ -31,7 +31,7 @@ final class ApkGarbageCollector
     {
         $referenced = [];
         foreach ($this->apps->findBy(['removedAt' => null]) as $app) {
-            foreach ($app->getFileHashes() as $sha256) {
+            foreach ($app->getAllFileHashes() as $sha256) {
                 $referenced[$sha256] = true;
             }
         }

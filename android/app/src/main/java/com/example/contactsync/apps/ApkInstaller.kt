@@ -35,13 +35,22 @@ class ApkInstaller(private val context: Context, private val api: Api) {
 
     fun canInstall(): Boolean = context.packageManager.canRequestPackageInstalls()
 
+    /**
+     * Системный диалог удаления приложения. Нужен для отката: Android не ставит старую версию
+     * поверх новой, сначала текущую надо удалить (данные приложения при этом удаляются).
+     */
+    fun uninstallIntent(packageName: String): Intent =
+        Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName"))
+
     /** Экран системных настроек «Установка неизвестных приложений» для нашего приложения. */
     fun permissionSettingsIntent(): Intent =
         Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
 
-    suspend fun install(app: BackedUpApp) = withContext(Dispatchers.IO) {
+    /** @param previous поставить прошлую сохранённую версию (откат) вместо текущей */
+    suspend fun install(app: BackedUpApp, previous: Boolean = false) = withContext(Dispatchers.IO) {
+        val meta = if (previous) requireNotNull(app.previous) { "Прошлой версии нет" }.files else app.files
         val dir = File(context.cacheDir, "apk").apply { mkdirs() }
-        val files = app.files.map { file ->
+        val files = meta.map { file ->
             File(dir, "${file.sha256}.apk").also { target ->
                 if (!target.exists() || AppInventory.sha256(target) != file.sha256) {
                     api.downloadApk(file.sha256, target)
@@ -52,7 +61,7 @@ class ApkInstaller(private val context: Context, private val api: Api) {
                 }
             }
         }
-        val baseIndex = app.files.indexOfFirst { it.name == "base.apk" }.coerceAtLeast(0)
+        val baseIndex = meta.indexOfFirst { it.name == "base.apk" }.coerceAtLeast(0)
         verifySignature(app, files[baseIndex])
 
         val installer = context.packageManager.packageInstaller
@@ -62,8 +71,8 @@ class ApkInstaller(private val context: Context, private val api: Api) {
         }
         val sessionId = installer.createSession(params)
         installer.openSession(sessionId).use { session ->
-            app.files.zip(files).forEach { (meta, file) ->
-                session.openWrite(meta.name, 0, file.length()).use { out ->
+            meta.zip(files).forEach { (apk, file) ->
+                session.openWrite(apk.name, 0, file.length()).use { out ->
                     file.inputStream().use { it.copyTo(out) }
                     session.fsync(out)
                 }
