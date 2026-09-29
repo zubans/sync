@@ -4,7 +4,7 @@
 COMPOSE   := docker compose
 APP       := $(COMPOSE) exec app
 HTTP_PORT ?= $(shell grep -s '^HTTP_PORT=' .env | cut -d= -f2)
-HTTP_PORT := $(or $(HTTP_PORT),8000)
+HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
 
 .DEFAULT_GOAL := help
@@ -17,7 +17,7 @@ help: ## Список команд
 
 init: ## Создать .env со случайными секретами (один раз)
 	@if [ -f .env ]; then echo ".env уже есть — не трогаю"; else \
-		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nHTTP_PORT=8000\nAPK_BACKUP_INCLUDE_PLAY=0\n' \
+		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nHTTP_PORT=8001\nAPK_BACKUP_INCLUDE_PLAY=0\n' \
 			"$$(openssl rand -hex 32)" "$$(openssl rand -hex 24)" > .env && \
 		echo "Создан .env (секреты сгенерированы)"; fi
 

@@ -20,7 +20,7 @@ android {
         // Без параметра — 10.0.2.2 (хост-машина из эмулятора Android) и HTTP_PORT из корневого .env.
         val httpPort = rootProject.file("../.env").takeIf { it.exists() }?.readLines()
             ?.firstNotNullOfOrNull { it.trim().removePrefix("HTTP_PORT=").takeIf { p -> p != it.trim() } }
-            ?.takeIf { it.isNotBlank() } ?: "8000"
+            ?.takeIf { it.isNotBlank() } ?: "8001"
         val serverUrl = providers.gradleProperty("serverUrl").getOrElse("http://10.0.2.2:$httpPort")
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"$serverUrl\"")
     }
