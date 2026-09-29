@@ -96,6 +96,31 @@ final class ApkStorage
         return true;
     }
 
+    public function delete(string $sha256): void
+    {
+        $path = $this->path($sha256);
+        if (is_file($path)) {
+            unlink($path);
+        }
+    }
+
+    /**
+     * Удаляет недокачанные загрузки, которые не продолжали дольше $maxAgeSeconds.
+     *
+     * @return int сколько удалено
+     */
+    public function deleteStaleUploads(int $maxAgeSeconds): int
+    {
+        $deleted = 0;
+        foreach (glob($this->dir.'/uploads/*.part') ?: [] as $part) {
+            if (filemtime($part) < time() - $maxAgeSeconds && unlink($part)) {
+                ++$deleted;
+            }
+        }
+
+        return $deleted;
+    }
+
     private function partPath(int $userId, string $sha256): string
     {
         return \sprintf('%s/uploads/%d-%s.part', $this->dir, $userId, $sha256);

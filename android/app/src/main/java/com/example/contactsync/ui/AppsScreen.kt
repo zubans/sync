@@ -89,7 +89,7 @@ fun AppsScreen() {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Резервная копия", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Список приложений и APK, установленных не из Google Play. Загрузка — раз в сутки по Wi-Fi на зарядке.",
+                    "Список приложений и APK, установленных не из Google Play. Обновляется раз в неделю ночью, когда телефон на зарядке и в Wi-Fi.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 val last = app.session.lastAppsBackupAt

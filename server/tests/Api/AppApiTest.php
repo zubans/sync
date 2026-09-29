@@ -2,6 +2,8 @@
 
 namespace App\Tests\Api;
 
+use App\Entity\ApkBlob;
+use App\Service\ApkStorage;
 use App\Tests\DatabaseWebTestCase;
 use Symfony\Component\Filesystem\Filesystem;
 
@@ -124,6 +126,46 @@ final class AppApiTest extends DatabaseWebTestCase
         self::assertSame(['org.example.a'], array_column($apps, 'packageName'));
         self::assertSame(7, $apps[0]['versionCode']);
         self::assertFalse($apps[0]['backedUp']);
+    }
+
+    public function testOldVersionIsRemovedOnlyWhenNoDeviceHasItAnymore(): void
+    {
+        $storage = static::getContainer()->get(ApkStorage::class);
+        $v1 = $this->apkSha;
+        $this->inventory([$this->app('org.example.sideloaded', $v1, \strlen($this->apk))]);
+        $this->uploadWhole($v1, $this->apk);
+        // Второй телефон с той же версией.
+        $phoneB = ['installId' => 'install-bbbb-0002'] + self::DEVICE;
+        $this->inventory([$this->app('org.example.sideloaded', $v1, \strlen($this->apk))], $phoneB);
+
+        // Первый телефон обновил приложение — v1 ещё стоит на втором, её не трогаем.
+        $v2apk = random_bytes(2000);
+        $v2 = hash('sha256', $v2apk);
+        self::assertSame([$v2], $this->inventory([$this->app('org.example.sideloaded', $v2, 2000, versionCode: 2)])['missing']);
+        self::assertTrue($storage->has($v1));
+
+        // Второй тоже обновился — v1 больше нигде не нужна.
+        $this->inventory([$this->app('org.example.sideloaded', $v2, 2000, versionCode: 2)], $phoneB);
+        self::assertFalse($storage->has($v1));
+        self::assertNull($this->em->getRepository(ApkBlob::class)->findOneBy(['sha256' => $v1]));
+    }
+
+    public function testApkOfRemovedAppIsDeleted(): void
+    {
+        $storage = static::getContainer()->get(ApkStorage::class);
+        $this->inventory([$this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk))]);
+        $this->uploadWhole($this->apkSha, $this->apk);
+
+        $this->inventory([]);
+
+        self::assertFalse($storage->has($this->apkSha));
+    }
+
+    private function uploadWhole(string $sha, string $bytes): void
+    {
+        $this->putChunk('/api/apk/uploads/'.$sha, 0, $bytes);
+        $this->api('POST', '/api/apk/uploads/'.$sha.'/complete', token: $this->token);
+        self::assertResponseStatusCodeSame(201);
     }
 
     /** @return array<string, mixed> */

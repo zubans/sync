@@ -8,6 +8,7 @@ use App\Entity\InstalledApp;
 use App\Entity\User;
 use App\Repository\ApkBlobRepository;
 use App\Repository\InstalledAppRepository;
+use App\Service\ApkGarbageCollector;
 use App\Service\ApkStorage;
 use App\Service\AppInventoryService;
 use App\Service\UploadOffsetMismatch;
@@ -37,14 +38,21 @@ final class AppController extends AbstractController
     ) {
     }
 
-    /** Список приложений устройства. В ответе — хэши APK, которых на сервере ещё нет. */
+    /**
+     * Список приложений устройства. В ответе — хэши APK, которых на сервере ещё нет.
+     * После сверки удаляются APK, которые больше нигде не установлены (старые версии, удалённые приложения).
+     */
     #[Route('/apps/inventory', name: 'api_apps_inventory', methods: ['POST'])]
     public function inventory(
         #[CurrentUser] User $user,
         #[MapRequestPayload] InventoryInput $input,
         AppInventoryService $inventory,
+        ApkGarbageCollector $collector,
     ): JsonResponse {
-        return $this->json(['missing' => $inventory->sync($user, $input)]);
+        $missing = $inventory->sync($user, $input);
+        $collector->collect();
+
+        return $this->json(['missing' => $missing]);
     }
 
     /**

@@ -13,14 +13,18 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkQuery
 import androidx.work.workDataOf
+import java.time.ZonedDateTime
 import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 object SyncScheduler {
 
     private const val PERIODIC = "sync-periodic"
     private const val ON_CHANGE = "sync-on-contacts-change"
     private const val VAULT_NOW = "vault-sync-now"
+    /** Устаревшая ежесуточная задача, отменяется при включении. */
     private const val APPS_PERIODIC = "apps-backup-periodic"
+    private const val APPS_NIGHTLY = "apps-backup-nightly"
     private const val APPS_NOW = "apps-backup-now"
     private const val APPS_NOW_TAG = "apps-backup-manual"
 
@@ -34,8 +38,19 @@ object SyncScheduler {
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, periodic)
         observeContacts(context, ExistingWorkPolicy.KEEP)
 
-        // APK — тяжёлые файлы: раз в сутки, только по Wi-Fi и на зарядке.
-        val apps = PeriodicWorkRequestBuilder<ApkBackupWorker>(1, TimeUnit.DAYS)
+        // APK — тяжёлые файлы: раз в неделю ночью, на зарядке и по Wi-Fi (см. NightlyBackup).
+        WorkManager.getInstance(context).cancelUniqueWork(APPS_PERIODIC)
+        scheduleNightlyAppsBackup(context, ExistingWorkPolicy.KEEP)
+    }
+
+    /**
+     * Ставит проверку на ближайшую ночь. Из самого воркера — с APPEND_OR_REPLACE: следующая проверка
+     * встаёт после текущей, а не отменяет её. При включении — KEEP, чтобы не сбивать уже поставленную.
+     */
+    fun scheduleNightlyAppsBackup(context: Context, policy: ExistingWorkPolicy = ExistingWorkPolicy.APPEND_OR_REPLACE) {
+        val delay = NightlyBackup.delayUntilNextStart(ZonedDateTime.now()).plusMinutes(Random.nextLong(0, 30))
+        val request = OneTimeWorkRequestBuilder<ApkBackupWorker>()
+            .setInitialDelay(delay.toMillis(), TimeUnit.MILLISECONDS)
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.UNMETERED)
@@ -43,8 +58,9 @@ object SyncScheduler {
                     .build(),
             )
             .setBackoffCriteria(BackoffPolicy.LINEAR, 15, TimeUnit.MINUTES)
+            .setInputData(workDataOf(ApkBackupWorker.KEY_NIGHTLY to true))
             .build()
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(APPS_PERIODIC, ExistingPeriodicWorkPolicy.KEEP, apps)
+        WorkManager.getInstance(context).enqueueUniqueWork(APPS_NIGHTLY, policy, request)
     }
 
     fun disable(context: Context) {
@@ -52,6 +68,7 @@ object SyncScheduler {
             cancelUniqueWork(PERIODIC)
             cancelUniqueWork(ON_CHANGE)
             cancelUniqueWork(APPS_PERIODIC)
+            cancelUniqueWork(APPS_NIGHTLY)
             cancelUniqueWork(APPS_NOW)
             cancelUniqueWork(VAULT_NOW)
         }
@@ -80,9 +97,9 @@ object SyncScheduler {
         WorkManager.getInstance(context).enqueueUniqueWork(APPS_NOW, ExistingWorkPolicy.REPLACE, request)
     }
 
-    /** Состояние бэкапа приложений: ручной запуск и ежесуточный. */
+    /** Состояние бэкапа приложений: ручной запуск и еженедельный ночной. */
     fun appsBackupState(context: Context) =
-        WorkManager.getInstance(context).getWorkInfosFlow(WorkQuery.fromUniqueWorkNames(APPS_NOW, APPS_PERIODIC))
+        WorkManager.getInstance(context).getWorkInfosFlow(WorkQuery.fromUniqueWorkNames(APPS_NOW, APPS_NIGHTLY))
 
     fun isManualAppsBackup(info: WorkInfo) = APPS_NOW_TAG in info.tags
 
