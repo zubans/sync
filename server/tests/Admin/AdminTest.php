@@ -3,7 +3,6 @@
 namespace App\Tests\Admin;
 
 use App\Entity\Contact;
-use App\Entity\ContactTombstone;
 use App\Entity\Device;
 use App\Entity\Family;
 use App\Entity\InstalledApp;
@@ -154,26 +153,39 @@ final class AdminTest extends DatabaseWebTestCase
         self::assertSame(['+7 900 111-11-11'], $contact->getPhones());
     }
 
-    public function testDeletingContactInAdminLeavesTombstone(): void
+    public function testAdminEditIsSentToPhone(): void
     {
-        $anna = $this->createUser('anna@example.com');
-        $contact = Contact::personal($anna)->setName('Борис');
-        $this->em->persist($contact);
-        $this->em->flush();
-        $uuid = $contact->getUuid();
+        $this->createUser('anna@example.com');
+        $token = $this->login('anna@example.com');
+        $sync = fn (string $name) => $this->api('POST', '/api/sync', [
+            'device' => ['installId' => 'install-aaaa-0001'],
+            'contacts' => [['externalId' => 'a', 'name' => $name, 'phones' => ['+7 900 000-00-01']]],
+        ], $token);
+        $sync('Борис');
+        $contact = $this->em->getRepository(Contact::class)->findOneBy(['name' => 'Борис']);
         $this->client->loginUser($this->createUser('admin@example.com', admin: true));
 
-        // Кнопка «Удалить» в EasyAdmin отправляет общую форму подтверждения с CSRF-токеном ea-delete.
-        $crawler = $this->client->request('GET', '/admin/contact');
-        $token = $crawler->filter('#action-confirmation-modal form input[name="token"], form[method="post"] input[name="token"]')->first()->attr('value');
-        $this->client->request('POST', '/admin/contact/'.$contact->getId().'/delete', ['token' => $token]);
+        $crawler = $this->client->request('GET', '/admin/contact/'.$contact->getId().'/edit');
+        $form = $crawler->filter('form[name="Contact"]')->form();
+        $form['Contact[birthday]'] = '17.05.1980';
+        $this->client->submit($form);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSelectorTextContains('body', 'ГГГГ-ММ-ДД');
 
+        $form['Contact[name]'] = 'Борис Петров';
+        $form['Contact[birthday]'] = '--05-17';
+        $this->client->submit($form);
         self::assertResponseRedirects();
+
+        // В этой синхронизации побеждает сервер: телефон получает правку, его старые данные не применяются.
         $this->em->clear();
-        self::assertNull($this->em->getRepository(Contact::class)->findOneBy(['uuid' => $uuid]));
-        $tombstone = $this->em->getRepository(ContactTombstone::class)->findOneBy(['uuid' => $uuid]);
-        self::assertNotNull($tombstone);
-        self::assertSame('anna@example.com', $tombstone->getUser()->getEmail());
+        $result = $sync('Борис');
+        self::assertSame([['a', 'Борис Петров', '--05-17']], array_map(static fn (array $u) => [$u['externalId'], $u['name'], $u['birthday']], $result['updates']));
+        self::assertSame('Борис Петров', $this->api('GET', '/api/contacts', token: $token)['contacts'][0]['name']);
+
+        // Правка отправляется один раз.
+        $result = $sync('Борис Петров');
+        self::assertSame([], $result['updates']);
     }
 
     public function testFamilyContactOwnerMustBeFamilyMember(): void

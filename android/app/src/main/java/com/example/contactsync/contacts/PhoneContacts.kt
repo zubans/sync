@@ -5,6 +5,7 @@ import android.content.ContentResolver
 import android.content.ContentUris
 import android.provider.ContactsContract
 import android.provider.ContactsContract.CommonDataKinds.Email
+import android.provider.ContactsContract.CommonDataKinds.Event
 import android.provider.ContactsContract.CommonDataKinds.Phone
 import android.provider.ContactsContract.CommonDataKinds.Photo
 import android.provider.ContactsContract.CommonDataKinds.StructuredName
@@ -22,6 +23,8 @@ data class LocalContact(
     val emails: List<String>,
     /** «Версия» фото (id строки фото + её DATA_VERSION): меняется, когда меняется фото. null — фото нет. */
     val photoKey: String? = null,
+    /** День рождения «ГГГГ-ММ-ДД» или «--ММ-ДД» (без года). */
+    val birthday: String? = null,
 ) {
     val fingerprint: String get() = Fingerprint.of(name, phones, emails)
 
@@ -53,10 +56,18 @@ data class ContactData(
     val name: String?,
     val phones: List<String>,
     val emails: List<String>,
-    /** Фото (JPEG/PNG), ставится только при создании контакта. */
+    /** Фото (JPEG/PNG). При обновлении null — фото не трогаем. */
     val photo: ByteArray? = null,
+    val birthday: String? = null,
 ) {
     val fingerprint: String get() = Fingerprint.of(name, phones, emails)
+}
+
+/** День рождения в формате сервера. Приложения пишут дату по-разному — остальные форматы не выгружаем. */
+object Birthday {
+    private val FORMAT = Regex("^(\\d{4}|-)-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])")
+
+    fun normalize(raw: String?): String? = raw?.trim()?.let { FORMAT.find(it)?.value }
 }
 
 /**
@@ -110,6 +121,17 @@ class PhoneContacts(private val resolver: ContentResolver) {
             }
         }
 
+        val birthdays = mutableMapOf<Long, String>()
+        resolver.query(
+            Data.CONTENT_URI,
+            arrayOf(Data.CONTACT_ID, Event.START_DATE),
+            "${Data.MIMETYPE} = ? AND ${Event.TYPE} = ?",
+            arrayOf(Event.CONTENT_ITEM_TYPE, Event.TYPE_BIRTHDAY.toString()),
+            null,
+        )?.use { c ->
+            while (c.moveToNext()) Birthday.normalize(c.getString(1))?.let { birthdays.putIfAbsent(c.getLong(0), it) }
+        }
+
         // DATA_VERSION строки фото растёт при каждой её правке — по нему кэшируется хэш фото.
         val photoVersions = mutableMapOf<Long, Int>()
         resolver.query(
@@ -140,6 +162,7 @@ class PhoneContacts(private val resolver: ContentResolver) {
                     phones = phones[id]?.distinct().orEmpty(),
                     emails = emails[id]?.distinct().orEmpty(),
                     photoKey = photoId?.let { "$it:${photoVersions[it] ?: 0}" },
+                    birthday = birthdays[id],
                 )
             }
         }
@@ -164,23 +187,50 @@ class PhoneContacts(private val resolver: ContentResolver) {
         return ContentUris.parseId(results[0].uri!!)
     }
 
-    /** Перезаписывает имя, телефоны и email raw-контакта. */
+    /** Перезаписывает имя, телефоны, email и день рождения raw-контакта; фото — только если оно передано. */
     fun update(rawContactId: Long, data: ContactData) {
+        val mimeTypes = listOfNotNull(
+            StructuredName.CONTENT_ITEM_TYPE,
+            Phone.CONTENT_ITEM_TYPE,
+            Email.CONTENT_ITEM_TYPE,
+            Photo.CONTENT_ITEM_TYPE.takeIf { data.photo != null },
+        )
         val ops = arrayListOf(
             ContentProviderOperation.newDelete(Data.CONTENT_URI)
                 .withSelection(
-                    "${Data.RAW_CONTACT_ID} = ? AND ${Data.MIMETYPE} IN (?, ?, ?)",
-                    arrayOf(
-                        rawContactId.toString(),
-                        StructuredName.CONTENT_ITEM_TYPE,
-                        Phone.CONTENT_ITEM_TYPE,
-                        Email.CONTENT_ITEM_TYPE,
-                    ),
+                    "${Data.RAW_CONTACT_ID} = ? AND ${Data.MIMETYPE} IN (${mimeTypes.joinToString { "?" }})",
+                    arrayOf(rawContactId.toString(), *mimeTypes.toTypedArray()),
+                )
+                .build(),
+            // Из событий — только день рождения: годовщины и прочие даты не трогаем.
+            ContentProviderOperation.newDelete(Data.CONTENT_URI)
+                .withSelection(
+                    "${Data.RAW_CONTACT_ID} = ? AND ${Data.MIMETYPE} = ? AND ${Event.TYPE} = ?",
+                    arrayOf(rawContactId.toString(), Event.CONTENT_ITEM_TYPE, Event.TYPE_BIRTHDAY.toString()),
                 )
                 .build(),
         )
         ops += dataRows(data) { it.withValue(Data.RAW_CONTACT_ID, rawContactId) }
         resolver.applyBatch(ContactsContract.AUTHORITY, ops)
+    }
+
+    /**
+     * raw-контакт, в который записывать правку с сервера: в памяти телефона, иначе Google-аккаунта
+     * (правка уйдёт и в Google Контакты). Записи мессенджеров их приложения перезапишут — их в последнюю очередь.
+     */
+    fun rawIdForWrite(rawContactIds: List<Long>): Long? {
+        if (rawContactIds.isEmpty()) return null
+        val accounts = mutableMapOf<Long, String?>()
+        resolver.query(
+            RawContacts.CONTENT_URI,
+            arrayOf(RawContacts._ID, RawContacts.ACCOUNT_TYPE),
+            "${RawContacts._ID} IN (${rawContactIds.joinToString(",")})",
+            null,
+            null,
+        )?.use { c -> while (c.moveToNext()) accounts[c.getLong(0)] = c.getString(1) }
+        return rawContactIds.firstOrNull { it in accounts && accounts[it] == null }
+            ?: rawContactIds.firstOrNull { accounts[it] == GOOGLE_ACCOUNT_TYPE }
+            ?: rawContactIds.first()
     }
 
     fun delete(rawContactId: Long) {
@@ -242,6 +292,15 @@ class PhoneContacts(private val resolver: ContentResolver) {
                 bindRaw(ContentProviderOperation.newInsert(Data.CONTENT_URI))
                     .withValue(Data.MIMETYPE, Photo.CONTENT_ITEM_TYPE)
                     .withValue(Photo.PHOTO, photo)
+                    .build(),
+            )
+        }
+        data.birthday?.let { birthday ->
+            add(
+                bindRaw(ContentProviderOperation.newInsert(Data.CONTENT_URI))
+                    .withValue(Data.MIMETYPE, Event.CONTENT_ITEM_TYPE)
+                    .withValue(Event.START_DATE, birthday)
+                    .withValue(Event.TYPE, Event.TYPE_BIRTHDAY)
                     .build(),
             )
         }

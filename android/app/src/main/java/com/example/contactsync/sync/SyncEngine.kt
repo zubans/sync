@@ -5,11 +5,14 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import com.example.contactsync.contacts.ContactData
 import com.example.contactsync.contacts.GoogleAccounts
+import com.example.contactsync.contacts.LocalContact
 import com.example.contactsync.contacts.PhoneContacts
 import com.example.contactsync.contacts.PhotoHashes
 import com.example.contactsync.data.Api
 import com.example.contactsync.data.DeviceDto
+import com.example.contactsync.data.ServerUpdate
 import com.example.contactsync.data.Session
 import com.example.contactsync.data.SyncRequest
 import com.example.contactsync.data.UnauthorizedException
@@ -27,6 +30,8 @@ data class SyncReport(
     val restored: Int = 0,
     /** Удалено с телефона, потому что администратор удалил на сервере. */
     val removedByAdmin: Int = 0,
+    /** Переписано на телефоне по правкам с сервера. */
+    val serverUpdated: Int = 0,
     val familyAdded: Int = 0,
     val googleAccounts: List<String> = emptyList(),
 ) {
@@ -34,6 +39,7 @@ data class SyncReport(
         if (restored > 0) add("восстановлено $restored")
         add("выгружено $uploaded (новых $created, изменено $updated, удалено $deleted)")
         if (removedByAdmin > 0) add("удалено администратором $removedByAdmin")
+        if (serverUpdated > 0) add("изменено на сервере $serverUpdated")
         if (familyAdded > 0) add("добавлено из семьи $familyAdded")
     }.joinToString("; ").replaceFirstChar { it.uppercase() }
 }
@@ -64,7 +70,7 @@ class SyncEngine(
             val restored = restorePersonal()
             val report = upload()
             val family = pullFamily()
-            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, removedByAdmin = report.removedByAdmin, restored = restored, googleAccounts = report.googleAccounts))
+            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, removedByAdmin = report.removedByAdmin, restored = restored + report.restored, serverUpdated = report.serverUpdated, googleAccounts = report.googleAccounts))
         }
     }
 
@@ -73,7 +79,7 @@ class SyncEngine(
         withContext(Dispatchers.IO) {
             val report = upload()
             val family = pullFamily()
-            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, removedByAdmin = report.removedByAdmin, googleAccounts = report.googleAccounts))
+            finish(family.copy(uploaded = report.uploaded, created = report.created, updated = report.updated, deleted = report.deleted, removedByAdmin = report.removedByAdmin, restored = report.restored, serverUpdated = report.serverUpdated, googleAccounts = report.googleAccounts))
         }
     }
 
@@ -108,19 +114,47 @@ class SyncEngine(
             ),
         )
         uploadPhotos(result.missingPhotos, photos)
+        val serverUpdated = applyServerUpdates(result.updates, local, photos)
         // Контакты, которые администратор удалил на сервере, удаляем и из телефонной книги.
         val toRemove = SyncPlanner.rawIdsToRemove(local, result.removed)
         toRemove.forEach(phone::delete)
 
         // Соответствия пересобираем по ответу: так же уходят записи удалённых контактов.
         val links = result.links.associate { it.externalId to it.serverId }
-        store.save(mappings.copy(personal = SyncPlanner.applyLinks(local, links)))
+        val personal = SyncPlanner.applyLinks(local, links).toMutableMap()
+
+        // Восстановленные из корзины: ставим на телефон и запоминаем serverId — со следующей
+        // синхронизацией контакт привяжется к серверному, а не создастся заново.
+        val restorePlan = SyncPlanner.planRestore(result.restored, local, mappings.copy(personal = personal))
+        personal += restorePlan.matched
+        for (contact in restorePlan.toInsert) {
+            personal[phone.insert(contact.toData(downloadPhoto(contact.photo)))] = contact.serverId
+        }
+        store.save(mappings.copy(personal = personal))
 
         return SyncReport(
             result.total, result.created, result.updated, result.deleted,
+            restored = restorePlan.toInsert.size,
+            serverUpdated = serverUpdated,
             removedByAdmin = result.removed.size,
             googleAccounts = accounts,
         )
+    }
+
+    /**
+     * Записывает на телефон правки, сделанные на сервере (админка, объединение дублей). Фото меняется,
+     * только если на сервере другое; убранное на сервере фото с телефона не удаляем.
+     */
+    private suspend fun applyServerUpdates(updates: List<ServerUpdate>, local: List<LocalContact>, photos: Map<Long, String>): Int {
+        var applied = 0
+        for (update in updates) {
+            val contact = local.firstOrNull { it.externalId == update.externalId } ?: continue
+            val rawId = phone.rawIdForWrite(contact.rawContactIds) ?: continue
+            val photo = update.photo?.takeIf { it != photos[contact.contactId] }?.let { downloadPhoto(it) }
+            phone.update(rawId, ContactData(update.name, update.phones, update.emails, photo, update.birthday))
+            applied++
+        }
+        return applied
     }
 
     /** Загружает фото, которых нет на сервере. Сбой с фото не должен ломать синхронизацию контактов. */

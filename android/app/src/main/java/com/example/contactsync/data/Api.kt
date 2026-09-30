@@ -40,6 +40,7 @@ data class ContactUpload(
     val emails: List<String>,
     /** SHA-256 фото; сам файл загружается, если сервер попросит (missingPhotos). */
     val photo: String? = null,
+    val birthday: String? = null,
 )
 
 @Serializable
@@ -63,6 +64,22 @@ data class SyncResult(
     val removed: List<String> = emptyList(),
     /** SHA-256 фото, которых на сервере нет: их нужно загрузить. */
     val missingPhotos: List<String> = emptyList(),
+    /** Контакты, восстановленные из корзины на сервере: их нужно вернуть в телефонную книгу. */
+    val restored: List<ServerContact> = emptyList(),
+    /** Контакты, изменённые на сервере (админка, объединение дублей): их нужно переписать на телефоне. */
+    val updates: List<ServerUpdate> = emptyList(),
+)
+
+/** Правка с сервера для контакта телефона с данным externalId. */
+@Serializable
+data class ServerUpdate(
+    val externalId: String,
+    val serverId: String,
+    val name: String? = null,
+    val phones: List<String> = emptyList(),
+    val emails: List<String> = emptyList(),
+    val photo: String? = null,
+    val birthday: String? = null,
 )
 
 /** Контакт, хранящийся на сервере. */
@@ -73,6 +90,7 @@ data class ServerContact(
     val phones: List<String> = emptyList(),
     val emails: List<String> = emptyList(),
     val photo: String? = null,
+    val birthday: String? = null,
     val updatedAt: String,
 )
 

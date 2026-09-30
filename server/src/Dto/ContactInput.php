@@ -34,6 +34,10 @@ final class ContactInput
         /** SHA-256 фото контакта; сам файл загружается отдельно, если сервер его попросит. */
         #[Assert\Regex('/^[0-9a-f]{64}$/')]
         public readonly ?string $photo = null,
+
+        /** «ГГГГ-ММ-ДД» или «--ММ-ДД» (без года). */
+        #[Assert\Regex('/^(\d{4}|-)-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/')]
+        public readonly ?string $birthday = null,
     ) {
     }
 }

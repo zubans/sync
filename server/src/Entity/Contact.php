@@ -17,6 +17,7 @@ use Symfony\Component\Validator\Context\ExecutionContextInterface;
 #[ORM\Entity(repositoryClass: ContactRepository::class)]
 #[ORM\HasLifecycleCallbacks]
 #[ORM\Index(name: 'idx_contact_name', columns: ['name'])]
+#[ORM\Index(name: 'idx_contact_deleted_at', columns: ['deleted_at'])]
 class Contact
 {
     #[ORM\Id]
@@ -52,9 +53,32 @@ class Contact
     #[ORM\Column(length: 64, nullable: true)]
     private ?string $photoSha256 = null;
 
-    /** Контакт удалили на устройстве: на сервере он остаётся, но не восстанавливается на телефоны. */
+    /** День рождения: «ГГГГ-ММ-ДД» или «--ММ-ДД», если год неизвестен (как в Android). */
+    #[ORM\Column(length: 10, nullable: true)]
+    #[Assert\Regex(pattern: '/^(\d{4}|-)-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/', message: 'Дата в формате ГГГГ-ММ-ДД или --ММ-ДД (без года).')]
+    private ?string $birthday = null;
+
+    /**
+     * Номер правки, сделанной на сервере (админка, объединение). Устройство, которое её ещё
+     * не получило (ContactLink::$appliedRevision меньше), получит новую версию при синхронизации.
+     */
+    #[ORM\Column(options: ['default' => 0])]
+    private int $serverRevision = 0;
+
+    /**
+     * Контакт в корзине: удалён на устройстве или администратором. Через TRASH_DAYS дней удаляется
+     * окончательно, до этого его можно восстановить.
+     */
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $deletedAt = null;
+
+    /** В корзину его отправил администратор: с телефонов контакт тоже удаляется. */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $deletedOnServer = false;
+
+    /** Когда восстановлен из корзины: телефоны владельца, где его нет, получат его при синхронизации. */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $restoredAt = null;
 
     #[ORM\Column]
     private \DateTimeImmutable $createdAt;
@@ -88,12 +112,14 @@ class Contact
      *
      * @return bool были ли изменения
      */
-    public function apply(?string $name, array $phones, array $emails, ?string $photoSha256 = null): bool
+    public function apply(?string $name, array $phones, array $emails, ?string $photoSha256 = null, ?string $birthday = null): bool
     {
         $name = self::normalizeName($name);
         $phones = self::normalizePhones($phones);
         $emails = self::normalizeEmails($emails);
-        if ($this->name === $name && $this->phones === $phones && $this->emails === $emails && $this->photoSha256 === $photoSha256) {
+        if ($this->name === $name && $this->phones === $phones && $this->emails === $emails
+            && $this->photoSha256 === $photoSha256 && $this->birthday === $birthday
+        ) {
             return false;
         }
 
@@ -101,6 +127,7 @@ class Contact
         $this->phones = $phones;
         $this->emails = $emails;
         $this->photoSha256 = $photoSha256;
+        $this->birthday = $birthday;
         $this->touch();
 
         return true;
@@ -111,15 +138,84 @@ class Contact
         return $this->photoSha256;
     }
 
+    public function setPhotoSha256(?string $photoSha256): static
+    {
+        $this->photoSha256 = $photoSha256;
+
+        return $this;
+    }
+
+    public function getBirthday(): ?string
+    {
+        return $this->birthday;
+    }
+
+    public function setBirthday(?string $birthday): static
+    {
+        $birthday = trim((string) $birthday);
+        $this->birthday = $birthday === '' ? null : $birthday;
+
+        return $this;
+    }
+
+    public function getServerRevision(): int
+    {
+        return $this->serverRevision;
+    }
+
+    /** Контакт изменили на сервере — устройства владельца получат новую версию. */
+    public function markEditedOnServer(): void
+    {
+        ++$this->serverRevision;
+        $this->touch();
+    }
+
+    public const TRASH_DAYS = 30;
+
+    /** Поля, которые хранит телефон: их правка на сервере отправляется на устройства. */
+    public const SYNCED_FIELDS = ['name', 'phones', 'emails', 'photoSha256', 'birthday'];
+
+    /** Удалён на устройстве: в корзину, на других телефонах остаётся. */
     public function markDeleted(): void
     {
         $this->deletedAt ??= new \DateTimeImmutable();
     }
 
-    /** Контакт снова пришёл с устройства — значит, он там есть. */
+    /** Удалён администратором: в корзину и с телефонов. */
+    public function moveToTrash(): void
+    {
+        $this->markDeleted();
+        $this->deletedOnServer = true;
+        $this->restoredAt = null;
+    }
+
+    public function restoreFromTrash(): void
+    {
+        $this->deletedAt = null;
+        $this->deletedOnServer = false;
+        $this->restoredAt = new \DateTimeImmutable();
+        $this->touch();
+    }
+
+    public function isDeletedOnServer(): bool
+    {
+        return $this->deletedOnServer;
+    }
+
+    public function getRestoredAt(): ?\DateTimeImmutable
+    {
+        return $this->restoredAt;
+    }
+
+    public function getTrashExpiresAt(): ?\DateTimeImmutable
+    {
+        return $this->deletedAt?->modify('+'.self::TRASH_DAYS.' days');
+    }
+
+    /** Контакт снова пришёл с устройства — значит, он там есть (кроме удалённых администратором). */
     public function undelete(): bool
     {
-        if ($this->deletedAt === null) {
+        if ($this->deletedAt === null || $this->deletedOnServer) {
             return false;
         }
         $this->deletedAt = null;

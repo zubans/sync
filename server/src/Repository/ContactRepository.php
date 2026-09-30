@@ -3,6 +3,8 @@
 namespace App\Repository;
 
 use App\Entity\Contact;
+use App\Entity\ContactLink;
+use App\Entity\Device;
 use App\Entity\Family;
 use App\Entity\User;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
@@ -38,7 +40,44 @@ class ContactRepository extends ServiceEntityRepository
             ->getResult();
     }
 
-    /** @return list<Contact> контакты пользователя (включая общие с семьёй), кроме удалённых на устройствах */
+    /**
+     * Восстановленные из корзины с момента $since (точность — секунда, поэтому нестрого) и ещё не связанные с устройством: их нужно вернуть на телефон.
+     *
+     * @return list<Contact>
+     */
+    public function findRestoredForDevice(User $user, Device $device, \DateTimeImmutable $since): array
+    {
+        return $this->createQueryBuilder('c')
+            ->where('c.user = :user')
+            ->andWhere('c.deletedAt IS NULL')
+            ->andWhere('c.restoredAt >= :since')
+            ->andWhere('NOT EXISTS (SELECT l.id FROM '.ContactLink::class.' l WHERE l.contact = c AND l.device = :device)')
+            ->setParameter('user', $user)
+            ->setParameter('device', $device)
+            ->setParameter('since', $since)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Контакты, пролежавшие в корзине дольше срока (пользователя или всех).
+     *
+     * @return list<Contact>
+     */
+    public function findTrashExpired(?User $user = null, int $limit = 500): array
+    {
+        $qb = $this->createQueryBuilder('c')
+            ->where('c.deletedAt < :threshold')
+            ->setParameter('threshold', new \DateTimeImmutable('-'.Contact::TRASH_DAYS.' days'))
+            ->setMaxResults($limit);
+        if ($user !== null) {
+            $qb->andWhere('c.user = :user')->setParameter('user', $user);
+        }
+
+        return $qb->getQuery()->getResult();
+    }
+
+    /** @return list<Contact> контакты пользователя (включая общие с семьёй), кроме лежащих в корзине */
     public function findPersonal(User $user): array
     {
         return $this->findBy(['user' => $user, 'deletedAt' => null], ['name' => 'ASC', 'id' => 'ASC']);

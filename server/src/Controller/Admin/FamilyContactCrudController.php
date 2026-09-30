@@ -30,6 +30,8 @@ use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
  */
 final class FamilyContactCrudController extends AbstractCrudController
 {
+    use ManagesContacts;
+
     public function __construct(private readonly CsrfTokenManagerInterface $csrf)
     {
     }
@@ -63,7 +65,7 @@ final class FamilyContactCrudController extends AbstractCrudController
     {
         $unshare = ContactCrudController::sharingAction('unshare', 'Убрать из семьи', 'fa fa-user', $this->csrf);
 
-        return $actions
+        return self::trashLabels($actions)
             ->add(Crud::PAGE_INDEX, Action::DETAIL)
             ->add(Crud::PAGE_INDEX, $unshare)
             ->add(Crud::PAGE_DETAIL, $unshare)
@@ -84,9 +86,11 @@ final class FamilyContactCrudController extends AbstractCrudController
 
     public function configureFields(string $pageName): iterable
     {
+        yield ContactFields::photo(fn (string $sha) => $this->generateUrl('admin_contact_photo', ['sha256' => $sha]), $pageName);
         yield TextField::new('name', 'Имя');
         yield ArrayField::new('phones', 'Телефоны')->setRequired(false);
         yield ArrayField::new('emails', 'Email')->setRequired(false);
+        yield from ContactFields::birthday();
         yield AssociationField::new('user', 'Владелец')
             ->setRequired(true)
             ->setHelp('Член семьи, у которого контакт лежит как личный.');

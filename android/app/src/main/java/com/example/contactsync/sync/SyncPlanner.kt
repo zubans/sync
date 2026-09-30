@@ -6,7 +6,7 @@ import com.example.contactsync.contacts.LocalContact
 import com.example.contactsync.data.ContactUpload
 import com.example.contactsync.data.ServerContact
 
-fun ServerContact.toData(photo: ByteArray? = null) = ContactData(name, phones, emails, photo)
+fun ServerContact.toData(photo: ByteArray? = null) = ContactData(name, phones, emails, photo, birthday)
 
 val ServerContact.fingerprint: String get() = Fingerprint.of(name, phones, emails)
 
@@ -104,6 +104,7 @@ object SyncPlanner {
                     phones = c.phones.filter { it.length <= MAX_PHONE }.take(MAX_VALUES),
                     emails = c.emails.filter { it.length <= MAX_EMAIL }.take(MAX_VALUES),
                     photo = photos[c.contactId],
+                    birthday = c.birthday,
                 )
             }
     }

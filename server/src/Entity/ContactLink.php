@@ -29,11 +29,35 @@ class ContactLink
     #[ORM\Column(length: 255)]
     private string $externalId;
 
+    /** Последняя правка с сервера (Contact::$serverRevision), которую устройство уже получило. */
+    #[ORM\Column(options: ['default' => 0])]
+    private int $appliedRevision = 0;
+
     public function __construct(Device $device, Contact $contact, string $externalId)
     {
         $this->device = $device;
         $this->contact = $contact;
         $this->externalId = $externalId;
+        // Новая связь: устройство прислало текущее состояние, досылать нечего.
+        $this->appliedRevision = $contact->getServerRevision();
+    }
+
+    /** Есть ли правка с сервера, которую устройство ещё не получило. */
+    public function hasPendingServerEdit(): bool
+    {
+        return $this->contact->getServerRevision() > $this->appliedRevision;
+    }
+
+    public function markServerEditSent(): void
+    {
+        $this->appliedRevision = $this->contact->getServerRevision();
+    }
+
+    /** Контакт устройства объединили с другим: теперь это основной, устройство получит его версию. */
+    public function relinkTo(Contact $contact): void
+    {
+        $this->contact = $contact;
+        $this->appliedRevision = 0;
     }
 
     public function getId(): ?int

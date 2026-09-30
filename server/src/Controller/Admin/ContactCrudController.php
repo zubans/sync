@@ -5,17 +5,21 @@ namespace App\Controller\Admin;
 use App\Entity\Contact;
 use App\Entity\User;
 use App\Service\ContactMover;
+use Doctrine\ORM\QueryBuilder;
 use EasyCorp\Bundle\EasyAdminBundle\Attribute\AdminRoute;
+use EasyCorp\Bundle\EasyAdminBundle\Collection\FieldCollection;
+use EasyCorp\Bundle\EasyAdminBundle\Collection\FilterCollection;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Filters;
 use EasyCorp\Bundle\EasyAdminBundle\Controller\AbstractCrudController;
+use EasyCorp\Bundle\EasyAdminBundle\Dto\EntityDto;
+use EasyCorp\Bundle\EasyAdminBundle\Dto\SearchDto;
 use EasyCorp\Bundle\EasyAdminBundle\Field\ArrayField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\AssociationField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\DateTimeField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
-use EasyCorp\Bundle\EasyAdminBundle\Filter\NullFilter;
 use EasyCorp\Bundle\EasyAdminBundle\Router\AdminUrlGeneratorInterface;
 use Symfony\Bridge\Doctrine\Attribute\MapEntity;
 use Symfony\Component\HttpFoundation\Request;
@@ -29,6 +33,8 @@ use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
  */
 final class ContactCrudController extends AbstractCrudController
 {
+    use ManagesContacts;
+
     public function __construct(private readonly CsrfTokenManagerInterface $csrf)
     {
     }
@@ -58,8 +64,8 @@ final class ContactCrudController extends AbstractCrudController
             ->setHelp(
                 Crud::PAGE_INDEX,
                 'Контакт с отметкой «Семья» общий: он ставится на новые устройства членов семьи владельца. «Добавить в семью» и «Убрать из семьи» '
-                .'меняют только отметку, с телефонов ничего не удаляется. Контакт, удалённый на телефоне, остаётся здесь с отметкой «Удалён на устройстве». '
-                .'Удаление здесь — окончательное: контакт удалится с телефонов при следующей синхронизации.',
+                .'меняют только отметку, с телефонов ничего не удаляется. «В корзину» — контакт удалится с телефонов при следующей синхронизации, '
+                .'но его можно восстановить из корзины в течение '.Contact::TRASH_DAYS.' дней. Удалённые на телефонах тоже лежат в корзине.',
             );
     }
 
@@ -70,7 +76,7 @@ final class ContactCrudController extends AbstractCrudController
         $unshare = self::sharingAction('unshare', 'Убрать из семьи', 'fa fa-user', $this->csrf)
             ->displayIf(static fn (Contact $c) => $c->isShared());
 
-        return $actions
+        return self::trashLabels($actions)
             ->add(Crud::PAGE_INDEX, Action::DETAIL)
             ->add(Crud::PAGE_INDEX, $share)
             ->add(Crud::PAGE_INDEX, $unshare)
@@ -133,32 +139,27 @@ final class ContactCrudController extends AbstractCrudController
             : $this->redirectToRoute('admin_contact_index');
     }
 
+    public function createIndexQueryBuilder(SearchDto $searchDto, EntityDto $entityDto, FieldCollection $fields, FilterCollection $filters): QueryBuilder
+    {
+        return parent::createIndexQueryBuilder($searchDto, $entityDto, $fields, $filters)
+            ->andWhere('entity.deletedAt IS NULL');
+    }
+
     public function configureFilters(Filters $filters): Filters
     {
         return $filters
             ->add('user')
             ->add('family')
-            ->add(NullFilter::new('deletedAt', 'Удалён на устройстве')->setChoiceLabels('Нет', 'Да'))
             ->add('updatedAt');
     }
 
     public function configureFields(string $pageName): iterable
     {
-        // ImageField без фото показывает бейдж «Null»; строковое поле + formatValue даёт миниатюру или «—».
-        // В HTML попадает только SHA-256 (hex), экранировать нечего.
-        yield TextField::new('uuid', 'Фото')
-            ->formatValue(fn ($value, Contact $contact) => $contact->getPhotoSha256() === null
-                ? '—'
-                : \sprintf(
-                    '<img src="%s" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:50%%">',
-                    $this->generateUrl('admin_contact_photo', ['sha256' => $contact->getPhotoSha256()]),
-                ))
-            ->renderAsHtml()
-            ->setSortable(false)
-            ->hideOnForm();
+        yield ContactFields::photo(fn (string $sha) => $this->generateUrl('admin_contact_photo', ['sha256' => $sha]), $pageName);
         yield TextField::new('name', 'Имя');
         yield ArrayField::new('phones', 'Телефоны')->setRequired(false);
         yield ArrayField::new('emails', 'Email')->setRequired(false);
+        yield from ContactFields::birthday();
         yield AssociationField::new('user', 'Владелец')->setRequired(true);
         // В списке — строковое поле с «—» вместо бейджа «Null»; выбор семьи — только в форме.
         yield TextField::new('uuid', 'Семья')
@@ -170,11 +171,6 @@ final class ContactCrudController extends AbstractCrudController
             ->setHelp('Контакт станет общим для семьи — владелец должен в ней состоять. Пусто — только у владельца.')
             ->onlyOnForms();
         yield DateTimeField::new('updatedAt', 'Изменён')->hideOnForm();
-        // Строковое свойство + formatValue: так вместо бейджа «Null» у живых контактов выводится «—».
-        yield TextField::new('uuid', 'Удалён на устройстве')
-            ->formatValue(static fn ($value, Contact $contact) => $contact->getDeletedAt()?->format('d.m.Y H:i') ?? '—')
-            ->setSortable(false)
-            ->hideOnForm();
         yield TextField::new('uuid', 'UUID')->onlyOnDetail();
     }
 }

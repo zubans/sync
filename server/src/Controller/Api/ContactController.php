@@ -83,19 +83,15 @@ final class ContactController extends AbstractController
             throw $this->createNotFoundException();
         }
 
-        return (new BinaryFileResponse($photos->path($sha256)))->setPrivate();
+        $response = new BinaryFileResponse($photos->path($sha256));
+        $response->headers->set('Content-Type', $photos->mimeType($sha256));
+
+        return $response->setPrivate();
     }
 
     /** @return array<string, mixed> */
     private static function view(Contact $c): array
     {
-        return [
-            'serverId' => $c->getUuid(),
-            'name' => $c->getName(),
-            'phones' => $c->getPhones(),
-            'emails' => $c->getEmails(),
-            'photo' => $c->getPhotoSha256(),
-            'updatedAt' => $c->getUpdatedAt()->format(\DATE_ATOM),
-        ];
+        return ContactSyncService::view($c);
     }
 }

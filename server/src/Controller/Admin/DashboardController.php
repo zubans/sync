@@ -35,6 +35,7 @@ final class DashboardController extends AbstractDashboardController
                 ['Семьи', $count(Family::class), 'admin_family_index'],
                 ['Контакты', $count(Contact::class, 'e.deletedAt IS NULL'), 'admin_contact_index'],
                 ['Общие с семьёй', $count(Contact::class, 'e.family IS NOT NULL AND e.deletedAt IS NULL'), 'admin_family_contact_index'],
+                ['В корзине', $count(Contact::class, 'e.deletedAt IS NOT NULL'), 'admin_trash_index'],
                 ['Устройства', $count(Device::class), 'admin_device_index'],
                 ['Приложения (установлено)', $count(InstalledApp::class, 'e.removedAt IS NULL'), 'admin_installed_app_index'],
                 ['Хранилища паролей', $count(Vault::class), 'admin_vault_index'],
@@ -57,6 +58,8 @@ final class DashboardController extends AbstractDashboardController
         yield MenuItem::linkTo(ContactCrudController::class, 'Контакты', 'fa fa-address-book');
         yield MenuItem::linkTo(FamilyContactCrudController::class, 'Семейные контакты', 'fa fa-people-roof');
         yield MenuItem::linkTo(ContactMoveController::class, 'Добавить в семью', 'fa fa-right-left')->setAction('index');
+        yield MenuItem::linkTo(DuplicateController::class, 'Дубликаты', 'fa fa-clone')->setAction('index');
+        yield MenuItem::linkTo(TrashCrudController::class, 'Корзина', 'fa fa-trash-can');
 
         yield MenuItem::section('Аккаунты');
         yield MenuItem::linkTo(UserCrudController::class, 'Пользователи', 'fa fa-user');

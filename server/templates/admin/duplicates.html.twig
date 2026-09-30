@@ -1,0 +1,63 @@
+{% extends '@EasyAdmin/page/content.html.twig' %}
+
+{% block content_title 'Дубликаты' %}
+
+{% block main %}
+<style>
+    .dup-group { border: 1px solid var(--border-color, #ddd); border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
+    .dup-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; margin-bottom: .5rem; }
+    .dup-reason { font-size: .8em; padding: .1rem .5rem; border-radius: 1rem; background: var(--gray-100, #f1f3f5); }
+    .dup-row { display: grid; grid-template-columns: auto auto 44px minmax(0, 1fr); gap: .75rem; align-items: center; padding: .4rem 0;
+               border-top: 1px solid var(--border-color, #eee); }
+    .dup-photo { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: var(--gray-200, #eee); }
+    .dup-meta { color: var(--text-muted, #6c757d); font-size: .85em; overflow-wrap: anywhere; }
+    .dup-row label { font-size: .8em; color: var(--text-muted, #6c757d); white-space: nowrap; }
+</style>
+
+<p class="dup-meta">
+    Контакты одного владельца с общим телефоном, общим email или одинаковым именем. Выберите основной и отметьте,
+    что объединить. Телефоны и email сольются, имя, фото и день рождения возьмутся у основного (если у него пусто — у первого, где есть).
+    Остальные уйдут в корзину и удалятся с телефонов; их можно восстановить {{ trash_days }} дней.
+</p>
+
+<form class="d-flex gap-2 mb-3" method="get">
+    <select name="user" class="form-select" style="max-width: 320px" onchange="this.form.submit()">
+        <option value="">Все пользователи</option>
+        {% for u in users %}
+            <option value="{{ u.id }}" {{ u.id == selected_user ? 'selected' }}>{{ u.email }}</option>
+        {% endfor %}
+    </select>
+</form>
+
+{% for group in groups %}
+    <form class="dup-group" method="post" action="{{ path('admin_duplicates_merge') }}"
+          onsubmit="return confirm('Объединить отмеченные контакты? Остальные уйдут в корзину.')">
+        <input type="hidden" name="_token" value="{{ csrf_token(csrf_intention) }}">
+        <input type="hidden" name="user" value="{{ selected_user }}">
+        <div class="dup-head">
+            <strong>{{ group.user.email }}</strong>
+            {% for reason in group.reasons %}<span class="dup-reason">{{ reason }}</span>{% endfor %}
+        </div>
+        {% for c in group.contacts %}
+            <div class="dup-row">
+                <label><input type="radio" name="primary" value="{{ c.id }}" {{ loop.first ? 'checked' }}> основной</label>
+                <label><input type="checkbox" name="contacts[]" value="{{ c.id }}" checked> объединить</label>
+                {% if c.photoSha256 %}
+                    <img class="dup-photo" src="{{ path('admin_contact_photo', {sha256: c.photoSha256}) }}" alt="">
+                {% else %}
+                    <span class="dup-photo"></span>
+                {% endif %}
+                <div>
+                    <div>{{ c.name ?? '(без имени)' }}{% if c.family %} <span class="dup-reason">в семье {{ c.family.name }}</span>{% endif %}</div>
+                    <div class="dup-meta">
+                        {{ c.phones|join(', ') }}{{ c.emails ? ' · ' ~ c.emails|join(', ') }}{{ c.birthday ? ' · ДР ' ~ c.birthday }} · изменён {{ c.updatedAt|date('d.m.Y') }}
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+        <button class="btn btn-primary btn-sm mt-2">Объединить</button>
+    </form>
+{% else %}
+    <p>Дубликатов не найдено.</p>
+{% endfor %}
+{% endblock %}

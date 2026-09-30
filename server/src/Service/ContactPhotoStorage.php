@@ -59,8 +59,16 @@ final class ContactPhotoStorage
         return null;
     }
 
+    /** Тип по сигнатуре: сохраняются только JPEG, PNG и WebP (проверено при загрузке). */
     public function mimeType(string $sha256): string
     {
-        return (new \finfo(\FILEINFO_MIME_TYPE))->file($this->path($sha256)) ?: 'application/octet-stream';
+        $head = (string) file_get_contents($this->path($sha256), false, null, 0, 12);
+
+        return match (true) {
+            str_starts_with($head, "\xFF\xD8\xFF") => 'image/jpeg',
+            str_starts_with($head, "\x89PNG") => 'image/png',
+            str_starts_with($head, 'RIFF') && substr($head, 8, 4) === 'WEBP' => 'image/webp',
+            default => 'application/octet-stream',
+        };
     }
 }
