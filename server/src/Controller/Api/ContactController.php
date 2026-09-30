@@ -37,7 +37,7 @@ final class ContactController extends AbstractController
         return $this->json(['contacts' => array_map(self::view(...), $contacts->findPersonal($user))]);
     }
 
-    /** Общие контакты семьи пользователя. */
+    /** Общие контакты семьи, которыми поделились другие её члены. */
     #[Route('/family/contacts', name: 'api_family_contacts', methods: ['GET'])]
     public function family(#[CurrentUser] User $user, ContactRepository $contacts): JsonResponse
     {
@@ -45,7 +45,7 @@ final class ContactController extends AbstractController
 
         return $this->json([
             'family' => $family === null ? null : ['id' => $family->getId(), 'name' => $family->getName()],
-            'contacts' => $family === null ? [] : array_map(self::view(...), $contacts->findByFamily($family)),
+            'contacts' => $family === null ? [] : array_map(self::view(...), $contacts->findSharedForUser($user, $family)),
         ]);
     }
 

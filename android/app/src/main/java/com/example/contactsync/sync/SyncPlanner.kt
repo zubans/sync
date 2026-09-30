@@ -18,17 +18,15 @@ data class RestorePlan(
     val matched: Map<Long, String>,
 )
 
-/** Что сделать, чтобы семейные контакты на телефоне совпали с серверными. */
+/**
+ * Доставка общих контактов семьи на телефон. Семья нужна для заполнения новых устройств:
+ * недостающие контакты ставятся один раз, дальше это обычные контакты владельца телефона —
+ * приложение их не обновляет и не удаляет, даже если контакт убрали из семьи.
+ */
 data class FamilyPlan(
     val toInsert: List<ServerContact>,
-    /** rawId → новые данные (контакт создан нами и изменён в админке). */
-    val toUpdate: Map<Long, ServerContact>,
-    /** raw-контакты, созданные нами для семейных контактов, которых больше нет. */
-    val toDelete: List<Long>,
-    /** Соответствия, которые остаются (без учёта вставок — их id известны только после записи). */
-    val keep: Map<String, FamilyEntry>,
-    /** Контакты, пропавшие из семьи, которые ещё лежат на телефоне (serverId → копия). */
-    val vanished: Map<String, FamilyEntry> = emptyMap(),
+    /** Уже доставленные (serverId → запись на телефоне): повторно не ставим, даже если запись удалили. */
+    val delivered: Map<String, FamilyEntry>,
 )
 
 /**
@@ -43,7 +41,6 @@ object SyncPlanner {
     ): RestorePlan {
         val localRawIds = local.flatMap { it.rawContactIds }.toSet()
         val alreadyOnPhone = mappings.personal.filterKeys { it in localRawIds }.values.toSet()
-        val familyRawIds = mappings.family.values.map { it.rawContactId }.toSet()
         val byFingerprint = local.groupBy { it.fingerprint }
 
         val toInsert = mutableListOf<ServerContact>()
@@ -54,8 +51,6 @@ object SyncPlanner {
             val twin = byFingerprint[contact.fingerprint]?.firstOrNull { it.contactId !in usedContacts }
             when {
                 twin == null || twin.rawContactIds.isEmpty() -> toInsert += contact
-                // Такой же контакт уже лежит на телефоне как семейный — второй не нужен.
-                twin.rawContactIds.any { it in familyRawIds } -> usedContacts += twin.contactId
                 else -> {
                     usedContacts += twin.contactId
                     twin.rawContactIds.forEach { matched[it] = contact.serverId }
@@ -70,62 +65,35 @@ object SyncPlanner {
         local: List<LocalContact>,
         current: Map<String, FamilyEntry>,
     ): FamilyPlan {
-        val localRawIds = local.flatMap { it.rawContactIds }.toSet()
-        val serverIds = server.map { it.serverId }.toSet()
-        val usedRawIds = current.values.map { it.rawContactId }.toMutableSet()
-        // Совпавший по отпечатку контакт телефона (в т. ч. личный) становится копией семейного,
-        // чтобы не держать на телефоне дубль. Из личных он при следующей выгрузке уйдёт.
-        val candidates = local
-            .filter { c -> c.rawContactIds.none { it in usedRawIds } }
-            .groupBy { it.fingerprint }
-            .mapValues { it.value.toMutableList() }
-
+        // Такой же контакт (имя + телефоны) уже есть на телефоне — второй не нужен.
+        val onPhone = local.groupBy { it.fingerprint }
         val toInsert = mutableListOf<ServerContact>()
-        val toUpdate = mutableMapOf<Long, ServerContact>()
-        val toDelete = mutableListOf<Long>()
-        val keep = mutableMapOf<String, FamilyEntry>()
-
-        val vanished = mutableMapOf<String, FamilyEntry>()
-        for ((serverId, entry) in current) {
-            if (serverId !in serverIds && entry.rawContactId in localRawIds) {
-                vanished[serverId] = entry
-                if (entry.createdByUs) toDelete += entry.rawContactId
-            }
-        }
+        val inserting = mutableSetOf<String>()
+        val delivered = mutableMapOf<String, FamilyEntry>()
 
         for (contact in server) {
-            val entry = current[contact.serverId]?.takeIf { it.rawContactId in localRawIds }
+            val already = current[contact.serverId]
+            val twin = onPhone[contact.fingerprint]?.firstOrNull()?.rawContactIds?.firstOrNull()
             when {
-                entry == null -> {
-                    val twin = candidates[contact.fingerprint]?.removeFirstOrNull()
-                    if (twin != null && twin.rawContactIds.isNotEmpty()) {
-                        keep[contact.serverId] = FamilyEntry(twin.rawContactIds.first(), contact.updatedAt, createdByUs = false)
-                    } else {
-                        toInsert += contact
-                    }
-                }
-                entry.updatedAt != contact.updatedAt && entry.createdByUs -> {
-                    toUpdate[entry.rawContactId] = contact
-                    keep[contact.serverId] = entry.copy(updatedAt = contact.updatedAt)
-                }
-                else -> keep[contact.serverId] = entry.copy(updatedAt = contact.updatedAt)
+                already != null -> delivered[contact.serverId] = already
+                twin != null -> delivered[contact.serverId] = FamilyEntry(twin, contact.updatedAt, createdByUs = false)
+                inserting.add(contact.fingerprint) -> toInsert += contact
             }
         }
-        return FamilyPlan(toInsert, toUpdate, toDelete, keep, vanished)
+        // Записи о контактах, которых больше нет в семье, просто забываем — с телефона ничего не удаляем.
+        return FamilyPlan(toInsert, delivered)
     }
 
     /**
-     * Личные контакты для выгрузки: только с телефоном и кроме копий семейных контактов.
-     * Контакты без телефона — обычно скрытые служебные записи мессенджеров (Telegram и т. п.),
-     * которых нет в телефонной книге.
+     * Контакты для выгрузки: только с телефоном. Контакты без телефона — обычно скрытые служебные
+     * записи мессенджеров (Telegram и т. п.), которых нет в телефонной книге. Доставленные из семьи —
+     * обычные контакты владельца телефона и выгружаются вместе со всеми.
      *
      * @param photos SHA-256 фото по contactId
      */
     fun buildUpload(local: List<LocalContact>, mappings: Mappings, photos: Map<Long, String> = emptyMap()): List<ContactUpload> {
-        val familyRawIds = mappings.family.values.map { it.rawContactId }.toSet()
         return local
             .filter { c -> c.phones.any { it.isNotBlank() } }
-            .filter { c -> c.rawContactIds.none { it in familyRawIds } }
             .map { c ->
                 // Подрезаем под ограничения сервера: один нестандартный контакт не должен
                 // валить синхронизацию всех остальных (сервер отклоняет пакет целиком).
@@ -146,15 +114,6 @@ object SyncPlanner {
         val removed = removedExternalIds.toSet()
         return local.filter { it.externalId in removed }.flatMap { it.rawContactIds }
     }
-
-    /**
-     * Контакты, пропавшие из семьи, которые администратор вернул в личные этого пользователя
-     * (у них тот же serverId): их не удаляем с телефона, а дальше считаем личными.
-     *
-     * @return rawId → serverId для личных соответствий
-     */
-    fun releasedToPersonal(vanished: Map<String, FamilyEntry>, personalServerIds: Set<String>): Map<Long, String> =
-        vanished.filterKeys { it in personalServerIds }.entries.associate { (serverId, entry) -> entry.rawContactId to serverId }
 
     /** Обновляет соответствие rawId → serverId по ответу сервера на выгрузку. */
     fun applyLinks(

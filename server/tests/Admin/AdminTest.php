@@ -54,7 +54,8 @@ final class AdminTest extends DatabaseWebTestCase
         $this->em->persist($withPhoto);
         $family = (new Family())->setName('Ивановы');
         $this->em->persist($family);
-        $this->em->persist((new Contact())->setFamily($family)->setName('Бабушка'));
+        $family->addMember($anna);
+        $this->em->persist(Contact::personal($anna)->setFamily($family)->setName('Бабушка')->setPhones(['+7 900 000-00-03']));
         $device = new Device($anna, 'install-aaaa-0001');
         $this->em->persist($device);
         $app = new InstalledApp($device, 'org.example.notes');
@@ -82,7 +83,9 @@ final class AdminTest extends DatabaseWebTestCase
         self::assertSelectorTextContains('table', 'Борис');
         self::assertSelectorTextNotContains('table', 'Null');
         self::assertSelectorExists('table img[src="/admin/contact-photo/'.str_repeat('ab', 32).'"]');
-        self::assertSelectorTextNotContains('table', 'Бабушка');
+        // В «Контактах» все контакты, общие — с отметкой семьи.
+        self::assertSelectorTextContains('table', 'Бабушка');
+        self::assertSelectorTextContains('table', 'Ивановы');
 
         $this->client->request('GET', '/admin/family-contact');
         self::assertSelectorTextContains('table', 'Бабушка');
@@ -130,6 +133,8 @@ final class AdminTest extends DatabaseWebTestCase
     {
         $family = (new Family())->setName('Ивановы');
         $this->em->persist($family);
+        $anna = $this->createUser('anna@example.com');
+        $family->addMember($anna);
         $this->em->flush();
         $this->client->loginUser($this->createUser('admin@example.com', admin: true));
 
@@ -137,6 +142,7 @@ final class AdminTest extends DatabaseWebTestCase
         $form = $crawler->filter('form[name="Contact"]')->form();
         $form['Contact[name]'] = 'Бабушка';
         $form['Contact[family]']->select((string) $family->getId());
+        $form['Contact[user]']->select((string) $anna->getId());
         $values = $form->getPhpValues();
         $values['Contact']['phones'] = ['+7 900 111-11-11'];
         $this->client->request('POST', $form->getUri(), $values);
@@ -144,7 +150,7 @@ final class AdminTest extends DatabaseWebTestCase
         self::assertResponseRedirects();
         $contact = $this->em->getRepository(Contact::class)->findOneBy(['name' => 'Бабушка']);
         self::assertSame($family->getId(), $contact->getFamily()->getId());
-        self::assertNull($contact->getUser());
+        self::assertSame($anna->getId(), $contact->getUser()->getId());
         self::assertSame(['+7 900 111-11-11'], $contact->getPhones());
     }
 
@@ -168,5 +174,24 @@ final class AdminTest extends DatabaseWebTestCase
         $tombstone = $this->em->getRepository(ContactTombstone::class)->findOneBy(['uuid' => $uuid]);
         self::assertNotNull($tombstone);
         self::assertSame('anna@example.com', $tombstone->getUser()->getEmail());
+    }
+
+    public function testFamilyContactOwnerMustBeFamilyMember(): void
+    {
+        $family = (new Family())->setName('Ивановы');
+        $this->em->persist($family);
+        $outsider = $this->createUser('olga@example.com');
+        $this->em->flush();
+        $this->client->loginUser($this->createUser('admin@example.com', admin: true));
+
+        $crawler = $this->client->request('GET', '/admin/family-contact/new');
+        $form = $crawler->filter('form[name="Contact"]')->form();
+        $form['Contact[name]'] = 'Бабушка';
+        $form['Contact[family]']->select((string) $family->getId());
+        $form['Contact[user]']->select((string) $outsider->getId());
+        $this->client->submit($form);
+
+        self::assertResponseStatusCodeSame(422);
+        self::assertSelectorTextContains('body', 'Владелец не состоит в этой семье.');
     }
 }

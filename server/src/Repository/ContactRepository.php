@@ -38,16 +38,38 @@ class ContactRepository extends ServiceEntityRepository
             ->getResult();
     }
 
-    /** @return list<Contact> личные контакты, кроме удалённых на устройствах */
+    /** @return list<Contact> контакты пользователя (включая общие с семьёй), кроме удалённых на устройствах */
     public function findPersonal(User $user): array
     {
         return $this->findBy(['user' => $user, 'deletedAt' => null], ['name' => 'ASC', 'id' => 'ASC']);
     }
 
-    /** @return list<Contact> */
+    /**
+     * Общие контакты семьи, которые пользователь получает от других: свои он и так получает как личные.
+     * Учитываются только владельцы, которые сейчас состоят в этой семье.
+     *
+     * @return list<Contact>
+     */
+    public function findSharedForUser(User $user, Family $family): array
+    {
+        return $this->createQueryBuilder('c')
+            ->join('c.user', 'owner')
+            ->where('c.family = :family')
+            ->andWhere('owner.family = :family')
+            ->andWhere('owner != :user')
+            ->andWhere('c.deletedAt IS NULL')
+            ->setParameter('family', $family)
+            ->setParameter('user', $user)
+            ->orderBy('c.name', 'ASC')
+            ->addOrderBy('c.id', 'ASC')
+            ->getQuery()
+            ->getResult();
+    }
+
+    /** @return list<Contact> общие контакты семьи (всех её членов) */
     public function findByFamily(Family $family): array
     {
-        return $this->findBy(['family' => $family], ['name' => 'ASC', 'id' => 'ASC']);
+        return $this->findBy(['family' => $family, 'deletedAt' => null], ['name' => 'ASC', 'id' => 'ASC']);
     }
 
     /** Есть ли у пользователя (лично или через семью) контакт с таким фото. */

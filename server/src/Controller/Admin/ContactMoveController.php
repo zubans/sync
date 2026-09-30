@@ -18,7 +18,8 @@ use Symfony\Component\HttpKernel\Attribute\MapQueryParameter;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 /**
- * Перенос личных контактов в семейные перетаскиванием.
+ * Добавление контактов в семью перетаскиванием: контакт получает отметку «Семья», остаётся у владельца
+ * и ставится на новые устройства членов семьи.
  */
 #[IsGranted(User::ROLE_ADMIN)]
 #[AdminRoute('/contact-move', name: 'contact_move')]
@@ -76,8 +77,12 @@ final class ContactMoveController extends AbstractController
 
         /** @var list<Contact> $selected */
         $selected = $contacts->findBy(['id' => $ids]);
-        $result = $mover->moveToFamily($selected, $family);
+        $result = $mover->share($selected, $family);
 
-        return $this->json($result + ['familyContacts' => $contacts->count(['family' => $family])]);
+        return $this->json($result + [
+            'familyContacts' => \count($contacts->findByFamily($family)),
+            'familyName' => $family->getName(),
+            'sharedIds' => array_map(static fn (Contact $c) => $c->getId(), array_values(array_filter($selected, static fn (Contact $c) => $c->getFamily() === $family))),
+        ]);
     }
 }

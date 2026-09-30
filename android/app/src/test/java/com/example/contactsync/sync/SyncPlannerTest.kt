@@ -50,76 +50,6 @@ class SyncPlannerTest {
     }
 
     @Test
-    fun `restore does not duplicate a contact that is already a family copy`() {
-        val plan = SyncPlanner.planRestore(
-            server = listOf(server("s1", "Бабушка", "+79001111111")),
-            local = listOf(local(1, "Бабушка", "+79001111111")),
-            mappings = Mappings(family = mapOf("f1" to FamilyEntry(10, "t1", createdByUs = true))),
-        )
-
-        assertTrue(plan.toInsert.isEmpty())
-        assertTrue(plan.matched.isEmpty())
-    }
-
-    @Test
-    fun `family plan inserts, updates, adopts and deletes`() {
-        val current = mapOf(
-            "keep" to FamilyEntry(10, "t1", createdByUs = true),
-            "changed" to FamilyEntry(20, "t1", createdByUs = true),
-            "gone" to FamilyEntry(30, "t1", createdByUs = true),
-            "gone-foreign" to FamilyEntry(40, "t1", createdByUs = false),
-        )
-        val phone = listOf(
-            local(1, "Keep"), local(2, "Changed"), local(3, "Gone"), local(4, "Foreign"),
-            local(5, "Дедушка", "+79002222222"),
-        )
-
-        val plan = SyncPlanner.planFamily(
-            server = listOf(
-                server("keep", "Keep"),
-                server("changed", "Changed v2", updatedAt = "t2"),
-                server("grandpa", "Дедушка", "+7 900 222-22-22"),
-                server("new", "Новый"),
-            ),
-            local = phone,
-            current = current,
-        )
-
-        assertEquals(listOf("new"), plan.toInsert.map { it.serverId })
-        assertEquals(setOf(20L), plan.toUpdate.keys)
-        // Созданный нами удаляется, совпавший с чужим контактом — остаётся на телефоне.
-        assertEquals(listOf(30L), plan.toDelete)
-        assertEquals(FamilyEntry(50, "t1", createdByUs = false), plan.keep["grandpa"])
-        assertEquals("t2", plan.keep["changed"]?.updatedAt)
-        assertNull(plan.keep["gone"])
-    }
-
-    @Test
-    fun `family contact deleted by user on phone is inserted again`() {
-        val plan = SyncPlanner.planFamily(
-            server = listOf(server("f1", "Бабушка")),
-            local = emptyList(),
-            current = mapOf("f1" to FamilyEntry(10, "t1", createdByUs = true)),
-        )
-
-        assertEquals(listOf("f1"), plan.toInsert.map { it.serverId })
-        assertTrue(plan.toDelete.isEmpty())
-    }
-
-    @Test
-    fun `upload excludes family copies and passes known server ids`() {
-        val upload = SyncPlanner.buildUpload(
-            local = listOf(local(1, "Личный", "+79000000001"), local(2, "Восстановленный", "+79000000002"), local(3, "Семейный", "+79000000003")),
-            mappings = Mappings(
-                personal = mapOf(20L to "s2"),
-                family = mapOf("f1" to FamilyEntry(30, "t1", createdByUs = true)),
-            ),
-        )
-
-        assertEquals(listOf("lk-1" to null, "lk-2" to "s2"), upload.map { it.externalId to it.serverId })
-    }
-
-    @Test
     fun `links are mapped to all raw contacts of a contact`() {
         val mapped = SyncPlanner.applyLinks(
             local = listOf(local(1, "Иван", raw = listOf(10, 11)), local(2, "Удалён на сервере")),
@@ -176,19 +106,52 @@ class SyncPlannerTest {
         assertEquals("abc", upload.single().photo)
     }
 
+
     @Test
-    fun `contact returned from family to this user stays on phone as personal`() {
-        val current = mapOf(
-            "released" to FamilyEntry(10, "t1", createdByUs = true),
-            "deleted" to FamilyEntry(20, "t1", createdByUs = true),
+    fun `family contacts are delivered once and never updated or deleted`() {
+        val plan = SyncPlanner.planFamily(
+            server = listOf(
+                server("new", "Новый", "+79000000001"),
+                server("twin", "Дедушка", "+7 900 222-22-22"),
+                server("delivered", "Уже был", updatedAt = "t2"),
+                server("same-as-new", "новый", "8 900 000 00 01"),
+            ),
+            local = listOf(local(5, "Дедушка", "+79002222222")),
+            // Доставленную копию пользователь удалил, а ещё один контакт убрали из семьи.
+            current = mapOf(
+                "delivered" to FamilyEntry(99, "t1", createdByUs = true),
+                "unshared" to FamilyEntry(50, "t1", createdByUs = true),
+            ),
         )
-        val plan = SyncPlanner.planFamily(emptyList(), listOf(local(1, "Жена"), local(2, "Удалён")), current)
 
-        assertEquals(setOf("released", "deleted"), plan.vanished.keys)
-        // Сервер говорит, что "released" теперь личный контакт этого пользователя.
-        val released = SyncPlanner.releasedToPersonal(plan.vanished, personalServerIds = setOf("released"))
+        // Новый ставится один раз (второй такой же от другого члена семьи — нет).
+        assertEquals(listOf("new"), plan.toInsert.map { it.serverId })
+        // Совпавший с контактом телефона не ставится; удалённый пользователем не возвращается.
+        assertEquals(FamilyEntry(50, "t1", createdByUs = false), plan.delivered["twin"])
+        assertEquals(FamilyEntry(99, "t1", createdByUs = true), plan.delivered["delivered"])
+        // Убранный из семьи просто забыт — удалять с телефона нечего.
+        assertEquals(setOf("twin", "delivered"), plan.delivered.keys)
+    }
 
-        assertEquals(mapOf(10L to "released"), released)
-        assertEquals(listOf(20L), plan.toDelete - released.keys)
+    @Test
+    fun `delivered family contacts are uploaded as normal contacts`() {
+        val upload = SyncPlanner.buildUpload(
+            local = listOf(local(1, "Личный", "+79000000001"), local(2, "Из семьи", "+79000000002")),
+            mappings = Mappings(personal = mapOf(10L to "s1"), family = mapOf("f1" to FamilyEntry(20, "t1", createdByUs = true))),
+        )
+
+        assertEquals(listOf("lk-1" to "s1", "lk-2" to null), upload.map { it.externalId to it.serverId })
+    }
+
+    @Test
+    fun `restore matches a contact delivered from family instead of duplicating it`() {
+        val plan = SyncPlanner.planRestore(
+            server = listOf(server("s1", "Бабушка", "+79001111111")),
+            local = listOf(local(1, "Бабушка", "+79001111111")),
+            mappings = Mappings(family = mapOf("f1" to FamilyEntry(10, "t1", createdByUs = true))),
+        )
+
+        assertTrue(plan.toInsert.isEmpty())
+        assertEquals(mapOf(10L to "s1"), plan.matched)
     }
 }

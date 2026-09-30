@@ -8,70 +8,113 @@ use App\Entity\Family;
 use App\Entity\User;
 use App\Tests\DatabaseWebTestCase;
 
+/**
+ * Семья — отметка общего доступа: добавление в семью и удаление из неё не копируют и не удаляют контакт.
+ */
 final class ContactMoveTest extends DatabaseWebTestCase
 {
     private User $anna;
+    private User $boris;
     private Family $family;
 
     protected function setUp(): void
     {
         parent::setUp();
         $this->anna = $this->createUser('anna@example.com');
+        $this->boris = $this->createUser('boris@example.com');
         $this->family = (new Family())->setName('Ивановы');
         $this->em->persist($this->family);
         $this->family->addMember($this->anna);
+        $this->family->addMember($this->boris);
         $this->em->flush();
     }
 
-    public function testDraggedContactBecomesFamilyAndLeavesOwnersPhone(): void
+    public function testSharedContactStaysWithOwnerAndReachesOtherMembers(): void
     {
-        $token = $this->login('anna@example.com');
-        $sync = fn (?string $serverId = null) => $this->api('POST', '/api/sync', ['device' => ['installId' => 'install-aaaa-0001'], 'contacts' => [
-            ['externalId' => 'a', 'serverId' => $serverId, 'name' => 'Бабушка', 'phones' => ['+7 900 111-11-11']],
-        ]], $token);
-        $serverId = $sync()['links'][0]['serverId'];
+        $annaToken = $this->login('anna@example.com');
+        $borisToken = $this->login('boris@example.com');
+        $sync = fn (string $token, array $contacts) => $this->api('POST', '/api/sync', ['device' => ['installId' => 'install-'.substr($token, 0, 12)], 'contacts' => $contacts], $token);
+        $wife = ['externalId' => 'a', 'name' => 'Жена', 'phones' => ['+7 920 702-04-33']];
+        $serverId = $sync($annaToken, [$wife])['links'][0]['serverId'];
 
-        $result = $this->move([$this->contactId('Бабушка')]);
+        $result = $this->shareViaDragAndDrop([$this->contactId('Жена')]);
 
-        self::assertSame(['moved' => 1, 'merged' => 0, 'skipped' => 0, 'familyContacts' => 1], $result);
-        self::assertNotNull($this->em->getRepository(ContactTombstone::class)->findOneBy(['uuid' => $serverId]));
-
-        // Телефон владельца удаляет личную копию, а семейная приходит как семейная.
-        self::assertSame(['a'], $sync($serverId)['removed']);
-        $family = $this->api('GET', '/api/family/contacts', token: $token);
-        self::assertSame(['Бабушка'], array_column($family['contacts'], 'name'));
-        self::assertSame(['+7 900 111-11-11'], $family['contacts'][0]['phones']);
+        self::assertSame(1, $result['shared']);
+        self::assertSame(1, $result['familyContacts']);
+        // Ничего не удалено: ни надгробий, ни «удалить» для телефона владельца, контакт тот же.
+        self::assertSame(0, $this->em->getRepository(ContactTombstone::class)->count([]));
+        $again = $sync($annaToken, [$wife + ['serverId' => $serverId]]);
+        self::assertSame([[], 0], [$again['removed'], $again['deleted']]);
+        self::assertSame([$serverId], array_column($this->api('GET', '/api/contacts', token: $annaToken)['contacts'], 'serverId'));
+        // Своё владелец в семейном списке не получает, остальные — получают.
+        self::assertSame([], $this->api('GET', '/api/family/contacts', token: $annaToken)['contacts']);
+        self::assertSame([$serverId], array_column($this->api('GET', '/api/family/contacts', token: $borisToken)['contacts'], 'serverId'));
     }
 
-    public function testSameContactAlreadyInFamilyIsNotDuplicated(): void
+    public function testUnshareKeepsContactWithOwner(): void
     {
-        $this->em->persist((new Contact())->setFamily($this->family)->setName('бабушка')->setPhones(['8 (900) 111-11-11']));
-        $personal = Contact::personal($this->anna)->setName('Бабушка')->setPhones(['+7 900 111-11-11']);
-        $this->em->persist($personal);
+        $contact = Contact::personal($this->anna)->setName('Жена')->setPhones(['+79207020433'])->setFamily($this->family);
+        $this->em->persist($contact);
+        $this->em->flush();
+        $borisToken = $this->login('boris@example.com');
+
+        $this->clickSharingAction('/admin/family-contact', $contact->getId(), 'unshare');
+
+        self::assertResponseRedirects();
+        $this->em->clear();
+        $reloaded = $this->em->getRepository(Contact::class)->find($contact->getId());
+        self::assertSame($this->anna->getId(), $reloaded->getUser()->getId());
+        self::assertNull($reloaded->getFamily());
+        self::assertSame([], $this->api('GET', '/api/family/contacts', token: $borisToken)['contacts']);
+    }
+
+    public function testDuplicateAndForeignContactsAreNotShared(): void
+    {
+        $this->em->persist(Contact::personal($this->boris)->setName('бабушка')->setPhones(['8 (900) 111-11-11'])->setFamily($this->family));
+        $same = Contact::personal($this->anna)->setName('Бабушка')->setPhones(['+7 900 111-11-11']);
+        $outsider = Contact::personal($this->createUser('olga@example.com'))->setName('Чужой')->setPhones(['+7 900 222-22-22']);
+        $this->em->persist($same);
+        $this->em->persist($outsider);
         $this->em->flush();
 
-        $result = $this->move([$personal->getId()]);
+        $result = $this->shareViaDragAndDrop([$same->getId(), $outsider->getId()]);
 
-        self::assertSame([0, 1, 1], [$result['moved'], $result['merged'], $result['familyContacts']]);
-        self::assertNull($this->em->getRepository(Contact::class)->find($personal->getId()));
+        self::assertSame([0, 1, 1], [$result['shared'], $result['duplicate'], $result['notMember']]);
+        $this->em->clear();
+        self::assertNull($this->em->getRepository(Contact::class)->find($same->getId())->getFamily());
     }
 
-    public function testPageListsPersonalContactsAndFamilies(): void
+    public function testLeavingFamilyUnsharesOwnContacts(): void
     {
-        $this->em->persist(Contact::personal($this->anna)->setName('Пётр')->setPhones(['+7 900 000-00-01']));
+        $contact = Contact::personal($this->anna)->setName('Жена')->setPhones(['+79207020433'])->setFamily($this->family);
+        $this->em->persist($contact);
         $this->em->flush();
-        $this->client->loginUser($this->createUser('admin@example.com', admin: true));
 
-        $this->client->request('GET', '/admin/contact-move');
+        $this->family->removeMember($this->anna);
+        $this->em->flush();
+        $this->em->clear();
 
-        self::assertResponseIsSuccessful();
-        self::assertSelectorTextContains('.cm-list', 'Пётр');
-        self::assertSelectorExists('.cm-family[data-family-id="'.$this->family->getId().'"]');
+        $reloaded = $this->em->getRepository(Contact::class)->find($contact->getId());
+        self::assertNull($reloaded->getFamily());
+        self::assertSame($this->anna->getId(), $reloaded->getUser()->getId());
     }
 
-    public function testMoveRequiresValidCsrfTokenAndAdmin(): void
+    public function testDeletingFamilyKeepsContacts(): void
     {
-        $contact = Contact::personal($this->anna)->setName('Пётр')->setPhones(['+7 900 000-00-01']);
+        $contact = Contact::personal($this->anna)->setName('Жена')->setPhones(['+79207020433'])->setFamily($this->family);
+        $this->em->persist($contact);
+        $this->em->flush();
+
+        $this->em->remove($this->family);
+        $this->em->flush();
+        $this->em->clear();
+
+        self::assertNotNull($this->em->getRepository(Contact::class)->find($contact->getId()));
+    }
+
+    public function testSharingRequiresAdminAndValidToken(): void
+    {
+        $contact = Contact::personal($this->anna)->setName('Жена')->setPhones(['+79207020433']);
         $this->em->persist($contact);
         $this->em->flush();
 
@@ -80,79 +123,35 @@ final class ContactMoveTest extends DatabaseWebTestCase
         self::assertResponseStatusCodeSame(403);
 
         $this->client->loginUser($this->createUser('admin@example.com', admin: true));
+        $this->client->request('POST', '/admin/contact/'.$contact->getId().'/share?token=forged');
+        self::assertResponseStatusCodeSame(403);
         $this->postMove(['token' => 'forged', 'familyId' => $this->family->getId(), 'contactIds' => [$contact->getId()]]);
         self::assertResponseStatusCodeSame(403);
-        self::assertNotNull($this->em->getRepository(Contact::class)->find($contact->getId()));
+        $this->em->clear();
+        self::assertNull($this->em->getRepository(Contact::class)->find($contact->getId())->getFamily());
     }
 
-    public function testFamilyContactReturnsToPersonalKeepingItsId(): void
+    public function testShareActionFromContactsList(): void
     {
-        $contact = (new Contact())->setFamily($this->family)->setName('Жена')->setPhones(['+79207020433']);
-        $this->em->persist($contact);
-        $this->em->flush();
-        $uuid = $contact->getUuid();
-        $token = $this->login('anna@example.com');
-
-        $this->toPersonal($contact->getId(), $this->anna->getId());
-
-        self::assertResponseRedirects('/admin/family-contact');
-        // Для семьи контакт исчез, а у Анны стал личным с тем же идентификатором —
-        // по нему её телефон оставит запись в книге.
-        self::assertSame([], $this->api('GET', '/api/family/contacts', token: $token)['contacts']);
-        self::assertSame([$uuid], array_column($this->api('GET', '/api/contacts', token: $token)['contacts'], 'serverId'));
-    }
-
-    public function testReturnToPersonalDoesNotDuplicateExistingContact(): void
-    {
-        $this->em->persist(Contact::personal($this->anna)->setName('Жена')->setPhones(['8 920 702-04-33']));
-        $contact = (new Contact())->setFamily($this->family)->setName('жена')->setPhones(['+79207020433']);
+        $contact = Contact::personal($this->anna)->setName('Жена')->setPhones(['+79207020433']);
         $this->em->persist($contact);
         $this->em->flush();
 
-        $this->toPersonal($contact->getId(), $this->anna->getId());
+        $this->clickSharingAction('/admin/contact', $contact->getId(), 'share');
 
         self::assertResponseRedirects();
         $this->em->clear();
-        self::assertNull($this->em->getRepository(Contact::class)->find($contact->getId()));
-        self::assertSame(1, $this->em->getRepository(Contact::class)->count(['user' => $this->anna->getId()]));
-    }
-
-    public function testReturnToPersonalPageAndCsrf(): void
-    {
-        $contact = (new Contact())->setFamily($this->family)->setName('Жена')->setPhones(['+79207020433']);
-        $this->em->persist($contact);
-        $this->em->flush();
-        $this->client->loginUser($this->createUser('admin@example.com', admin: true));
-
-        $this->client->request('GET', '/admin/family-contact/'.$contact->getId().'/to-personal');
-        self::assertResponseIsSuccessful();
-        self::assertSelectorTextContains('optgroup[label^="Члены семьи"]', 'anna@example.com');
-
-        $this->client->request('POST', '/admin/family-contact/'.$contact->getId().'/to-personal', ['_token' => 'forged', 'user' => $this->anna->getId()]);
-        self::assertResponseStatusCodeSame(403);
-        $this->em->clear();
-        self::assertNotNull($this->em->getRepository(Contact::class)->find($contact->getId())->getFamily());
-
-        // В форме семейного контакта семью нельзя очистить — пустого варианта нет.
-        $crawler = $this->client->request('GET', '/admin/family-contact/'.$contact->getId().'/edit');
-        self::assertCount(0, $crawler->filter('select[name="Contact[family]"] option[value=""]'));
-    }
-
-    private function toPersonal(int $contactId, int $userId): void
-    {
-        $this->client->loginUser($this->createUser('admin'.bin2hex(random_bytes(3)).'@example.com', admin: true));
-        $crawler = $this->client->request('GET', '/admin/family-contact/'.$contactId.'/to-personal');
-        $this->client->submit($crawler->filter('form[method="post"]')->form(['user' => (string) $userId]));
+        self::assertSame($this->family->getId(), $this->em->getRepository(Contact::class)->find($contact->getId())->getFamily()->getId());
     }
 
     /**
      * @param list<int> $ids
      *
-     * @return array<string, int>
+     * @return array<string, mixed>
      */
-    private function move(array $ids): array
+    private function shareViaDragAndDrop(array $ids): array
     {
-        $this->client->loginUser($this->createUser('admin'.bin2hex(random_bytes(3)).'@example.com', admin: true));
+        $this->loginAdmin();
         $crawler = $this->client->request('GET', '/admin/contact-move');
         preg_match('/const token = "([^"]+)"/', $crawler->html(), $m);
 
@@ -161,6 +160,21 @@ final class ContactMoveTest extends DatabaseWebTestCase
         $this->em->clear();
 
         return json_decode($this->client->getResponse()->getContent(), true);
+    }
+
+    /** Нажимает кнопку действия в списке: берёт из страницы форму с URL и CSRF-токеном и отправляет её. */
+    private function clickSharingAction(string $listUrl, int $contactId, string $action): void
+    {
+        $this->loginAdmin();
+        $crawler = $this->client->request('GET', $listUrl);
+        $form = $crawler->filter(\sprintf('form[action*="/admin/contact/%d/%s?"]', $contactId, $action));
+        self::assertCount(1, $form, "Нет кнопки «$action» для контакта $contactId");
+        $this->client->request('POST', $form->attr('action'), server: ['HTTP_REFERER' => 'http://localhost'.$listUrl]);
+    }
+
+    private function loginAdmin(): void
+    {
+        $this->client->loginUser($this->createUser('admin'.bin2hex(random_bytes(3)).'@example.com', admin: true));
     }
 
     /** @param array<string, mixed> $payload */

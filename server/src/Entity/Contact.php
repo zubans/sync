@@ -10,7 +10,9 @@ use Symfony\Component\Validator\Constraints as Assert;
 use Symfony\Component\Validator\Context\ExecutionContextInterface;
 
 /**
- * Контакт принадлежит либо пользователю (личный), либо семье (общий).
+ * Контакт всегда принадлежит пользователю (владельцу). Отметка «семья» — общий контакт семьи:
+ * он ставится на новые устройства членов семьи (один раз, дальше это их обычный контакт).
+ * Добавление в семью и удаление из неё только меняют отметку — на телефонах ничего не удаляется.
  */
 #[ORM\Entity(repositoryClass: ContactRepository::class)]
 #[ORM\HasLifecycleCallbacks]
@@ -104,14 +106,6 @@ class Contact
         return true;
     }
 
-    /** Семейный контакт становится личным контактом пользователя (идентификатор сохраняется). */
-    public function reassignTo(User $user): void
-    {
-        $this->user = $user;
-        $this->family = null;
-        $this->touch();
-    }
-
     public function getPhotoSha256(): ?string
     {
         return $this->photoSha256;
@@ -152,11 +146,16 @@ class Contact
     #[Assert\Callback]
     public function validateOwner(ExecutionContextInterface $context): void
     {
-        if (($this->user === null) === ($this->family === null)) {
-            $context->buildViolation('Контакт должен принадлежать либо пользователю, либо семье.')
-                ->atPath('family')
-                ->addViolation();
+        if ($this->user === null) {
+            $context->buildViolation('Укажите владельца контакта.')->atPath('user')->addViolation();
+        } elseif ($this->family !== null && $this->user->getFamily() !== $this->family) {
+            $context->buildViolation('Владелец не состоит в этой семье.')->atPath('family')->addViolation();
         }
+    }
+
+    public function isShared(): bool
+    {
+        return $this->family !== null;
     }
 
     public function getId(): ?int

@@ -4,19 +4,21 @@ namespace App\Service;
 
 use App\Entity\Contact;
 use App\Entity\Family;
-use App\Entity\User;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * Перенос контактов между личными и семейными.
- *
- * Личный контакт удаляется (ContactTombstoneListener оставляет «надгробие», и при синхронизации
- * личная копия удаляется с телефона владельца), а в семье создаётся контакт с теми же данными и фото —
- * он придёт на телефоны всех членов семьи. Если такой контакт (имя + телефоны) в семье уже есть,
- * дубль не создаётся.
+ * Общие контакты семьи. Контакт всегда остаётся у владельца: добавление в семью и удаление из неё
+ * меняют только отметку. Общие контакты ставятся на устройства членов семьи, где их ещё нет
+ * (новый телефон, новый член семьи); после удаления из семьи они просто перестают приходить —
+ * с телефонов ничего не удаляется.
  */
 final class ContactMover
 {
+    public const SHARED = 'shared';
+    public const ALREADY = 'already';
+    public const DUPLICATE = 'duplicate';
+    public const NOT_MEMBER = 'notMember';
+
     public function __construct(private readonly EntityManagerInterface $em)
     {
     }
@@ -24,74 +26,42 @@ final class ContactMover
     /**
      * @param list<Contact> $contacts
      *
-     * @return array{moved: int, merged: int, skipped: int} перенесено, совпало с уже семейным, пропущено (не личные)
+     * @return array<string, int> сколько добавлено, уже было в семье, совпало с общим контактом другого члена, владелец не в семье
      */
-    public function moveToFamily(array $contacts, Family $family): array
+    public function share(array $contacts, Family $family): array
     {
-        return $this->em->wrapInTransaction(function () use ($contacts, $family): array {
-            $existing = [];
-            foreach ($family->getContacts() as $contact) {
-                $existing[self::fingerprint($contact)] = true;
+        $result = [self::SHARED => 0, self::ALREADY => 0, self::DUPLICATE => 0, self::NOT_MEMBER => 0];
+        $existing = [];
+        foreach ($family->getContacts() as $shared) {
+            if ($shared->getDeletedAt() === null) {
+                $existing[self::fingerprint($shared)] = true;
             }
-
-            $moved = $merged = $skipped = 0;
-            foreach ($contacts as $contact) {
-                if ($contact->getUser() === null) {
-                    ++$skipped;
-                    continue;
-                }
-
-                $key = self::fingerprint($contact);
-                if (isset($existing[$key])) {
-                    ++$merged;
-                } else {
-                    $copy = (new Contact())->setFamily($family);
-                    $copy->apply($contact->getName(), $contact->getPhones(), $contact->getEmails(), $contact->getPhotoSha256());
-                    $this->em->persist($copy);
-                    $existing[$key] = true;
-                    ++$moved;
-                }
-                $this->em->remove($contact);
-            }
-            $this->em->flush();
-
-            return ['moved' => $moved, 'merged' => $merged, 'skipped' => $skipped];
-        });
-    }
-
-    /**
-     * Возвращает семейный контакт в личные контакты пользователя. Контакт сохраняет идентификатор:
-     * телефон этого пользователя, где контакт лежал как семейный, увидит, что тот стал его личным,
-     * и оставит запись в книге; у остальных членов семьи копия удалится как у удалённого семейного.
-     * Если у пользователя уже есть такой контакт, семейный просто удаляется.
-     *
-     * @return bool true — контакт стал личным, false — совпал с уже существующим и удалён
-     */
-    public function moveToUser(Contact $contact, User $user): bool
-    {
-        if ($contact->getFamily() === null) {
-            throw new \InvalidArgumentException('Контакт не семейный.');
         }
 
-        return $this->em->wrapInTransaction(function () use ($contact, $user): bool {
+        foreach ($contacts as $contact) {
             $key = self::fingerprint($contact);
-            $duplicate = false;
-            foreach ($this->em->getRepository(Contact::class)->findBy(['user' => $user, 'deletedAt' => null]) as $personal) {
-                if (self::fingerprint($personal) === $key) {
-                    $duplicate = true;
-                    break;
-                }
+            $status = match (true) {
+                $contact->getFamily() === $family => self::ALREADY,
+                $contact->getUser()?->getFamily() !== $family => self::NOT_MEMBER,
+                // Такой же контакт уже общий (от другого члена семьи) — второй дал бы дубли на телефонах.
+                isset($existing[$key]) => self::DUPLICATE,
+                default => self::SHARED,
+            };
+            if ($status === self::SHARED) {
+                $contact->setFamily($family);
+                $existing[$key] = true;
             }
+            ++$result[$status];
+        }
+        $this->em->flush();
 
-            if ($duplicate) {
-                $this->em->remove($contact);
-            } else {
-                $contact->reassignTo($user);
-            }
-            $this->em->flush();
+        return $result;
+    }
 
-            return !$duplicate;
-        });
+    public function unshare(Contact $contact): void
+    {
+        $contact->setFamily(null);
+        $this->em->flush();
     }
 
     /**

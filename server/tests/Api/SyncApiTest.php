@@ -117,10 +117,13 @@ final class SyncApiTest extends DatabaseWebTestCase
     {
         $family = (new Family())->setName('Ивановы');
         $this->em->persist($family);
-        $grandma = (new Contact())->setFamily($family)->setName('Бабушка')->setPhones(['+7 900 111-11-11']);
-        $this->em->persist($grandma);
+        $olga = $this->createUser('olga@example.com');
         $boris = $this->createUser('boris@example.com');
+        $family->addMember($olga);
         $family->addMember($boris);
+        // Ольга поделилась своим контактом с семьёй.
+        $grandma = Contact::personal($olga)->setFamily($family)->setName('Бабушка')->setPhones(['+7 900 111-11-11']);
+        $this->em->persist($grandma);
         $this->em->flush();
 
         // Анна не в семье.
@@ -136,7 +139,12 @@ final class SyncApiTest extends DatabaseWebTestCase
         self::assertSame([], $this->api('GET', '/api/contacts', token: $borisToken)['contacts']);
         self::assertSame('Ивановы', $this->api('GET', '/api/me', token: $borisToken)['family']['name']);
 
-        // serverId семейного контакта нельзя «присвоить» как личный.
+        // Свой общий контакт Ольга получает как личный, а в семейном списке его нет.
+        $olgaToken = $this->login('olga@example.com');
+        self::assertSame([], $this->api('GET', '/api/family/contacts', token: $olgaToken)['contacts']);
+        self::assertSame([$grandma->getUuid()], array_column($this->api('GET', '/api/contacts', token: $olgaToken)['contacts'], 'serverId'));
+
+        // serverId чужого общего контакта нельзя «присвоить» как свой.
         $result = $this->sync(self::PHONE_A, [['externalId' => 'x', 'serverId' => $grandma->getUuid(), 'name' => 'Бабушка']], token: $borisToken);
         self::assertSame(1, $result['created']);
         self::assertNotSame($grandma->getUuid(), $result['links'][0]['serverId']);

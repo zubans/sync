@@ -28,17 +28,13 @@ data class SyncReport(
     /** Удалено с телефона, потому что администратор удалил на сервере. */
     val removedByAdmin: Int = 0,
     val familyAdded: Int = 0,
-    val familyUpdated: Int = 0,
-    val familyRemoved: Int = 0,
     val googleAccounts: List<String> = emptyList(),
 ) {
     fun summary(): String = buildList {
         if (restored > 0) add("восстановлено $restored")
         add("выгружено $uploaded (новых $created, изменено $updated, удалено $deleted)")
         if (removedByAdmin > 0) add("удалено администратором $removedByAdmin")
-        if (familyAdded + familyUpdated + familyRemoved > 0) {
-            add("семейные: +$familyAdded, изменено $familyUpdated, убрано $familyRemoved")
-        }
+        if (familyAdded > 0) add("добавлено из семьи $familyAdded")
     }.joinToString("; ").replaceFirstChar { it.uppercase() }
 }
 
@@ -147,29 +143,13 @@ class SyncEngine(
         val mappings = store.load()
         val plan = SyncPlanner.planFamily(response.contacts, phone.readAll(), mappings.family)
 
-        // Контакт мог не удалиться из семьи, а вернуться в личные этого пользователя (тот же serverId) —
-        // тогда запись остаётся в книге. Проверяем только когда что-то пропало, это отдельный запрос.
-        val released = if (plan.vanished.isEmpty()) {
-            emptyMap()
-        } else {
-            SyncPlanner.releasedToPersonal(plan.vanished, api.personalContacts().map { it.serverId }.toSet())
-        }
-        val toDelete = plan.toDelete - released.keys
-
-        toDelete.forEach(phone::delete)
-        plan.toUpdate.forEach { (rawId, contact) -> phone.update(rawId, contact.toData()) }
-        val family = plan.keep.toMutableMap()
+        val family = plan.delivered.toMutableMap()
         for (contact in plan.toInsert) {
             family[contact.serverId] = FamilyEntry(phone.insert(contact.toData(downloadPhoto(contact.photo))), contact.updatedAt, createdByUs = true)
         }
-        store.save(mappings.copy(family = family, personal = mappings.personal + released))
+        store.save(mappings.copy(family = family))
 
-        return SyncReport(
-            uploaded = 0, created = 0, updated = 0, deleted = 0,
-            familyAdded = plan.toInsert.size,
-            familyUpdated = plan.toUpdate.size,
-            familyRemoved = toDelete.size,
-        )
+        return SyncReport(uploaded = 0, created = 0, updated = 0, deleted = 0, familyAdded = plan.toInsert.size)
     }
 
     private fun finish(report: SyncReport): SyncReport {

@@ -1,6 +1,6 @@
 {% extends '@EasyAdmin/page/content.html.twig' %}
 
-{% block content_title 'Перенос в семью' %}
+{% block content_title 'Добавить в семью' %}
 
 {% block main %}
 <style>
@@ -21,9 +21,10 @@
 </style>
 
 <p class="cm-meta">
-    Перетащите личные контакты на семью (или отметьте несколько и перетащите любой из отмеченных).
-    Контакт станет семейным и появится на телефонах всех членов семьи, а личная копия удалится с телефона владельца
-    при следующей синхронизации. Если такой контакт в семье уже есть, дубль не создаётся.
+    Перетащите контакты на семью (или отметьте несколько и перетащите любой из отмеченных). Контакт станет общим:
+    он останется у владельца и будет ставиться на устройства членов семьи, где его ещё нет (новый телефон, новый член семьи).
+    Добавить можно только контакт члена этой семьи; если такой общий контакт в семье уже есть, дубль не создаётся.
+    Убрать из семьи — в разделах «Контакты» и «Семейные контакты»: с телефонов при этом ничего не удаляется.
 </p>
 
 <form class="cm-toolbar" method="get">
@@ -42,10 +43,10 @@
         <div class="cm-toolbar">
             <strong>Выбрано: <span id="cm-count">0</span></strong>
             <select id="cm-target" class="form-select" style="max-width: 220px">
-                <option value="">Перенести в…</option>
+                <option value="">Добавить в семью…</option>
                 {% for f in families %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}
             </select>
-            <button type="button" id="cm-move" class="btn btn-primary" disabled>Перенести</button>
+            <button type="button" id="cm-move" class="btn btn-primary" disabled>Добавить</button>
             <button type="button" id="cm-all" class="btn btn-link">Выбрать все</button>
         </div>
         <div id="cm-message" class="alert d-none" role="status"></div>
@@ -60,12 +61,12 @@
                         <span class="cm-photo"></span>
                     {% endif %}
                     <div>
-                        <div>{{ c.name ?? '(без имени)' }}</div>
+                        <div>{{ c.name ?? '(без имени)' }} <span class="badge badge-secondary cm-family-badge">{{ c.family ? 'в семье ' ~ c.family.name }}</span></div>
                         <div class="cm-meta">{{ c.phones|join(', ') }} · {{ c.user.email }}{{ c.user.family ? ' (семья ' ~ c.user.family.name ~ ')' }}</div>
                     </div>
                 </div>
             {% else %}
-                <p>Личных контактов не найдено.</p>
+                <p>Контактов не найдено.</p>
             {% endfor %}
         </div>
         {% if truncated %}<p class="cm-meta mt-2">Показаны первые {{ contacts|length }} — уточните поиск или выберите владельца.</p>{% endif %}
@@ -75,7 +76,7 @@
         {% for f in families %}
             <div class="cm-family" data-family-id="{{ f.id }}">
                 <h3><i class="fa fa-people-roof"></i> {{ f.name }}</h3>
-                <div class="cm-meta">Контактов: <span class="cm-family-count">{{ f.contacts|length }}</span></div>
+                <div class="cm-meta">Общих контактов: <span class="cm-family-count">{{ f.contacts|filter(c => c.deletedAt is null)|length }}</span></div>
                 <div class="cm-meta">{{ f.members|map(m => m.email)|join(', ') ?: 'нет участников' }}</div>
             </div>
         {% else %}
@@ -116,15 +117,21 @@
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok) {
-            show(result.error || 'Не удалось перенести', false);
+            show(result.error || 'Не удалось добавить', false);
             return;
         }
-        ids.forEach(id => list.querySelector(`.cm-card[data-id="${id}"]`)?.remove());
+        result.sharedIds.forEach(id => {
+            const badge = list.querySelector(`.cm-card[data-id="${id}"] .cm-family-badge`);
+            if (badge) badge.textContent = 'в семье ' + result.familyName;
+        });
+        cards().forEach(c => c.querySelector('.cm-check').checked = false);
         const counter = document.querySelector(`.cm-family[data-family-id="${familyId}"] .cm-family-count`);
         if (counter) counter.textContent = result.familyContacts;
-        const parts = [`Перенесено: ${result.moved}`];
-        if (result.merged) parts.push(`уже были в семье: ${result.merged}`);
-        show(parts.join(', '), true);
+        const parts = [`Добавлено в семью: ${result.shared}`];
+        if (result.already) parts.push(`уже были в ней: ${result.already}`);
+        if (result.duplicate) parts.push(`такой общий контакт уже есть: ${result.duplicate}`);
+        if (result.notMember) parts.push(`владелец не в этой семье: ${result.notMember}`);
+        show(parts.join(', '), result.notMember === 0);
         refresh();
     }
 
