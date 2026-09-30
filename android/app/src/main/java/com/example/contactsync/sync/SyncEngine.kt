@@ -147,19 +147,28 @@ class SyncEngine(
         val mappings = store.load()
         val plan = SyncPlanner.planFamily(response.contacts, phone.readAll(), mappings.family)
 
-        plan.toDelete.forEach(phone::delete)
+        // Контакт мог не удалиться из семьи, а вернуться в личные этого пользователя (тот же serverId) —
+        // тогда запись остаётся в книге. Проверяем только когда что-то пропало, это отдельный запрос.
+        val released = if (plan.vanished.isEmpty()) {
+            emptyMap()
+        } else {
+            SyncPlanner.releasedToPersonal(plan.vanished, api.personalContacts().map { it.serverId }.toSet())
+        }
+        val toDelete = plan.toDelete - released.keys
+
+        toDelete.forEach(phone::delete)
         plan.toUpdate.forEach { (rawId, contact) -> phone.update(rawId, contact.toData()) }
         val family = plan.keep.toMutableMap()
         for (contact in plan.toInsert) {
             family[contact.serverId] = FamilyEntry(phone.insert(contact.toData(downloadPhoto(contact.photo))), contact.updatedAt, createdByUs = true)
         }
-        store.save(mappings.copy(family = family))
+        store.save(mappings.copy(family = family, personal = mappings.personal + released))
 
         return SyncReport(
             uploaded = 0, created = 0, updated = 0, deleted = 0,
             familyAdded = plan.toInsert.size,
             familyUpdated = plan.toUpdate.size,
-            familyRemoved = plan.toDelete.size,
+            familyRemoved = toDelete.size,
         )
     }
 

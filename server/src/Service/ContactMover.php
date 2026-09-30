@@ -4,10 +4,11 @@ namespace App\Service;
 
 use App\Entity\Contact;
 use App\Entity\Family;
+use App\Entity\User;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * Перенос личных контактов в семейные.
+ * Перенос контактов между личными и семейными.
  *
  * Личный контакт удаляется (ContactTombstoneListener оставляет «надгробие», и при синхронизации
  * личная копия удаляется с телефона владельца), а в семье создаётся контакт с теми же данными и фото —
@@ -55,6 +56,41 @@ final class ContactMover
             $this->em->flush();
 
             return ['moved' => $moved, 'merged' => $merged, 'skipped' => $skipped];
+        });
+    }
+
+    /**
+     * Возвращает семейный контакт в личные контакты пользователя. Контакт сохраняет идентификатор:
+     * телефон этого пользователя, где контакт лежал как семейный, увидит, что тот стал его личным,
+     * и оставит запись в книге; у остальных членов семьи копия удалится как у удалённого семейного.
+     * Если у пользователя уже есть такой контакт, семейный просто удаляется.
+     *
+     * @return bool true — контакт стал личным, false — совпал с уже существующим и удалён
+     */
+    public function moveToUser(Contact $contact, User $user): bool
+    {
+        if ($contact->getFamily() === null) {
+            throw new \InvalidArgumentException('Контакт не семейный.');
+        }
+
+        return $this->em->wrapInTransaction(function () use ($contact, $user): bool {
+            $key = self::fingerprint($contact);
+            $duplicate = false;
+            foreach ($this->em->getRepository(Contact::class)->findBy(['user' => $user, 'deletedAt' => null]) as $personal) {
+                if (self::fingerprint($personal) === $key) {
+                    $duplicate = true;
+                    break;
+                }
+            }
+
+            if ($duplicate) {
+                $this->em->remove($contact);
+            } else {
+                $contact->reassignTo($user);
+            }
+            $this->em->flush();
+
+            return !$duplicate;
         });
     }
 

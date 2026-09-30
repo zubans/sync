@@ -175,4 +175,20 @@ class SyncPlannerTest {
         assertEquals(listOf("real"), upload.map { it.externalId })
         assertEquals("abc", upload.single().photo)
     }
+
+    @Test
+    fun `contact returned from family to this user stays on phone as personal`() {
+        val current = mapOf(
+            "released" to FamilyEntry(10, "t1", createdByUs = true),
+            "deleted" to FamilyEntry(20, "t1", createdByUs = true),
+        )
+        val plan = SyncPlanner.planFamily(emptyList(), listOf(local(1, "Жена"), local(2, "Удалён")), current)
+
+        assertEquals(setOf("released", "deleted"), plan.vanished.keys)
+        // Сервер говорит, что "released" теперь личный контакт этого пользователя.
+        val released = SyncPlanner.releasedToPersonal(plan.vanished, personalServerIds = setOf("released"))
+
+        assertEquals(mapOf(10L to "released"), released)
+        assertEquals(listOf(20L), plan.toDelete - released.keys)
+    }
 }

@@ -104,6 +104,14 @@ class Contact
         return true;
     }
 
+    /** Семейный контакт становится личным контактом пользователя (идентификатор сохраняется). */
+    public function reassignTo(User $user): void
+    {
+        $this->user = $user;
+        $this->family = null;
+        $this->touch();
+    }
+
     public function getPhotoSha256(): ?string
     {
         return $this->photoSha256;

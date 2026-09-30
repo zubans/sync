@@ -27,6 +27,8 @@ data class FamilyPlan(
     val toDelete: List<Long>,
     /** Соответствия, которые остаются (без учёта вставок — их id известны только после записи). */
     val keep: Map<String, FamilyEntry>,
+    /** Контакты, пропавшие из семьи, которые ещё лежат на телефоне (serverId → копия). */
+    val vanished: Map<String, FamilyEntry> = emptyMap(),
 )
 
 /**
@@ -83,9 +85,11 @@ object SyncPlanner {
         val toDelete = mutableListOf<Long>()
         val keep = mutableMapOf<String, FamilyEntry>()
 
+        val vanished = mutableMapOf<String, FamilyEntry>()
         for ((serverId, entry) in current) {
-            if (serverId !in serverIds && entry.createdByUs && entry.rawContactId in localRawIds) {
-                toDelete += entry.rawContactId
+            if (serverId !in serverIds && entry.rawContactId in localRawIds) {
+                vanished[serverId] = entry
+                if (entry.createdByUs) toDelete += entry.rawContactId
             }
         }
 
@@ -107,7 +111,7 @@ object SyncPlanner {
                 else -> keep[contact.serverId] = entry.copy(updatedAt = contact.updatedAt)
             }
         }
-        return FamilyPlan(toInsert, toUpdate, toDelete, keep)
+        return FamilyPlan(toInsert, toUpdate, toDelete, keep, vanished)
     }
 
     /**
@@ -142,6 +146,15 @@ object SyncPlanner {
         val removed = removedExternalIds.toSet()
         return local.filter { it.externalId in removed }.flatMap { it.rawContactIds }
     }
+
+    /**
+     * Контакты, пропавшие из семьи, которые администратор вернул в личные этого пользователя
+     * (у них тот же serverId): их не удаляем с телефона, а дальше считаем личными.
+     *
+     * @return rawId → serverId для личных соответствий
+     */
+    fun releasedToPersonal(vanished: Map<String, FamilyEntry>, personalServerIds: Set<String>): Map<Long, String> =
+        vanished.filterKeys { it in personalServerIds }.entries.associate { (serverId, entry) -> entry.rawContactId to serverId }
 
     /** Обновляет соответствие rawId → serverId по ответу сервера на выгрузку. */
     fun applyLinks(
