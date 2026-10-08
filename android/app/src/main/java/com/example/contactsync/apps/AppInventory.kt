@@ -17,8 +17,9 @@ import java.security.MessageDigest
 data class LocalApp(val dto: AppDto, val paths: Map<String, File>)
 
 /**
- * Список пользовательских (не системных) приложений устройства: версия, источник установки,
- * подпись и файлы base/split APK с SHA-256.
+ * Список пользовательских приложений устройства: версия, источник установки,
+ * подпись и файлы base/split APK с SHA-256. Системные не входят — ни встроенные в прошивку,
+ * ни служебные компоненты без иконки в лаунчере (например, Android System SafetyCore из Play).
  */
 class AppInventory(private val context: Context) {
 
@@ -27,12 +28,17 @@ class AppInventory(private val context: Context) {
 
     fun collect(): List<LocalApp> {
         val result = pm.getInstalledApplications(0)
-            .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 && it.packageName != context.packageName }
+            .filter { isUserApp(it) }
             .mapNotNull { info -> runCatching { describe(info) }.getOrNull() }
             .sortedBy { it.dto.label?.lowercase() ?: it.dto.packageName }
         hashCache.retainOnly(result.flatMap { it.paths.values })
         return result
     }
+
+    private fun isUserApp(info: ApplicationInfo): Boolean =
+        info.flags and ApplicationInfo.FLAG_SYSTEM == 0 &&
+            info.packageName != context.packageName &&
+            pm.getLaunchIntentForPackage(info.packageName) != null
 
     /** Установлено ли приложение и какой версии. */
     fun installedVersion(packageName: String): Long? = runCatching {
