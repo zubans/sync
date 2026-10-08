@@ -226,8 +226,8 @@ private fun AppRow(
             }
             when {
                 installed -> Text("Установлено", style = MaterialTheme.typography.bodySmall)
-                item.fromPlay -> TextButton(onClick = onPlay) { Text("Google Play") }
                 item.backedUp -> TextButton(onClick = onInstall) { Text("Установить") }
+                item.fromPlay -> TextButton(onClick = onPlay) { Text("Google Play") }
                 else -> Text("Нет копии APK", style = MaterialTheme.typography.bodySmall)
             }
         }

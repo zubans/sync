@@ -17,7 +17,7 @@ help: ## Список команд
 
 init: ## Создать .env со случайными секретами (один раз)
 	@if [ -f .env ]; then echo ".env уже есть — не трогаю"; else \
-		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nHTTP_PORT=8001\nAPK_BACKUP_INCLUDE_PLAY=0\n' \
+		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nHTTP_PORT=8001\n' \
 			"$$(openssl rand -hex 32)" "$$(openssl rand -hex 24)" > .env && \
 		echo "Создан .env (секреты сгенерированы)"; fi
 
@@ -81,7 +81,8 @@ android/local.properties:
 apk: android/local.properties ## Собрать debug APK; адрес сервера по умолчанию: make apk SERVER_URL=http://host:port
 	cd android && ./gradlew assembleDebug $(if $(SERVER_URL),-PserverUrl=$(SERVER_URL))
 
-install-apk: apk reverse ## Поставить APK на подключённое устройство
+install-apk: apk ## Поставить APK на подключённое устройство (без SERVER_URL — ещё и проброс порта)
+	$(if $(SERVER_URL),,$(MAKE) reverse)
 	adb install -r $(APK)
 
 reverse: ## Пробросить порт сервера на устройство: в приложении адрес http://127.0.0.1:<порт>

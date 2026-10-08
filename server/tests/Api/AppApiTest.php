@@ -26,14 +26,15 @@ final class AppApiTest extends DatabaseWebTestCase
         $this->apkSha = hash('sha256', $this->apk);
     }
 
-    public function testOnlyNonPlayApksAreRequested(): void
+    public function testApksAreRequestedRegardlessOfInstaller(): void
     {
+        $playSha = str_repeat('a', 64);
         $response = $this->inventory([
             $this->app('org.example.sideloaded', $this->apkSha, \strlen($this->apk), installer: null),
-            $this->app('com.whatsapp', str_repeat('a', 64), 100, installer: 'com.android.vending'),
+            $this->app('com.whatsapp', $playSha, 100, installer: 'com.android.vending'),
         ]);
 
-        self::assertSame([$this->apkSha], $response['missing']);
+        self::assertEqualsCanonicalizing([$this->apkSha, $playSha], $response['missing']);
     }
 
     public function testChunkedUploadWithResumeAndDownload(): void
@@ -104,10 +105,10 @@ final class AppApiTest extends DatabaseWebTestCase
         $this->client->request('GET', '/api/apk/'.$this->apkSha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$boris]);
         self::assertResponseStatusCodeSame(404);
 
-        // Приложения из Play по умолчанию не загружаются.
-        $playSha = str_repeat('b', 64);
-        $this->inventory([$this->app('com.whatsapp', $playSha, 100, installer: 'com.android.vending')]);
-        $this->api('GET', '/api/apk/uploads/'.$playSha, token: $this->token);
+        // Приложения больше APK_MAX_SIZE не загружаются.
+        $hugeSha = str_repeat('b', 64);
+        $this->inventory([$this->app('org.example.huge', $hugeSha, 2 * 1024 ** 3)]);
+        $this->api('GET', '/api/apk/uploads/'.$hugeSha, token: $this->token);
         self::assertResponseStatusCodeSame(404);
     }
 

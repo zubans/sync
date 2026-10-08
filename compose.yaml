@@ -29,7 +29,6 @@ services:
       APP_SECRET: ${APP_SECRET:?Запустите make init}
       DATABASE_URL: postgresql://app:${POSTGRES_PASSWORD}@database:5432/app?serverVersion=16&charset=utf8
       APK_STORAGE_DIR: /app/var/storage/apk
-      APK_BACKUP_INCLUDE_PLAY: ${APK_BACKUP_INCLUDE_PLAY:-0}
       DEFAULT_URI: http://localhost:${HTTP_PORT:-8001}
     ports:
       - "${HTTP_PORT:-8001}:80"

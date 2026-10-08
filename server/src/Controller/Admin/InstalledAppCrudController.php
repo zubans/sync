@@ -84,7 +84,7 @@ final class InstalledAppCrudController extends AbstractCrudController
     private function backupState(InstalledApp $app): string
     {
         if (!$this->inventory->shouldBackUp($app)) {
-            return $app->isFromPlay() ? 'не нужен (Play)' : 'слишком большой';
+            return 'слишком большой';
         }
         foreach ($app->getFileHashes() as $sha256) {
             if (!$this->storage->has($sha256)) {

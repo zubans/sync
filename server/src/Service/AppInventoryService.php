@@ -23,9 +23,6 @@ final class AppInventoryService
         private readonly DeviceRepository $devices,
         private readonly InstalledAppRepository $apps,
         private readonly ApkBlobRepository $blobs,
-        /** Сохранять ли APK приложений из Google Play (их проще поставить из Play заново). */
-        #[Autowire('%env(bool:APK_BACKUP_INCLUDE_PLAY)%')]
-        private readonly bool $includePlay,
         #[Autowire('%env(int:APK_MAX_SIZE)%')]
         private readonly int $maxSize,
     ) {
@@ -95,6 +92,6 @@ final class AppInventoryService
 
     public function shouldBackUp(InstalledApp $app): bool
     {
-        return ($this->includePlay || !$app->isFromPlay()) && $app->getTotalSize() <= $this->maxSize;
+        return $app->getTotalSize() <= $this->maxSize;
     }
 }
