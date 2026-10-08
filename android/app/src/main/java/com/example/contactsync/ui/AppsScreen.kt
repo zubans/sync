@@ -1,8 +1,5 @@
 package com.example.contactsync.ui
 
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.net.Uri
 import android.text.format.DateUtils
 import android.text.format.Formatter
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.work.WorkInfo
 import com.example.contactsync.App
 import com.example.contactsync.apps.AppInventory
+import com.example.contactsync.apps.AppStore
 import com.example.contactsync.data.BackedUpApp
 import com.example.contactsync.sync.ApkBackupWorker
 import com.example.contactsync.sync.SyncScheduler
@@ -133,13 +131,8 @@ fun AppsScreen() {
                     item = item,
                     installed = installed != null && installed >= item.versionCode,
                     status = installing[item.packageName],
-                    onPlay = {
-                        val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${item.packageName}"))
-                        try {
-                            context.startActivity(market)
-                        } catch (e: ActivityNotFoundException) {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=${item.packageName}")))
-                        }
+                    onStore = { store ->
+                        if (!store.open(context, item.packageName)) installing[item.packageName] = "${store.name} не установлен"
                     },
                     onInstall = {
                         if (!app.apkInstaller.canInstall()) {
@@ -203,17 +196,19 @@ private fun AppRow(
     item: BackedUpApp,
     installed: Boolean,
     status: String?,
-    onPlay: () -> Unit,
+    onStore: (AppStore) -> Unit,
     onInstall: () -> Unit,
     onRollback: () -> Unit,
 ) {
     val context = LocalContext.current
+    // Старый сервер не отдаёт installer — тогда знаем только, что из Play.
+    val store = AppStore.of(item.installer ?: AppStore.PLAY.takeIf { item.fromPlay })
     Card(Modifier.fillMaxWidth()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(item.label ?: item.packageName, style = MaterialTheme.typography.titleSmall)
                 Text(
-                    listOfNotNull(item.versionName, Formatter.formatShortFileSize(context, item.size), if (item.fromPlay) "Google Play" else null)
+                    listOfNotNull(item.versionName, Formatter.formatShortFileSize(context, item.size), store?.name)
                         .joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -224,11 +219,16 @@ private fun AppRow(
                     }
                 }
             }
-            when {
-                installed -> Text("Установлено", style = MaterialTheme.typography.bodySmall)
-                item.backedUp -> TextButton(onClick = onInstall) { Text("Установить") }
-                item.fromPlay -> TextButton(onClick = onPlay) { Text("Google Play") }
-                else -> Text("Нет копии APK", style = MaterialTheme.typography.bodySmall)
+            // Восстановить можно из архива или из магазина, откуда приложение ставили, — выбирает пользователь.
+            Column(horizontalAlignment = Alignment.End) {
+                when {
+                    installed -> Text("Установлено", style = MaterialTheme.typography.bodySmall)
+                    !item.backedUp && store == null -> Text("Нет копии APK", style = MaterialTheme.typography.bodySmall)
+                    else -> {
+                        if (item.backedUp) TextButton(onClick = onInstall) { Text("Из архива") }
+                        store?.let { TextButton(onClick = { onStore(it) }) { Text(it.name) } }
+                    }
+                }
             }
         }
     }

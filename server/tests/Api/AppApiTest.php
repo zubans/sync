@@ -118,7 +118,7 @@ final class AppApiTest extends DatabaseWebTestCase
             $this->app('org.example.a', str_repeat('1', 64), 10, versionCode: 5),
             $this->app('org.example.removed', str_repeat('2', 64), 10),
         ]);
-        $this->inventory([$this->app('org.example.a', str_repeat('3', 64), 10, versionCode: 7)], ['installId' => 'install-bbbb-0002'] + self::DEVICE);
+        $this->inventory([$this->app('org.example.a', str_repeat('3', 64), 10, installer: 'ru.vk.store', versionCode: 7)], ['installId' => 'install-bbbb-0002'] + self::DEVICE);
         // На первом устройстве удалили org.example.removed.
         $this->inventory([$this->app('org.example.a', str_repeat('1', 64), 10, versionCode: 5)]);
 
@@ -126,6 +126,7 @@ final class AppApiTest extends DatabaseWebTestCase
 
         self::assertSame(['org.example.a'], array_column($apps, 'packageName'));
         self::assertSame(7, $apps[0]['versionCode']);
+        self::assertSame('ru.vk.store', $apps[0]['installer']);
         self::assertFalse($apps[0]['backedUp']);
     }
 

@@ -109,6 +109,7 @@ final class AppController extends AbstractController
                 'versionName' => $latest->getVersionName(),
                 'versionCode' => $latest->getVersionCode(),
                 'fromPlay' => $latest->isFromPlay(),
+                'installer' => $latest->getInstaller(),
                 'signingSha256' => $latest->getSigningSha256(),
                 'files' => $latest->getFiles(),
                 'size' => $latest->getTotalSize(),

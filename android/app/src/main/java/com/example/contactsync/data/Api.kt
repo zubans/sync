@@ -181,6 +181,8 @@ data class BackedUpApp(
     val versionName: String? = null,
     val versionCode: Long,
     val fromPlay: Boolean,
+    /** Пакет магазина или установщика, из которого поставлено приложение. */
+    val installer: String? = null,
     val signingSha256: String? = null,
     val files: List<ApkFileDto>,
     val size: Long,
