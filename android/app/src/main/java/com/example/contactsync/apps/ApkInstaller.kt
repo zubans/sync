@@ -1,5 +1,6 @@
 package com.example.contactsync.apps
 
+import android.Manifest
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -13,10 +14,18 @@ import androidx.core.content.IntentCompat
 import com.example.contactsync.App
 import com.example.contactsync.data.Api
 import com.example.contactsync.data.BackedUpApp
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -27,13 +36,23 @@ data class InstallEvent(val packageName: String, val success: Boolean, val messa
 /**
  * Установка сохранённых APK: скачать все части, проверить хэши и подпись, поставить одной сессией
  * PackageInstaller. Каждую установку подтверждает пользователь — так устроен Android для обычных приложений.
+ * Исключение — Contact Sync, встроенный в прошивку с INSTALL_PACKAGES: он ставит молча, как Google Play.
  */
 class ApkInstaller(private val context: Context, private val api: Api) {
 
     private val _events = MutableSharedFlow<InstallEvent>(extraBufferCapacity = 8)
     val events: SharedFlow<InstallEvent> = _events.asSharedFlow()
 
-    fun canInstall(): Boolean = context.packageManager.canRequestPackageInstalls()
+    private val _downloads = MutableStateFlow<Map<String, DownloadProgress>>(emptyMap())
+
+    /** Идущие скачивания по пакетам. Живёт дольше экрана: установка продолжается и после ухода с него. */
+    val downloads: StateFlow<Map<String, DownloadProgress>> = _downloads.asStateFlow()
+
+    /** Встроено в прошивку как привилегированное (priv-app + privapp-permissions). */
+    val isSystemInstaller: Boolean
+        get() = context.checkSelfPermission(Manifest.permission.INSTALL_PACKAGES) == PackageManager.PERMISSION_GRANTED
+
+    fun canInstall(): Boolean = isSystemInstaller || context.packageManager.canRequestPackageInstalls()
 
     /**
      * Системный диалог удаления приложения. Нужен для отката: Android не ставит старую версию
@@ -50,16 +69,32 @@ class ApkInstaller(private val context: Context, private val api: Api) {
     suspend fun install(app: BackedUpApp, previous: Boolean = false) = withContext(Dispatchers.IO) {
         val meta = if (previous) requireNotNull(app.previous) { "Прошлой версии нет" }.files else app.files
         val dir = File(context.cacheDir, "apk").apply { mkdirs() }
-        val files = meta.map { file ->
-            File(dir, "${file.sha256}.apk").also { target ->
-                if (!target.exists() || AppInventory.sha256(target) != file.sha256) {
-                    api.downloadApk(file.sha256, target)
-                    if (AppInventory.sha256(target) != file.sha256) {
-                        target.delete()
-                        throw IOException("Файл ${file.name} повреждён при скачивании")
+        val total = meta.sumOf { it.size }
+        var done = 0L
+        reportDownload(app.packageName, DownloadProgress(0, total))
+        val files = try {
+            meta.map { file ->
+                File(dir, "${file.sha256}.apk").also { target ->
+                    val onProgress = { bytes: Long -> reportDownload(app.packageName, DownloadProgress(done + bytes, total)) }
+                    if (!target.exists() || AppInventory.sha256(target) != file.sha256) {
+                        // Недокачанный в прошлый раз файл докачивается; не сошёлся хэш и после этого —
+                        // значит, испорчен, качаем заново целиком.
+                        api.downloadApk(file.sha256, target, onProgress)
+                        if (AppInventory.sha256(target) != file.sha256) {
+                            target.delete()
+                            api.downloadApk(file.sha256, target, onProgress)
+                        }
+                        if (AppInventory.sha256(target) != file.sha256) {
+                            target.delete()
+                            throw IOException("Файл ${file.name} повреждён при скачивании")
+                        }
                     }
+                    done += file.size
+                    reportDownload(app.packageName, DownloadProgress(done, total))
                 }
             }
+        } finally {
+            _downloads.update { it - app.packageName }
         }
         val baseIndex = meta.indexOfFirst { it.name == "base.apk" }.coerceAtLeast(0)
         verifySignature(app, files[baseIndex])
@@ -67,7 +102,12 @@ class ApkInstaller(private val context: Context, private val api: Api) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(app.packageName)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setRequireUserAction(
+                    if (isSystemInstaller) PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED
+                    else PackageInstaller.SessionParams.USER_ACTION_REQUIRED,
+                )
+            }
         }
         val sessionId = installer.createSession(params)
         installer.openSession(sessionId).use { session ->
@@ -79,6 +119,18 @@ class ApkInstaller(private val context: Context, private val api: Api) {
             }
             session.commit(InstallResultReceiver.intentSender(context, sessionId, app.packageName))
         }
+    }
+
+    /** Ставит и ждёт итога от системы — чтобы восстанавливать приложения по очереди. */
+    suspend fun installAndAwait(app: BackedUpApp): InstallEvent = coroutineScope {
+        val result = async(start = CoroutineStart.UNDISPATCHED) { events.first { it.packageName == app.packageName } }
+        try {
+            install(app)
+        } catch (e: Exception) {
+            result.cancel()
+            throw e
+        }
+        result.await()
     }
 
     /**
@@ -98,6 +150,13 @@ class ApkInstaller(private val context: Context, private val api: Api) {
         val installed = runCatching { pm.getPackageInfo(app.packageName, flags) }.getOrNull()
         if (installed != null && AppInventory.signingSha256(installed) != signature) {
             throw IOException("Установлена версия с другой подписью — удалите её перед восстановлением")
+        }
+    }
+
+    /** Колбэк приходит на каждый буфер чтения — экран обновляем только при смене целого процента. */
+    private fun reportDownload(packageName: String, progress: DownloadProgress) {
+        _downloads.update { current ->
+            if (current[packageName]?.percent == progress.percent) current else current + (packageName to progress)
         }
     }
 

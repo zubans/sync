@@ -13,6 +13,11 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Тихая установка. Система выдаёт его, только если приложение встроено в прошивку как
+         привилегированное и указано в privapp-permissions; при обычной установке не действует. -->
+    <uses-permission
+        android:name="android.permission.INSTALL_PACKAGES"
+        tools:ignore="ProtectedPermissions" />
     <!-- Откат приложения: системный диалог удаления текущей версии перед установкой прошлой. -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 

@@ -36,6 +36,7 @@ import androidx.work.WorkInfo
 import com.example.contactsync.App
 import com.example.contactsync.apps.AppInventory
 import com.example.contactsync.apps.AppStore
+import com.example.contactsync.apps.DownloadProgress
 import com.example.contactsync.data.BackedUpApp
 import com.example.contactsync.sync.ApkBackupWorker
 import com.example.contactsync.sync.SyncScheduler
@@ -53,6 +54,8 @@ fun AppsScreen() {
     var error by remember { mutableStateOf<String?>(null) }
     val installing = remember { mutableStateMapOf<String, String>() }
     var rollbackBlocked by remember { mutableStateOf<BackedUpApp?>(null) }
+    var restoringAll by remember { mutableStateOf(false) }
+    val downloads by app.apkInstaller.downloads.collectAsState()
     val backupWork by SyncScheduler.appsBackupState(context).collectAsState(initial = emptyList())
     val running = backupWork.firstOrNull { it.state == WorkInfo.State.RUNNING }
     val retrying = backupWork.firstOrNull { it.state == WorkInfo.State.ENQUEUED && it.runAttemptCount > 0 }
@@ -118,6 +121,22 @@ fun AppsScreen() {
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        // Все сохранённые и ещё не установленные — по очереди. Встроенный в прошивку ставит молча,
+        // обычному приложению система покажет подтверждение по каждому.
+        val missing = apps.orEmpty().filter { it.backedUp && (inventory.installedVersion(it.packageName) ?: -1) < it.versionCode }
+        if (missing.isNotEmpty() && app.apkInstaller.canInstall()) {
+            Button(enabled = !restoringAll, onClick = {
+                restoringAll = true
+                app.scope.launch {
+                    for (item in missing) {
+                        installing[item.packageName] = "Устанавливаю…"
+                        runCatching { app.apkInstaller.installAndAwait(item) }
+                            .onFailure { installing[item.packageName] = "Ошибка: ${it.message}" }
+                    }
+                    restoringAll = false
+                }
+            }) { Text(if (restoringAll) "Восстанавливаю…" else "Восстановить всё (${missing.size})") }
+        }
         if (!app.apkInstaller.canInstall()) {
             OutlinedButton(onClick = { context.startActivity(app.apkInstaller.permissionSettingsIntent()) }) {
                 Text("Разрешить установку приложений")
@@ -131,6 +150,7 @@ fun AppsScreen() {
                     item = item,
                     installed = installed != null && installed >= item.versionCode,
                     status = installing[item.packageName],
+                    download = downloads[item.packageName],
                     onStore = { store ->
                         if (!store.open(context, item.packageName)) installing[item.packageName] = "${store.name} не установлен"
                     },
@@ -139,7 +159,7 @@ fun AppsScreen() {
                             context.startActivity(app.apkInstaller.permissionSettingsIntent())
                             return@AppRow
                         }
-                        installing[item.packageName] = "Скачиваю…"
+                        installing[item.packageName] = "Устанавливаю…"
                         app.scope.launch {
                             runCatching { app.apkInstaller.install(item) }
                                 .onSuccess { installing[item.packageName] = "Ожидает подтверждения" }
@@ -156,7 +176,7 @@ fun AppsScreen() {
                             context.startActivity(app.apkInstaller.permissionSettingsIntent())
                             return@rollback
                         }
-                        installing[item.packageName] = "Скачиваю версию ${previous.versionName ?: previous.versionCode}…"
+                        installing[item.packageName] = "Устанавливаю версию ${previous.versionName ?: previous.versionCode}…"
                         app.scope.launch {
                             runCatching { app.apkInstaller.install(item, previous = true) }
                                 .onSuccess { installing[item.packageName] = "Ожидает подтверждения" }
@@ -196,6 +216,7 @@ private fun AppRow(
     item: BackedUpApp,
     installed: Boolean,
     status: String?,
+    download: DownloadProgress?,
     onStore: (AppStore) -> Unit,
     onInstall: () -> Unit,
     onRollback: () -> Unit,
@@ -212,7 +233,27 @@ private fun AppRow(
                         .joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
                 )
-                status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                // Пока APK качается, вместо статуса — прогресс; статус снова виден, когда начинается установка.
+                if (download != null) {
+                    val fraction = download.fraction
+                    if (fraction != null) {
+                        LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+                    } else {
+                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 4.dp))
+                    }
+                    Text(
+                        listOfNotNull(
+                            "Скачиваю",
+                            download.percent.takeIf { it >= 0 }?.let { "$it %" },
+                            Formatter.formatShortFileSize(context, download.downloaded) +
+                                (if (download.total > 0) " из " + Formatter.formatShortFileSize(context, download.total) else ""),
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                }
                 item.previous?.let { previous ->
                     TextButton(onClick = onRollback, contentPadding = PaddingValues(0.dp)) {
                         Text("Прошлая версия ${previous.versionName ?: previous.versionCode}", style = MaterialTheme.typography.bodySmall)

@@ -284,12 +284,50 @@ class Api(
         post<JsonObject?>("/api/apk/uploads/$sha256/complete", "{}")
     }
 
-    /** Скачивает APK в файл. */
-    suspend fun downloadApk(sha256: String, target: java.io.File) = withContext(Dispatchers.IO) {
-        client.newCall(request("/api/apk/$sha256", auth = true).get().build()).execute().use { response ->
+    /**
+     * Скачивает APK в файл с докачкой: при обрыве связи продолжает с места, где остановился
+     * (Range), до [DOWNLOAD_ATTEMPTS] попыток подряд без прогресса.
+     * @param onProgress сколько байт файла уже на диске — вызывается по мере записи
+     */
+    suspend fun downloadApk(sha256: String, target: java.io.File, onProgress: (Long) -> Unit = {}) = withContext(Dispatchers.IO) {
+        var failures = 0
+        while (true) {
+            val before = target.length()
+            try {
+                downloadFrom(sha256, target, onProgress)
+                return@withContext
+            } catch (e: java.io.IOException) {
+                if (e is ApiException || e is UnauthorizedException) throw e
+                failures = if (target.length() > before) 0 else failures + 1
+                if (failures >= DOWNLOAD_ATTEMPTS) throw e
+            }
+        }
+    }
+
+    private fun downloadFrom(sha256: String, target: java.io.File, onProgress: (Long) -> Unit) {
+        val offset = if (target.exists()) target.length() else 0L
+        val builder = request("/api/apk/$sha256", auth = true).get()
+        if (offset > 0) builder.header("Range", "bytes=$offset-")
+        client.newCall(builder.build()).execute().use { response ->
             if (response.code == 401) throw UnauthorizedException()
+            // Файл уже целиком — сервер отвечает 416 на диапазон за концом файла.
+            if (response.code == 416) return
             if (!response.isSuccessful) throw ApiException("Не удалось скачать APK (HTTP ${response.code})", response.code)
-            target.outputStream().use { out -> response.body!!.byteStream().copyTo(out) }
+            // 206 — продолжение; 200 — сервер прислал файл целиком, начинаем заново.
+            val append = response.code == 206
+            var written = if (append) offset else 0L
+            onProgress(written)
+            java.io.FileOutputStream(target, append).use { out ->
+                val input = response.body!!.byteStream()
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    out.write(buffer, 0, read)
+                    written += read
+                    onProgress(written)
+                }
+            }
         }
     }
 
@@ -333,5 +371,6 @@ class Api(
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
         val OCTET = "application/octet-stream".toMediaType()
+        const val DOWNLOAD_ATTEMPTS = 5
     }
 }
