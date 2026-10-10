@@ -70,6 +70,11 @@ final class AppApiTest extends DatabaseWebTestCase
         $this->client->request('GET', '/api/apk/'.$this->apkSha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$this->token]);
         self::assertResponseIsSuccessful();
         self::assertSame($this->apk, $this->client->getInternalResponse()->getContent());
+
+        // Докачка после обрыва: клиент просит продолжение с 1000-го байта.
+        $this->client->request('GET', '/api/apk/'.$this->apkSha, server: ['HTTP_AUTHORIZATION' => 'Bearer '.$this->token, 'HTTP_RANGE' => 'bytes=1000-']);
+        self::assertResponseStatusCodeSame(206);
+        self::assertSame(substr($this->apk, 1000), $this->client->getInternalResponse()->getContent());
     }
 
     public function testCorruptedUploadIsRejected(): void

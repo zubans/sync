@@ -191,6 +191,9 @@ final class AppController extends AbstractController
             throw $this->createNotFoundException();
         }
 
+        // APK на сотни мегабайт отдаются дольше лимита PHP на запрос (30 с): без этого FrankenPHP
+        // обрывает передачу посреди файла. Range (докачку) BinaryFileResponse поддерживает сам.
+        set_time_limit(0);
         $response = new BinaryFileResponse($this->storage->path($sha256));
         $response->headers->set('Content-Type', 'application/vnd.android.package-archive');
 
