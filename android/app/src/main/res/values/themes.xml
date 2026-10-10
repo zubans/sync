@@ -1,3 +1,7 @@
 <resources>
     <style name="Theme.ContactSync" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Тёмный фон с первого кадра, чтобы при возврате на главный экран не мигало белым. -->
+    <style name="Theme.ContactSync.Launcher" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E1014</item>
+    </style>
 </resources>

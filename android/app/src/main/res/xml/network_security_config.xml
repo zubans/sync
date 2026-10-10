@@ -2,4 +2,8 @@
 <!-- Release-сборка: только HTTPS. Для debug разрешён HTTP, см. src/debug/res/xml. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
+    <!-- База знаний в домашней сети доступна только по HTTP (через туннель openconnect). -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.100.247</domain>
+    </domain-config>
 </network-security-config>

@@ -20,6 +20,20 @@
         tools:ignore="ProtectedPermissions" />
     <!-- Откат приложения: системный диалог удаления текущей версии перед установкой прошлой. -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Главный экран: лента ближайших событий из календарей устройства. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- Календарь sync: события пишутся в календарь Android от имени своего аккаунта. -->
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <uses-permission android:name="android.permission.READ_SYNC_SETTINGS" />
+    <uses-permission android:name="android.permission.WRITE_SYNC_SETTINGS" />
+    <uses-permission
+        android:name="android.permission.AUTHENTICATE_ACCOUNTS"
+        android:maxSdkVersion="22" />
+    <!-- Запись встречи для KB: микрофон в foreground-сервисе с уведомлением. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".App"
@@ -38,6 +52,78 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Главный экран планшета. Становится лаунчером, когда его выбирают в «Приложения по умолчанию». -->
+        <activity
+            android:name=".launcher.LauncherActivity"
+            android:clearTaskOnLaunch="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="Главный экран"
+            android:launchMode="singleTask"
+            android:resumeWhilePausing="true"
+            android:screenOrientation="unspecified"
+            android:stateNotNeeded="true"
+            android:theme="@style/Theme.ContactSync.Launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Отдельная иконка «База знаний»: проекты, задачи со стадиями, запись встречи. -->
+        <activity
+            android:name=".kb.KbActivity"
+            android:exported="true"
+            android:label="База знаний"
+            android:theme="@style/Theme.ContactSync.Launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".kb.MeetingRecorderService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Своя панель навигации (кнопки «назад / домой / недавние»). Включается в специальных возможностях. -->
+        <service
+            android:name=".launcher.NavBarService"
+            android:exported="true"
+            android:label="Панель навигации"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/navbar_service" />
+        </service>
+
+        <!-- Календарь sync: аккаунт и SyncAdapter для CalendarContract. -->
+        <service
+            android:name=".calendar.AccountAuthenticatorService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accounts.AccountAuthenticator" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accounts.AccountAuthenticator"
+                android:resource="@xml/authenticator" />
+        </service>
+        <service
+            android:name=".calendar.CalendarSyncService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.content.SyncAdapter" />
+            </intent-filter>
+            <meta-data
+                android:name="android.content.SyncAdapter"
+                android:resource="@xml/calendar_syncadapter" />
+        </service>
 
         <!-- Окна автозаполнения: разблокировка и подтверждение сохранения пароля. -->
         <activity

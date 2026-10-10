@@ -331,6 +331,16 @@ class Api(
         }
     }
 
+    /** Календари пользователя; сервер создаёт «Личный», если своих нет. */
+    suspend fun calendars(): List<ServerCalendar> = get<CalendarsResponse>("/api/calendars").calendars
+
+    /** События календаря, изменённые после ревизии [since], включая удалённые. */
+    suspend fun calendarChanges(calendarId: String, since: Int): CalendarChanges =
+        get("/api/calendars/$calendarId/events?since=$since")
+
+    suspend fun pushCalendarChanges(calendarId: String, changes: List<ServerEvent>): CalendarPushResult =
+        post("/api/calendars/$calendarId/changes", json.encodeToString(CalendarPushRequest(changes)))
+
     private suspend inline fun <reified T> get(path: String): T =
         execute(request(path, auth = true).get().build())
 

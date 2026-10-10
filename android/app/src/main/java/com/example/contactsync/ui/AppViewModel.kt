@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.contactsync.App
+import com.example.contactsync.calendar.CalendarAccount
 import com.example.contactsync.data.AuthResponse
 import com.example.contactsync.data.UnauthorizedException
 import com.example.contactsync.sync.SyncReport
@@ -53,6 +54,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         app.engine.clearLocalState()
         app.vault.clearLocal()
         session.signIn(response.token, response.user)
+        // Календари sync появятся в календаре Android под аккаунтом с email пользователя.
+        CalendarAccount.ensure(app, response.user.email)
+        CalendarAccount.requestSync(app)
         null
     }
 

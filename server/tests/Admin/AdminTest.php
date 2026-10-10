@@ -2,6 +2,8 @@
 
 namespace App\Tests\Admin;
 
+use App\Entity\Calendar;
+use App\Entity\CalendarEvent;
 use App\Entity\Contact;
 use App\Entity\Device;
 use App\Entity\Family;
@@ -61,11 +63,16 @@ final class AdminTest extends DatabaseWebTestCase
         $app->update('Заметки', '2.1', 21, null, null, [['name' => 'base.apk', 'sha256' => str_repeat('a', 64), 'size' => 5242880]]);
         $this->em->persist($app);
         $this->em->persist(new Vault($anna, Vault::KDF_PBKDF2_SHA256, 600000, 'c2FsdA==', 'a2V5'));
+        $calendar = new Calendar($anna, 'Дом');
+        $this->em->persist($calendar);
+        $event = (new CalendarEvent($calendar, '0192f0c1-4444-7000-8000-000000000001'))->setTitle('Родительское собрание');
+        $event->touch($anna);
+        $this->em->persist($event);
         $this->em->flush();
 
         $this->client->loginUser($this->createUser('admin@example.com', admin: true));
 
-        foreach (['/admin', '/admin/user', '/admin/family', '/admin/device', '/admin/google-account', '/admin/installed-app', '/admin/vault'] as $url) {
+        foreach (['/admin', '/admin/user', '/admin/family', '/admin/device', '/admin/google-account', '/admin/installed-app', '/admin/vault', '/admin/calendar', '/admin/calendar-event'] as $url) {
             $this->client->request('GET', $url);
             self::assertResponseIsSuccessful($url);
         }
@@ -77,6 +84,10 @@ final class AdminTest extends DatabaseWebTestCase
 
         $this->client->request('GET', '/admin/vault');
         self::assertSelectorTextContains('table', 'anna@example.com');
+
+        $this->client->request('GET', '/admin/calendar-event');
+        self::assertSelectorTextContains('table', 'Родительское собрание');
+        self::assertSelectorTextContains('table', 'Дом');
 
         $this->client->request('GET', '/admin/contact');
         self::assertSelectorTextContains('table', 'Борис');

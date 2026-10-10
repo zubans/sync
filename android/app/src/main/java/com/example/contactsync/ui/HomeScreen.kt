@@ -29,18 +29,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.contactsync.calendar.CalendarAccount
 
-/** READ/WRITE — работа с книгой; GET_ACCOUNTS — список Google-аккаунтов на старых Android. */
+/**
+ * READ/WRITE — работа с книгой; GET_ACCOUNTS — список Google-аккаунтов на старых Android;
+ * календарь — события sync в календаре Android.
+ */
 private val PERMISSIONS = arrayOf(
     Manifest.permission.READ_CONTACTS,
     Manifest.permission.WRITE_CONTACTS,
     Manifest.permission.GET_ACCOUNTS,
+    Manifest.permission.READ_CALENDAR,
+    Manifest.permission.WRITE_CALENDAR,
 )
 
 @Composable
 fun HomeScreen(state: UiState, vm: AppViewModel) {
     val context = LocalContext.current
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        if (result[Manifest.permission.WRITE_CALENDAR] == true) CalendarAccount.requestSync(context)
         val contactsGranted = result[Manifest.permission.READ_CONTACTS] == true &&
             result[Manifest.permission.WRITE_CONTACTS] == true
         if (contactsGranted) vm.syncNow() else vm.onPermissionsDenied()
