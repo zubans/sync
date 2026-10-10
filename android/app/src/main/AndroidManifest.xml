@@ -34,6 +34,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Автозапуск при загрузке: скрипт владельца /data/local/boot.sh от root. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".App"
@@ -151,6 +153,14 @@
                 android:name="android.autofill"
                 android:resource="@xml/autofill_service" />
         </service>
+
+        <receiver
+            android:name=".launcher.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <receiver
             android:name=".apps.InstallResultReceiver"

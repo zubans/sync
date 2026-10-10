@@ -22,4 +22,13 @@ class LauncherWidgetsTest {
         assertEquals(VpnState.DOWN, VpnLamp.state(VpnProbe(true, null, kbReachable = false)))
         assertEquals(VpnState.DOWN, VpnLamp.state(VpnProbe(false, null, kbReachable = false)))
     }
+
+    @Test
+    fun `boot command skips missing script and logs output`() {
+        val command = BootScript.command("/data/local/boot.sh", "/data/local/boot.log")
+        assertEquals(
+            "[ -f /data/local/boot.sh ] || exit 0; echo \"== \$(date) boot\" >> /data/local/boot.log; sh /data/local/boot.sh >> /data/local/boot.log 2>&1",
+            command,
+        )
+    }
 }

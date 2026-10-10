@@ -15,6 +15,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.provider.CalendarContract.Calendars
 import android.provider.CalendarContract.Events
+import android.util.Log
 import com.example.contactsync.App
 import com.example.contactsync.data.Api
 import com.example.contactsync.data.ServerCalendar
@@ -241,6 +242,8 @@ class CalendarSync(
     }
 }
 
+private const val TAG = "CalendarSync"
+
 /** SyncAdapter календаря: его запускает система по расписанию и после правок в «Календаре». */
 class CalendarSyncService : Service() {
     private lateinit var adapter: Adapter
@@ -258,13 +261,17 @@ class CalendarSyncService : Service() {
             try {
                 runBlocking { CalendarSync(app.api, provider, account).run() }
             } catch (e: UnauthorizedException) {
+                Log.w(TAG, "Синхронизация календаря: нужен вход", e)
                 result.stats.numAuthExceptions++
             } catch (e: IOException) {
+                Log.w(TAG, "Синхронизация календаря: ошибка сети или сервера", e)
                 result.stats.numIoExceptions++
             } catch (e: SerializationException) {
+                Log.w(TAG, "Синхронизация календаря: неожиданный ответ сервера", e)
                 // Сервер ответил не тем (например, старая версия без календаря) — не роняем поток синхронизации.
                 result.stats.numParseExceptions++
             } catch (e: SecurityException) {
+                Log.w(TAG, "Синхронизация календаря: нет разрешения на календарь", e)
                 // Нет разрешения на календарь — синхронизировать нечего, пока его не дадут.
                 result.stats.numAuthExceptions++
             }

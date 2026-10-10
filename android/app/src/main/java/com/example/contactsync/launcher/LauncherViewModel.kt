@@ -146,8 +146,10 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     fun isInDock(app: LauncherApp) = app.component.packageName in settings.dock
 
     private suspend fun refreshAgenda() {
-        val allowed = ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.READ_CALENDAR) ==
-            PackageManager.PERMISSION_GRANTED
+        // Запись нужна календарю sync (SyncAdapter пишет события), поэтому просим оба разрешения.
+        val allowed = listOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR).all {
+            ContextCompat.checkSelfPermission(getApplication(), it) == PackageManager.PERMISSION_GRANTED
+        }
         val rows = if (allowed) {
             withContext(Dispatchers.IO) { Agenda.rows(calendar.upcoming(), Instant.now(), ZoneId.systemDefault()) }
         } else {
