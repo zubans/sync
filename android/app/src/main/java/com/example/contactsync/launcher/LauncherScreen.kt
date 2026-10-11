@@ -676,11 +676,16 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
                         Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable { context.openUrl(item.link) }
+                            // Сводку открываем целиком на весь экран: ссылок у неё много — по одной на сюжет.
+                            .clickable { if (item.digest != null) onExpand() else context.openUrl(item.link) }
                             .padding(horizontal = 4.dp, vertical = 8.dp),
                     ) {
                         Text(item.title, color = TextMain, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(NewsFeed.caption(item, state.newsSources, now, zone), color = TextMuted, fontSize = 13.sp)
+                        Text(
+                            item.digest?.let { NewsFeed.period(it, zone) } ?: NewsFeed.caption(item, state.newsSources, now, zone),
+                            color = TextMuted,
+                            fontSize = 13.sp,
+                        )
                     }
                 }
             }
@@ -695,7 +700,7 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
 internal fun NewsTabs(state: LauncherState, vm: LauncherViewModel, arrangement: Arrangement.Horizontal) {
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = arrangement) {
         NewsChip("Все", state.newsSource == null, failed = false) { vm.selectNewsSource(null) }
-        state.newsSources.forEach { source ->
+        NewsFeed.tabs(state.newsSources).forEach { source ->
             NewsChip(source.title, state.newsSource == source.code, failed = source.stale) { vm.selectNewsSource(source.code) }
         }
     }

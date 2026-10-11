@@ -53,6 +53,7 @@ final class NewsSourceCrudController extends AbstractCrudController
         yield ChoiceField::new('format', 'Формат')->setChoices([
             'RSS' => NewsSource::FORMAT_RSS,
             'CNN Lite' => NewsSource::FORMAT_CNN_LITE,
+            'Сводка (пишет модель)' => NewsSource::FORMAT_DIGEST,
         ]);
         yield BooleanField::new('enabled', 'Собирать')->renderAsSwitch(false);
         yield DateTimeField::new('lastSuccessAt', 'Последний сбор (UTC)')->hideOnForm();

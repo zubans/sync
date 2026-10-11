@@ -110,9 +110,10 @@ final class NewsCollectorTest extends DatabaseWebTestCase
         self::assertNotNull($broken->getLastAttemptAt());
     }
 
-    public function testDisabledSourceIsNotCollected(): void
+    public function testDisabledSourceAndDigestAreNotCollected(): void
     {
         $this->source()->setEnabled(false);
+        $this->em->persist(new NewsSource('digest', 'Сводка', '', NewsSource::FORMAT_DIGEST));
         $this->em->flush();
 
         self::assertSame([], $this->collector([])->collectAll());

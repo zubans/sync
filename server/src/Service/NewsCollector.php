@@ -33,7 +33,7 @@ final class NewsCollector
     public function collectAll(): array
     {
         $report = [];
-        foreach ($this->sources->findEnabled() as $source) {
+        foreach ($this->sources->findCollectable() as $source) {
             $report[$source->getCode()] = $this->collect($source);
         }
 

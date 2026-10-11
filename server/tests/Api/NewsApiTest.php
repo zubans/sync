@@ -2,6 +2,7 @@
 
 namespace App\Tests\Api;
 
+use App\Entity\NewsDigest;
 use App\Entity\NewsItem;
 use App\Entity\NewsSource;
 use App\Tests\DatabaseWebTestCase;
@@ -53,6 +54,39 @@ final class NewsApiTest extends DatabaseWebTestCase
         $rbcOnly = $this->api('GET', '/api/news?source=rbc', token: $token);
         self::assertSame(['Новость d', 'Новость c', 'Новость a'], array_column($rbcOnly['items'], 'title'));
         self::assertNull($rbcOnly['nextCursor']);
+    }
+
+    public function testDigestHasStoriesWithSourceLinksAndStaysOutOfAll(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $rbc = new NewsSource('rbc', 'РБК', 'https://rbc.example/feed');
+        $digestSource = new NewsSource('digest', 'Сводка', '', NewsSource::FORMAT_DIGEST);
+        $digestSource->markFailure(new \DateTimeImmutable('-1 minute', new \DateTimeZone('UTC')), 'agy: квота');
+        $this->em->persist($rbc);
+        $this->em->persist($digestSource);
+        $news = $this->item($rbc, 'a', '2026-10-11 13:20:00');
+        $digestItem = $this->item($digestSource, 'hour:2026-10-11T14:00Z', '2026-10-11 14:00:00');
+        $this->em->flush();
+        $digest = new NewsDigest($digestItem, NewsDigest::PERIOD_HOUR,
+            new \DateTimeImmutable('2026-10-11 13:00:00'), new \DateTimeImmutable('2026-10-11 14:00:00'));
+        $digest->update([['title' => 'Сюжет', 'text' => 'Суть.', 'items' => [(int) $news->getId()]]], 1, null);
+        $this->em->persist($digest);
+        $this->em->flush();
+
+        $all = $this->api('GET', '/api/news', token: $token);
+        self::assertSame(['Новость a'], array_column($all['items'], 'title'));
+        self::assertArrayNotHasKey('digest', $all['items'][0]);
+
+        $digests = $this->api('GET', '/api/news?source=digest', token: $token)['items'];
+        self::assertSame('hour', $digests[0]['digest']['period']);
+        self::assertSame('2026-10-11T13:00:00+00:00', $digests[0]['digest']['start']);
+        self::assertSame(
+            [['source' => 'rbc', 'title' => 'Новость a', 'link' => 'https://example.com/a']],
+            $digests[0]['digest']['stories'][0]['sources'],
+        );
+
+        $sources = $this->api('GET', '/api/news/sources', token: $token)['sources'];
+        self::assertSame([false, true], array_column($sources, 'stale'), 'сводка с ошибкой последней попытки помечена сразу');
     }
 
     public function testUnknownSourceAndBadCursorAreRejected(): void

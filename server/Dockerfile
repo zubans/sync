@@ -12,8 +12,14 @@ RUN install-php-extensions \
         pdo_sqlite \
         zip \
     && apt-get update \
-    && apt-get install -y --no-install-recommends unzip \
+    && apt-get install -y --no-install-recommends unzip curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Antigravity CLI (agy) для сводок новостей — как в KB: ставится в /opt/agy целиком (рядом с бинарником
+# могут быть его файлы), вход и настройки — в var/agy (том agy_data, make agy-login).
+RUN mkdir -p /opt/agy && HOME=/opt/agy bash -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash' \
+    && chmod -R a+rX /opt/agy \
+    && ln -s "$(readlink -f /opt/agy/.local/bin/agy)" /usr/local/bin/agy
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 COPY docker/php.ini $PHP_INI_DIR/conf.d/zz-app.ini

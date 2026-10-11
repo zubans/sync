@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -446,6 +447,10 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
         )
         NewsTabs(state, vm, Arrangement.spacedBy(10.dp))
         Spacer(Modifier.height(16.dp))
+        if (state.newsSource == NewsFeed.DIGEST) {
+            DigestList(state, vm)
+            return@Column
+        }
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = 420.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -468,6 +473,61 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
                     Text(item.title, color = TextMain, fontSize = 19.sp, fontWeight = FontWeight.Medium, maxLines = 4, overflow = TextOverflow.Ellipsis)
                     if (item.summary.isNotEmpty()) {
                         Text(item.summary, color = TextMuted, fontSize = 15.sp, maxLines = 6, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Сводки: каждая — период и сюжеты, под сюжетом — издания, нажатие открывает исходную статью. */
+@Composable
+private fun DigestList(state: LauncherState, vm: LauncherViewModel) {
+    val context = LocalContext.current
+    val zone = ZoneId.systemDefault()
+    val items = state.news.items
+    if (items.isEmpty()) {
+        Text(
+            state.newsError ?: "Сводок пока нет: первая появится в начале следующего часа",
+            color = TextMuted,
+            fontSize = 17.sp,
+        )
+        return
+    }
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxHeight()) {
+        itemsIndexed(items, key = { _, item -> item.id }) { index, item ->
+            if (index == items.lastIndex) LaunchedEffect(item.id) { vm.loadMoreNews() }
+            val digest = item.digest ?: return@itemsIndexed
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(CardColor).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text("${NewsFeed.period(digest, zone)} · новостей ${digest.newsCount}", color = Accent, fontSize = 14.sp)
+                Text(item.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                digest.stories.forEach { story ->
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(story.title, color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                        if (story.text.isNotEmpty()) Text(story.text, color = TextMuted, fontSize = 15.sp)
+                        if (story.sources.isNotEmpty()) {
+                            Row(
+                                Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                story.sources.forEach { source ->
+                                    val title = state.newsSources.firstOrNull { it.code == source.source }?.title ?: source.source
+                                    Text(
+                                        title,
+                                        color = Accent,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(CardRaised)
+                                            .clickable { context.openUrl(source.link) }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

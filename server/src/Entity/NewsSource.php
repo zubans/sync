@@ -20,7 +20,10 @@ class NewsSource
     /** Текстовая версия CNN (lite.cnn.com): RSS CNN не обновляется с 2023 года. */
     public const FORMAT_CNN_LITE = 'cnn_lite';
 
-    public const FORMATS = [self::FORMAT_RSS, self::FORMAT_CNN_LITE];
+    /** Сводка: не скачивается, а пишется моделью по новостям остальных изданий (`app:news:digest`). */
+    public const FORMAT_DIGEST = 'digest';
+
+    public const FORMATS = [self::FORMAT_RSS, self::FORMAT_CNN_LITE, self::FORMAT_DIGEST];
 
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -131,6 +134,11 @@ class NewsSource
         $this->lastModified = null;
 
         return $this;
+    }
+
+    public function isDigest(): bool
+    {
+        return $this->format === self::FORMAT_DIGEST;
     }
 
     public function getFormat(): string

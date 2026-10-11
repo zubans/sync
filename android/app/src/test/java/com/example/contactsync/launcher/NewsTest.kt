@@ -1,7 +1,10 @@
 package com.example.contactsync.launcher
 
+import com.example.contactsync.data.NewsDigestDto
 import com.example.contactsync.data.NewsItemDto
 import com.example.contactsync.data.NewsSourceDto
+import com.example.contactsync.data.NewsStoryDto
+import com.example.contactsync.data.NewsStorySourceDto
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.time.Instant
@@ -28,6 +31,34 @@ class NewsTest {
         assertEquals("РБК · 23:08", NewsFeed.caption(NewsFeed.item(dto(1, "rbc", "2026-10-11T20:08:52+00:00")), sources, now, zone))
         assertEquals("NYT · 9 окт., 21:00", NewsFeed.caption(NewsFeed.item(dto(2, "nyt", "2026-10-09T18:00:00+00:00")), sources, now, zone))
         assertEquals("cnn · 22:00", NewsFeed.caption(NewsFeed.item(dto(3, "cnn", "2026-10-11T19:00:00+00:00")), sources, now, zone))
+    }
+
+    @Test
+    fun `digest keeps period and stories with source links`() {
+        val dto = dto(9, "digest", "2026-10-11T14:00:00+00:00").copy(
+            digest = NewsDigestDto(
+                period = "hour",
+                start = "2026-10-11T13:00:00+00:00",
+                end = "2026-10-11T14:00:00+00:00",
+                newsCount = 48,
+                stories = listOf(NewsStoryDto("Сюжет", "Суть.", listOf(NewsStorySourceDto("rbc", "Новость", "https://rbc/1")))),
+            ),
+        )
+
+        val digest = NewsFeed.item(dto).digest!!
+
+        assertEquals("За час · 16:00–17:00", NewsFeed.period(digest, zone))
+        assertEquals("https://rbc/1", digest.stories.single().sources.single().link)
+        assertEquals(
+            "За сутки · 11 окт., 07:00 – 12 окт., 07:00",
+            NewsFeed.period(digest.copy(daily = true, start = Instant.parse("2026-10-11T04:00:00Z"), end = Instant.parse("2026-10-12T04:00:00Z")), zone),
+        )
+    }
+
+    @Test
+    fun `digest tab goes first`() {
+        val tabs = NewsFeed.tabs(sources + NewsSource("digest", "Сводка"))
+        assertEquals(listOf("digest", "rbc", "nyt"), tabs.map { it.code })
     }
 
     @Test

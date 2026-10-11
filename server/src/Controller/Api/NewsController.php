@@ -2,11 +2,13 @@
 
 namespace App\Controller\Api;
 
+use App\Entity\NewsDigest;
 use App\Entity\NewsItem;
 use App\Entity\NewsSource;
 use App\Repository\NewsItemRepository;
 use App\Repository\NewsSourceRepository;
 use App\Service\EventTime;
+use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
@@ -28,6 +30,7 @@ final class NewsController extends AbstractController
     public function __construct(
         private readonly NewsItemRepository $items,
         private readonly NewsSourceRepository $sources,
+        private readonly EntityManagerInterface $em,
     ) {
     }
 
@@ -56,9 +59,10 @@ final class NewsController extends AbstractController
 
         $items = $this->items->findFeed($selected, $limit, $beforeAt, $beforeId);
         $last = end($items) ?: null;
+        $digests = $this->digestViews($items);
 
         return $this->json([
-            'items' => array_map(self::itemView(...), $items),
+            'items' => array_map(static fn (NewsItem $i) => self::itemView($i) + (isset($digests[$i->getId()]) ? ['digest' => $digests[$i->getId()]] : []), $items),
             'nextCursor' => \count($items) === $limit && $last !== null
                 ? EventTime::fromDb($last->getSortAt())->getTimestamp().'.'.$last->getId()
                 : null,
@@ -77,10 +81,56 @@ final class NewsController extends AbstractController
                 'lastSuccessAt' => self::time($s->getLastSuccessAt()),
                 'lastError' => $s->getLastError(),
                 // Ещё ни разу не собирали — не помечаем: сервер мог только что запуститься.
-                'stale' => $s->getLastAttemptAt() !== null
-                    && ($s->getLastSuccessAt() === null || EventTime::fromDb($s->getLastSuccessAt()) < $staleBefore),
+                // Сводка пишется раз в час, поэтому у неё признак — неудачная последняя попытка.
+                'stale' => $s->getLastAttemptAt() !== null && ($s->isDigest()
+                    ? $s->getLastError() !== null
+                    : $s->getLastSuccessAt() === null || EventTime::fromDb($s->getLastSuccessAt()) < $staleBefore),
             ], $this->sources->findEnabled()),
         ]);
+    }
+
+    /**
+     * Сюжеты сводок со ссылками на исходные новости — одним запросом на страницу ленты.
+     *
+     * @param list<NewsItem> $items
+     *
+     * @return array<int, array<string, mixed>> по id новости-сводки
+     */
+    private function digestViews(array $items): array
+    {
+        $digestItems = array_filter($items, static fn (NewsItem $i) => $i->getSource()->isDigest());
+        if ($digestItems === []) {
+            return [];
+        }
+        /** @var list<NewsDigest> $digests */
+        $digests = $this->em->getRepository(NewsDigest::class)->findBy(['item' => array_values($digestItems)]);
+        $ids = [];
+        foreach ($digests as $digest) {
+            foreach ($digest->getStories() as $story) {
+                array_push($ids, ...$story['items']);
+            }
+        }
+        $sources = [];
+        foreach ($ids === [] ? [] : $this->items->findBy(['id' => array_values(array_unique($ids))]) as $news) {
+            $sources[$news->getId()] = ['source' => $news->getSource()->getCode(), 'title' => $news->getTitle(), 'link' => $news->getLink()];
+        }
+
+        $views = [];
+        foreach ($digests as $digest) {
+            $views[$digest->getItem()->getId()] = [
+                'period' => $digest->getPeriod(),
+                'start' => self::time($digest->getPeriodStart()),
+                'end' => self::time($digest->getPeriodEnd()),
+                'newsCount' => $digest->getNewsCount(),
+                'stories' => array_map(static fn (array $story) => [
+                    'title' => $story['title'],
+                    'text' => $story['text'],
+                    'sources' => array_values(array_filter(array_map(static fn (int $id) => $sources[$id] ?? null, $story['items']))),
+                ], $digest->getStories()),
+            ];
+        }
+
+        return $views;
     }
 
     /** @return array<string, mixed> */

@@ -43,10 +43,33 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
+     * Новости изданий (без сводок), которые сервер впервые увидел за период, — материал для сводки.
+     * Время первого появления, а не публикации: так в сводку попадает и CNN, и новость,
+     * опубликованная задним числом.
+     *
+     * @return list<NewsItem>
+     */
+    public function findSeenBetween(\DateTimeImmutable $start, \DateTimeImmutable $end, int $limit): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->addSelect('s')
+            ->where('n.firstSeenAt >= :start AND n.firstSeenAt < :end AND s.format <> :digest')
+            ->setParameter('start', $start)
+            ->setParameter('end', $end)
+            ->setParameter('digest', NewsSource::FORMAT_DIGEST)
+            ->orderBy('n.sortAt', 'ASC')
+            ->addOrderBy('n.id', 'ASC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Лента: свежие сверху. Курсор — время и id последней показанной новости: время у новостей
      * совпадает, поэтому одного времени мало, чтобы не потерять и не повторить новость на стыке страниц.
      *
-     * @param list<NewsSource> $sources пусто — все издания
+     * @param list<NewsSource> $sources пусто — все издания, кроме сводки
      *
      * @return list<NewsItem>
      */
@@ -60,6 +83,9 @@ class NewsItemRepository extends ServiceEntityRepository
             ->setMaxResults($limit);
         if ($sources !== []) {
             $qb->andWhere('n.source IN (:sources)')->setParameter('sources', $sources);
+        } else {
+            // «Все» — новости изданий; сводки пересказывают их же и живут на своей вкладке.
+            $qb->andWhere('s.format <> :digest')->setParameter('digest', NewsSource::FORMAT_DIGEST);
         }
         if ($beforeAt !== null && $beforeId !== null) {
             $qb->andWhere('n.sortAt < :at OR (n.sortAt = :at AND n.id < :id)')

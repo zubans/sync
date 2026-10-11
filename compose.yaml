@@ -38,8 +38,9 @@ services:
       - caddy_config:/config
     restart: unless-stopped
 
-  # Сбор новостей раз в 5 минут (app:news:collect). Тот же образ, что у сервера; миграции
-  # применяет контейнер app — до них сбор просто не удаётся и повторяется в следующий раз.
+  # Сбор новостей раз в 5 минут (app:news:collect) и сводки за час и за сутки (app:news:digest,
+  # Antigravity CLI — вход один раз: make agy-login). Тот же образ, что у сервера; миграции
+  # применяет контейнер app — пока они не применены, проход пропускается без ошибок в журнале.
   news:
     build:
       context: ./server
@@ -51,10 +52,28 @@ services:
       APP_ENV: prod
       APP_SECRET: ${APP_SECRET:?Запустите make init}
       DATABASE_URL: postgresql://app:${POSTGRES_PASSWORD}@database:5432/app?serverVersion=16&charset=utf8
-    command: ["sh", "-c", "while :; do php bin/console app:news:collect --no-interaction; sleep 300; done"]
+      # Модели agy для сводок — названия из `agy models`; пусто — модель по умолчанию.
+      NEWS_DIGEST_MODEL_HOUR: ${NEWS_DIGEST_MODEL_HOUR:-}
+      NEWS_DIGEST_MODEL_DAY: ${NEWS_DIGEST_MODEL_DAY:-}
+    volumes:
+      - agy_data:/app/var/agy
+    command:
+      - sh
+      - -c
+      - |
+        while :; do
+          if php bin/console doctrine:migrations:up-to-date -q; then
+            php bin/console app:news:collect --no-interaction
+            php bin/console app:news:digest --no-interaction
+          else
+            echo "Миграции ещё не применены — сбор пропущен"
+          fi
+          sleep 300
+        done
     restart: unless-stopped
 
 volumes:
+  agy_data:
   database_data:
   apk_storage:
   caddy_data:
