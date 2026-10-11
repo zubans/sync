@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Открытые API без ключей: MOEX ISS (котировки с задержкой 15 минут), MET Norway (прогноз),
- * геокодер Open-Meteo (поиск города), ленты новостей.
+ * геокодер Open-Meteo (поиск города).
  * Сервер sync в этих запросах не участвует.
  */
 class LauncherApi(
@@ -92,10 +92,6 @@ class LauncherApi(
                     .build(),
             ),
         )
-
-    /** Свежие заголовки одного издания. */
-    suspend fun news(source: NewsSource): List<NewsItem> =
-        NewsParser.parse(source, getText(source.url.toHttpUrl()))
 
     private fun iss(path: String): HttpUrl.Builder =
         "https://iss.moex.com/iss/$path".toHttpUrl().newBuilder().addQueryParameter("iss.meta", "off")
@@ -175,10 +171,13 @@ class LauncherSettings(context: Context) {
         get() = prefs.getString(KEY_DOCK, null)?.split(";")?.filter { it.isNotBlank() } ?: DEFAULT_DOCK
         set(value) = prefs.edit().putString(KEY_DOCK, value.joinToString(";")).apply()
 
-    /** Выбранное в виджете новостей издание; null — все вместе. */
-    var newsSource: NewsSource?
-        get() = prefs.getString(KEY_NEWS, null)?.let { name -> NewsSource.entries.firstOrNull { it.name == name } }
-        set(value) = prefs.edit().putString(KEY_NEWS, value?.name).apply()
+    /**
+     * Код выбранного в виджете издания; null — все вместе. Раньше здесь хранилось имя элемента
+     * перечисления (RBC, NYPOST) — в нижнем регистре оно совпадает с кодом издания на сервере.
+     */
+    var newsSource: String?
+        get() = prefs.getString(KEY_NEWS, null)?.lowercase()
+        set(value) = prefs.edit().putString(KEY_NEWS, value).apply()
 
     private companion object {
         const val KEY_NEWS = "news_source"

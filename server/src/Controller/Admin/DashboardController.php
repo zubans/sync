@@ -65,6 +65,10 @@ final class DashboardController extends AbstractDashboardController
         yield MenuItem::linkTo(CalendarEventCrudController::class, 'События', 'fa fa-calendar-day');
         yield MenuItem::linkTo(CalendarCrudController::class, 'Календари', 'fa fa-calendar');
 
+        yield MenuItem::section('Новости');
+        yield MenuItem::linkTo(NewsItemCrudController::class, 'Лента', 'fa fa-newspaper');
+        yield MenuItem::linkTo(NewsSourceCrudController::class, 'Издания', 'fa fa-rss');
+
         yield MenuItem::section('Аккаунты');
         yield MenuItem::linkTo(UserCrudController::class, 'Пользователи', 'fa fa-user');
         yield MenuItem::linkTo(FamilyCrudController::class, 'Семьи', 'fa fa-people-group');

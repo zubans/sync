@@ -30,7 +30,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -437,21 +437,14 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
     val context = LocalContext.current
     val zone = ZoneId.systemDefault()
     val now = Instant.now()
-    val selected = state.newsSource
-    val items = remember(state.news, selected) {
-        if (selected != null) state.news[selected].orEmpty() else NewsFeed.merge(state.news.values.flatten(), now, zone)
-    }
+    val items = state.news.items
     Column(Modifier.fillMaxSize()) {
-        DetailHeader(title = "Новости", subtitle = "РГ, РБК, CNN, New York Post, New York Times", onClose = onClose)
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            NewsChip("Все", selected == null, failed = false) { vm.selectNewsSource(null) }
-            NewsSource.entries.forEach { source ->
-                NewsChip(source.title, selected == source, failed = source in state.newsFailed) { vm.selectNewsSource(source) }
-            }
-        }
+        DetailHeader(
+            title = "Новости",
+            subtitle = state.newsError ?: state.newsSources.joinToString(", ") { it.title },
+            onClose = onClose,
+        )
+        NewsTabs(state, vm, Arrangement.spacedBy(10.dp))
         Spacer(Modifier.height(16.dp))
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = 420.dp),
@@ -459,7 +452,9 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
             verticalArrangement = Arrangement.spacedBy(14.dp),
             modifier = Modifier.fillMaxHeight(),
         ) {
-            items(items, key = { it.source.name + it.link }) { item ->
+            itemsIndexed(items, key = { _, item -> item.id }) { index, item ->
+                // Долистали до конца — догружаем следующую страницу из базы сервера.
+                if (index == items.lastIndex) LaunchedEffect(item.id) { vm.loadMoreNews() }
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -469,7 +464,7 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
                         .padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(NewsFeed.caption(item, now, zone), color = Accent, fontSize = 14.sp)
+                    Text(NewsFeed.caption(item, state.newsSources, now, zone), color = Accent, fontSize = 14.sp)
                     Text(item.title, color = TextMain, fontSize = 19.sp, fontWeight = FontWeight.Medium, maxLines = 4, overflow = TextOverflow.Ellipsis)
                     if (item.summary.isNotEmpty()) {
                         Text(item.summary, color = TextMuted, fontSize = 15.sp, maxLines = 6, overflow = TextOverflow.Ellipsis)

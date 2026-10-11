@@ -13,6 +13,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 @Serializable
@@ -340,6 +341,18 @@ class Api(
 
     suspend fun pushCalendarChanges(calendarId: String, changes: List<ServerEvent>): CalendarPushResult =
         post("/api/calendars/$calendarId/changes", json.encodeToString(CalendarPushRequest(changes)))
+
+    /** Новости, собранные сервером: одно издание или все ([source] = null), свежие сверху. */
+    suspend fun news(source: String?, limit: Int, before: String? = null): NewsFeedResponse {
+        val query = listOfNotNull(
+            source?.let { "source=" + URLEncoder.encode(it, "UTF-8") },
+            "limit=$limit",
+            before?.let { "before=" + URLEncoder.encode(it, "UTF-8") },
+        ).joinToString("&")
+        return get("/api/news?$query")
+    }
+
+    suspend fun newsSources(): List<NewsSourceDto> = get<NewsSourcesResponse>("/api/news/sources").sources
 
     private suspend inline fun <reified T> get(path: String): T =
         execute(request(path, auth = true).get().build())

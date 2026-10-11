@@ -665,24 +665,13 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
     val context = LocalContext.current
     val zone = ZoneId.systemDefault()
     val now = Instant.now()
-    val selected = state.newsSource
-    val items = remember(state.news, selected) {
-        if (selected != null) state.news[selected].orEmpty() else NewsFeed.merge(state.news.values.flatten(), now, zone)
-    }
+    val items = state.news.items
     DashboardCard(title = "Новости", action = null, onAction = {}, modifier = modifier, onClick = onExpand) {
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            NewsChip("Все", selected == null, failed = false) { vm.selectNewsSource(null) }
-            NewsSource.entries.forEach { source ->
-                NewsChip(source.title, selected == source, failed = source in state.newsFailed) { vm.selectNewsSource(source) }
-            }
-        }
+        NewsTabs(state, vm, Arrangement.spacedBy(8.dp))
         Spacer(Modifier.height(8.dp))
         when {
             items.isNotEmpty() -> LazyColumn {
-                items(items, key = { it.source.name + it.link }) { item ->
+                items(items, key = { it.id }) { item ->
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -691,18 +680,28 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
                             .padding(horizontal = 4.dp, vertical = 8.dp),
                     ) {
                         Text(item.title, color = TextMain, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(NewsFeed.caption(item, now, zone), color = TextMuted, fontSize = 13.sp)
+                        Text(NewsFeed.caption(item, state.newsSources, now, zone), color = TextMuted, fontSize = 13.sp)
                     }
                 }
             }
-            selected != null && selected in state.newsFailed ->
-                Text("${selected.title} сейчас не отвечает", color = Down, fontSize = 16.sp)
+            state.newsError != null -> Text(state.newsError, color = Down, fontSize = 16.sp)
             else -> Text("загрузка…", color = TextMuted, fontSize = 16.sp)
         }
     }
 }
 
-/** Вкладка издания; красная точка — издание не ответило, показаны прошлые заголовки. */
+/** Вкладки изданий — список с сервера; «Все» — все издания вместе. */
+@Composable
+internal fun NewsTabs(state: LauncherState, vm: LauncherViewModel, arrangement: Arrangement.Horizontal) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = arrangement) {
+        NewsChip("Все", state.newsSource == null, failed = false) { vm.selectNewsSource(null) }
+        state.newsSources.forEach { source ->
+            NewsChip(source.title, state.newsSource == source.code, failed = source.stale) { vm.selectNewsSource(source.code) }
+        }
+    }
+}
+
+/** Вкладка издания; красная точка — сервер давно не может собрать это издание. */
 @Composable
 internal fun NewsChip(label: String, selected: Boolean, failed: Boolean, onClick: () -> Unit) {
     Row(

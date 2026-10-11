@@ -14,12 +14,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.contactsync.App
 import com.example.contactsync.calendar.CalendarAccount
+import com.example.contactsync.data.UnauthorizedException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,12 +43,14 @@ data class LauncherState(
     val quotesAt: Long = 0,
     /** Все события на 14 дней: карточка показывает первые, подробный экран — все. */
     val agenda: List<AgendaRow> = emptyList(),
-    /** Заголовки по изданиям; издание, которое не ответило, сохраняет прошлые заголовки. */
-    val news: Map<NewsSource, List<NewsItem>> = emptyMap(),
-    /** Издания, которые при последнем обновлении не ответили. */
-    val newsFailed: Set<NewsSource> = emptySet(),
-    /** Выбранное издание; null — все вместе. */
-    val newsSource: NewsSource? = null,
+    /** Новости выбранной вкладки с сервера sync; если сервер не ответил, остаются прежние. */
+    val news: NewsPage = NewsPage(emptyList(), null),
+    /** Издания — вкладки виджета, список с сервера. */
+    val newsSources: List<NewsSource> = emptyList(),
+    /** Код выбранного издания; null — все вместе. */
+    val newsSource: String? = null,
+    /** Почему новостей нет: не вошли в sync или сервер не ответил; null — всё в порядке. */
+    val newsError: String? = null,
     val calendarAllowed: Boolean = false,
     val apps: List<LauncherApp> = emptyList(),
     val dock: List<LauncherApp> = emptyList(),
@@ -69,12 +69,14 @@ data class LauncherState(
 
 /**
  * Главный экран обновляет данные, только пока он на экране: котировки раз в минуту,
- * погоду раз в полчаса, новости раз в 10 минут, ленту событий раз в минуту
- * (подписи «через N мин» меняются со временем).
+ * погоду раз в полчаса, новости раз в 5 минут (сервер собирает их с той же частотой),
+ * ленту событий раз в минуту (подписи «через N мин» меняются со временем).
  */
 class LauncherViewModel(application: Application) : AndroidViewModel(application) {
 
     private val api = LauncherApi()
+    /** API сервера sync — с него приходят новости. */
+    private val syncApi = (application as App).api
     private val settings = LauncherSettings(application)
     private val calendar = CalendarSource(application)
     private val vpnControl = VpnControl(application.filesDir)
@@ -87,6 +89,9 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private var weatherAt = 0L
     private var newsAt = 0L
     private var newsJob: Job? = null
+    private var moreNewsJob: Job? = null
+    /** Последние загруженные новости каждой вкладки: при переключении показываются сразу, до ответа сервера. */
+    private val newsCache = HashMap<String?, NewsPage>()
     private var calendarSyncAt = 0L
 
     fun onResume() {
@@ -98,7 +103,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 refreshAgenda()
                 if (System.currentTimeMillis() - weatherAt > WEATHER_TTL_MS) refreshWeather()
                 refreshQuotes()
-                // Отдельной корутиной: медленное издание не должно задерживать котировки.
+                // Отдельной корутиной: медленный ответ сервера не должен задерживать котировки.
                 if (System.currentTimeMillis() - newsAt > NEWS_TTL_MS && newsJob?.isActive != true) {
                     newsJob = launch { refreshNews() }
                 }
@@ -186,9 +191,34 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         _state.update { s -> s.copy(quotes = s.quotes.filterNot { it.secid == secid }) }
     }
 
-    fun selectNewsSource(source: NewsSource?) {
-        settings.newsSource = source
-        _state.update { it.copy(newsSource = source) }
+    fun selectNewsSource(code: String?) {
+        settings.newsSource = code
+        _state.update { it.copy(newsSource = code, news = newsCache[code] ?: NewsPage(emptyList(), null)) }
+        moreNewsJob?.cancel()
+        newsJob?.cancel()
+        newsJob = viewModelScope.launch { refreshNews() }
+    }
+
+    /** Следующая страница вкладки — когда подробный экран долистали до конца. */
+    fun loadMoreNews() {
+        val code = _state.value.newsSource
+        val cursor = _state.value.news.nextCursor ?: return
+        if (moreNewsJob?.isActive == true) return
+        moreNewsJob = viewModelScope.launch {
+            try {
+                val next = newsPage(code, cursor)
+                _state.update { s ->
+                    if (s.newsSource != code) return@update s
+                    val page = NewsFeed.append(s.news, next)
+                    newsCache[code] = page
+                    s.copy(news = page)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Не догрузили — попробуем, когда снова долистают до конца.
+            }
+        }
     }
 
     fun toggleDock(app: LauncherApp) {
@@ -224,32 +254,33 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Издания опрашиваются параллельно и независимо: западные сайты из нашей сети бывают
-     * недоступны, и это не должно оставлять без новостей РГ и РБК. Пометку «нет связи» общий
-     * флаг не ставит — недоступные издания отмечаются в самом виджете.
+     * Новости собирает сервер sync, виджет берёт их оттуда: издания, их состояние и первую страницу
+     * выбранной вкладки. Пометку «нет связи» общий флаг не ставит — ошибка показывается в самом виджете,
+     * а прежние новости остаются.
      */
     private suspend fun refreshNews() {
-        val results = coroutineScope {
-            NewsSource.entries.map { source ->
-                async {
-                    source to try {
-                        api.news(source)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        null
-                    }
-                }
-            }.awaitAll()
+        val code = _state.value.newsSource
+        try {
+            val sources = syncApi.newsSources().map(NewsFeed::source)
+            val page = newsPage(code, before = null)
+            newsCache[code] = page
+            // Время — после ответа: прерванное уходом с экрана обновление повторится при возврате.
+            newsAt = System.currentTimeMillis()
+            _state.update { s ->
+                if (s.newsSource != code) s.copy(newsSources = sources) else s.copy(newsSources = sources, news = page, newsError = null)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UnauthorizedException) {
+            _state.update { it.copy(newsError = "Войдите в sync, чтобы видеть новости") }
+        } catch (e: Exception) {
+            _state.update { it.copy(newsError = "Сервер новостей не ответил") }
         }
-        // Время — после ответа: прерванное уходом с экрана обновление повторится при возврате.
-        newsAt = System.currentTimeMillis()
-        _state.update { s ->
-            s.copy(
-                news = s.news + results.mapNotNull { (source, items) -> items?.let { source to it } },
-                newsFailed = results.filter { it.second == null }.map { it.first }.toSet(),
-            )
-        }
+    }
+
+    private suspend fun newsPage(code: String?, before: String?): NewsPage {
+        val response = syncApi.news(code, NEWS_PAGE, before)
+        return NewsPage(response.items.map(NewsFeed::item), response.nextCursor)
     }
 
     private suspend fun network(block: suspend () -> Unit) {
@@ -306,7 +337,9 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private companion object {
         const val TICK_MS = 60_000L
         const val WEATHER_TTL_MS = 30 * 60_000L
-        const val NEWS_TTL_MS = 10 * 60_000L
+        const val NEWS_TTL_MS = 5 * 60_000L
+        /** Столько новостей приходит за раз; на подробном экране следующие догружаются при прокрутке. */
+        const val NEWS_PAGE = 50
         const val VPN_TICK_MS = 10_000L
         const val VPN_SWITCH_TICK_MS = 2_000L
         const val CALENDAR_SYNC_MS = 5 * 60_000L

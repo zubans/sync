@@ -8,7 +8,7 @@ HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup test clean apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news test clean apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -61,6 +61,9 @@ user: ## Создать пользователя или сменить ему п
 
 apk-cleanup: ## Удалить APK, которых нет ни на одном устройстве (запускается и после каждой сверки)
 	$(APP) php bin/console app:apk:cleanup
+
+news: ## Собрать новости сейчас, не дожидаясь контейнера news (он собирает раз в 5 минут)
+	$(APP) php bin/console app:news:collect
 
 test: ## Тесты сервера в контейнере
 	docker build --target dev -t contactsync-server-test ./server

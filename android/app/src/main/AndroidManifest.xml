@@ -59,6 +59,15 @@
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.ContactSync">
+        <!-- WebView (экраны KB и VS Code) не обращается к Google: без проверки адресов Safe Browsing
+             и без отправки статистики Chromium. Открываются только наши серверы. -->
+        <meta-data
+            android:name="android.webkit.WebView.EnableSafeBrowsing"
+            android:value="false" />
+        <meta-data
+            android:name="android.webkit.WebView.MetricsOptOut"
+            android:value="true" />
+
         <activity
             android:name=".ui.MainActivity"
             android:exported="true">
