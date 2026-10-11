@@ -189,15 +189,33 @@ final class NewsDigestTest extends DatabaseWebTestCase
         self::assertSame([1, 2], $parsed['stories'][0]['items']);
     }
 
-    public function testAgyResultIsTheLastResultEvent(): void
+    public function testAgyOutputGivesAnswerConversationAndTrace(): void
     {
-        $output = implode("\n", [
+        $ok = AgyNewsSummarizer::parse(implode("\n", [
+            '{"event":"init","conversation_id":"c1","init":{"model":"Gemini"}}',
             '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"{"}}',
             'не JSON',
-            '{"event":"result","result":{"status":"SUCCESS","response":"{\"stories\":[]}","conversation_id":"c1"}}',
-        ]);
+            '{"event":"result","result":{"status":"SUCCESS","response":"{\\"stories\\":[]}","conversation_id":"c1"}}',
+        ]));
+        self::assertSame('{"stories":[]}', $ok['answer']);
+        self::assertSame('c1', $ok['conversation']);
+        self::assertNull($ok['error']);
 
-        self::assertSame('SUCCESS', AgyNewsSummarizer::result($output)['status']);
-        self::assertNull(AgyNewsSummarizer::result('ошибка входа'));
+        // Ход ушёл на собственные инструменты агента, итогового события нет — ответа нет, но есть разговор для повтора.
+        $tools = AgyNewsSummarizer::parse(implode("\n", [
+            '{"event":"init","conversation_id":"c2","init":{}}',
+            '{"event":"step_update","step_update":{"step_type":"tool","tool_name":"ask_question"}}',
+        ]));
+        self::assertSame('', $tools['answer']);
+        self::assertSame('c2', $tools['conversation']);
+        self::assertSame(['ask_question'], $tools['tools']);
+        self::assertSame('события: init, step_update:tool; инструменты: ask_question; итогового события нет', $tools['trace']);
+
+        // Текст напечатан, итогового события нет — берём напечатанное.
+        $streamed = AgyNewsSummarizer::parse('{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"{\\"a\\":1}"}}');
+        self::assertSame('{"a":1}', $streamed['answer']);
+
+        $denied = AgyNewsSummarizer::parse('{"event":"result","result":{"status":"ERROR","error":"authentication failed or timed out"}}');
+        self::assertSame('authentication failed or timed out', $denied['error']);
     }
 }
