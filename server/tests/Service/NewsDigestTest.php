@@ -52,7 +52,7 @@ final class NewsDigestTest extends DatabaseWebTestCase
             {
             }
 
-            public function complete(string $prompt, ?string $model): string
+            public function complete(string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string
             {
                 $this->prompts[] = $prompt;
                 $answer = array_shift($this->answers) ?? throw new \LogicException('Лишний запрос к модели');
@@ -139,7 +139,7 @@ final class NewsDigestTest extends DatabaseWebTestCase
         $this->em->getRepository(NewsItem::class)->createQueryBuilder('n')->delete()->where('n.source = :d')->setParameter('d', $this->digest)->getQuery()->execute();
         $failed = $this->service(['нет', 'опять нет', new \RuntimeException('agy: квота исчерпана')])->run(new \DateTimeImmutable(self::NOW));
 
-        self::assertSame('ошибка: Ответ модели — не JSON', $failed['hour:2026-10-12T14:00Z']);
+        self::assertSame('ошибка: Ответ модели — не JSON: «опять нет»', $failed['hour:2026-10-12T14:00Z'], 'в ошибке — начало ответа');
         self::assertSame('ошибка: agy: квота исчерпана', $failed['day:2026-10-12T04:00Z']);
         self::assertSame('agy: квота исчерпана', $this->digest->getLastError());
     }
@@ -205,15 +205,23 @@ final class NewsDigestTest extends DatabaseWebTestCase
         $tools = AgyNewsSummarizer::parse(implode("\n", [
             '{"event":"init","conversation_id":"c2","init":{}}',
             '{"event":"step_update","step_update":{"step_type":"tool","tool_name":"ask_question"}}',
+            '{"event":"step_update","step_update":{"step_type":"tool","tool_name":"ask_question"}}',
         ]));
         self::assertSame('', $tools['answer']);
         self::assertSame('c2', $tools['conversation']);
         self::assertSame(['ask_question'], $tools['tools']);
-        self::assertSame('события: init, step_update:tool; инструменты: ask_question; итогового события нет', $tools['trace']);
+        self::assertSame('события: init, step_update:tool×2; инструменты: ask_question; итогового события нет', $tools['trace']);
 
         // Текст напечатан, итогового события нет — берём напечатанное.
         $streamed = AgyNewsSummarizer::parse('{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"{\\"a\\":1}"}}');
         self::assertSame('{"a":1}', $streamed['answer']);
+
+        $structured = AgyNewsSummarizer::parse('{"event":"result","result":{"status":"SUCCESS","response":"{\\"a\\":1}{\\"toolAction\\":\\"x\\"}","structured_output":{"headline":"Главное"}}}');
+        self::assertSame('{"headline":"Главное"}', $structured['answer'], 'с --json-schema ответ — structured_output');
+
+        // «х» в UTF-8 — D1 85: строка не должна рваться на байте 0x85.
+        $cyrillic = AgyNewsSummarizer::parse('{"event":"result","result":{"status":"SUCCESS","response":"{\\"headline\\":\\"хуситы\\"}"}}');
+        self::assertSame('{"headline":"хуситы"}', $cyrillic['answer']);
 
         $denied = AgyNewsSummarizer::parse('{"event":"result","result":{"status":"ERROR","error":"authentication failed or timed out"}}');
         self::assertSame('authentication failed or timed out', $denied['error']);

@@ -19,6 +19,34 @@ final class NewsDigestPrompt
     /** Анонсы режутся: за сутки новостей около тысячи, весь текст модели не нужен. */
     private const SUMMARY_CHARS = [NewsDigest::PERIOD_HOUR => 300, NewsDigest::PERIOD_DAY => 160];
 
+    /**
+     * Схема ответа для agy (`--json-schema`): заголовок сводки и сюжеты с id исходных новостей.
+     *
+     * @return array<string, mixed>
+     */
+    public static function schema(): array
+    {
+        return [
+            'type' => 'object',
+            'properties' => [
+                'headline' => ['type' => 'string'],
+                'stories' => [
+                    'type' => 'array',
+                    'items' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'title' => ['type' => 'string'],
+                            'text' => ['type' => 'string'],
+                            'items' => ['type' => 'array', 'items' => ['type' => 'integer']],
+                        ],
+                        'required' => ['title', 'text', 'items'],
+                    ],
+                ],
+            ],
+            'required' => ['headline', 'stories'],
+        ];
+    }
+
     /** @param list<NewsItem> $items */
     public static function build(NewsDigestPeriod $period, array $items): string
     {
@@ -52,6 +80,8 @@ final class NewsDigestPrompt
             - у сюжета перечисли id всех новостей, на которых он основан;
             - не добавляй фактов, которых нет в новостях.
 
+            Всё нужное — в этом сообщении: не ищи в интернете, не открывай ссылки и не вызывай инструменты, сразу дай ответ.
+
             Ответ — только JSON, без пояснений и без markdown:
             {"headline": "главное за период одной фразой", "stories": [{"title": "…", "text": "…", "items": [12, 15]}]}
 
@@ -73,7 +103,7 @@ final class NewsDigestPrompt
         $end = strrpos($answer, '}');
         $data = $start !== false && $end !== false ? json_decode(substr($answer, $start, $end - $start + 1), true) : null;
         if (!\is_array($data)) {
-            throw new \UnexpectedValueException('Ответ модели — не JSON');
+            throw new \UnexpectedValueException('Ответ модели — не JSON: «'.self::snippet($answer).'»');
         }
         $known = array_flip($knownIds);
         $stories = [];
@@ -90,9 +120,17 @@ final class NewsDigestPrompt
         }
         $headline = trim((string) ($data['headline'] ?? ''));
         if ($stories === []) {
-            throw new \UnexpectedValueException('В ответе модели нет сюжетов');
+            throw new \UnexpectedValueException('В ответе модели нет сюжетов: «'.self::snippet($answer).'»');
         }
 
         return ['headline' => $headline !== '' ? $headline : $stories[0]['title'], 'stories' => $stories];
+    }
+
+    /** Начало ответа для ошибки — по нему видно, что модель написала вместо JSON. */
+    private static function snippet(string $answer): string
+    {
+        $answer = trim((string) preg_replace('/\s+/u', ' ', $answer));
+
+        return $answer === '' ? 'пусто' : mb_substr($answer, 0, 300).(mb_strlen($answer) > 300 ? '…' : '');
     }
 }

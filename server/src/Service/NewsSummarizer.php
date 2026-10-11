@@ -9,9 +9,12 @@ namespace App\Service;
 interface NewsSummarizer
 {
     /**
+     * @param string|null               $effort глубина размышлений модели: low, medium, high
+     * @param array<string, mixed>|null $schema JSON-схема ответа, если модель умеет её соблюдать
+     *
      * @return string ответ модели как есть — разбирает его [NewsDigestPrompt::parse]
      *
      * @throws \RuntimeException модель не ответила
      */
-    public function complete(string $prompt, ?string $model): string;
+    public function complete(string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string;
 }

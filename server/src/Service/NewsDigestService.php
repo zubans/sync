@@ -117,11 +117,14 @@ final class NewsDigestService
     {
         $prompt = NewsDigestPrompt::build($period, $news);
         $ids = array_map(static fn (NewsItem $n) => (int) $n->getId(), $news);
+        // Часовая сводка — отбор и пересказ, долгие размышления ей не нужны; суточная сложнее.
+        $effort = $period->period === NewsDigest::PERIOD_HOUR ? 'low' : 'medium';
+        $schema = NewsDigestPrompt::schema();
         try {
-            return NewsDigestPrompt::parse($this->summarizer->complete($prompt, $model), $ids);
+            return NewsDigestPrompt::parse($this->summarizer->complete($prompt, $model, $effort, $schema), $ids);
         } catch (\UnexpectedValueException) {
             return NewsDigestPrompt::parse(
-                $this->summarizer->complete($prompt."\n\nВажно: ответ — строго один JSON-объект указанного вида, без текста вокруг.", $model),
+                $this->summarizer->complete($prompt."\n\nВажно: ответ — строго один JSON-объект указанного вида, без текста вокруг.", $model, $effort, $schema),
                 $ids,
             );
         }

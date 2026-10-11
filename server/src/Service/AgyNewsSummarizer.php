@@ -27,12 +27,19 @@ final class AgyNewsSummarizer implements NewsSummarizer
     ) {
     }
 
-    public function complete(string $prompt, ?string $model): string
+    public function complete(string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string
     {
         $this->prepareHome();
         $base = ['agy', '--input-format', 'stream-json', '--output-format', 'stream-json'];
         if ($model !== null && $model !== '') {
             array_push($base, '--model', $model);
+        }
+        if ($effort !== null) {
+            array_push($base, '--effort', $effort);
+        }
+        if ($schema !== null) {
+            // agy сам добивается от модели итогового ответа по схеме — без пояснений вокруг JSON.
+            array_push($base, '--json-schema', json_encode($schema, \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));
         }
 
         $run = $this->run($base, $prompt);
@@ -70,6 +77,8 @@ final class AgyNewsSummarizer implements NewsSummarizer
         if ($process->getExitCode() === 127) {
             throw new \RuntimeException('agy не установлен в контейнере — пересоберите образ');
         }
+        // Сырой вывод последнего запуска — для разбора сбоев: что именно прислал агент.
+        @file_put_contents($this->home.'/last-run.jsonl', $process->getOutput());
         $run = self::parse($process->getOutput());
         if ($run['answer'] === '' && $run['error'] === null) {
             $stderr = trim($process->getErrorOutput());
@@ -93,7 +102,9 @@ final class AgyNewsSummarizer implements NewsSummarizer
         $conversation = null;
         $tools = [];
         $events = [];
-        foreach (preg_split('/\R/', $output) ?: [] as $line) {
+        // Только по \n: без флага u выражение \R режет и по байту 0x85, а он есть в русских буквах UTF-8
+        // («х» — D1 85), и строки JSON рвались посреди текста.
+        foreach (explode("\n", $output) as $line) {
             $event = json_decode($line, true);
             if (!\is_array($event)) {
                 continue;
@@ -116,8 +127,12 @@ final class AgyNewsSummarizer implements NewsSummarizer
         if ($result !== null && ($result['status'] ?? '') !== 'SUCCESS') {
             $error = mb_substr((string) ($result['error'] ?? $result['status'] ?? 'ошибка'), 0, 500);
         }
-        $answer = trim((string) ($result['response'] ?? '')) ?: trim($streamed);
-        $trace = 'события: '.implode(', ', array_map(static fn (string $k, int $n) => $n > 1 ? "$k×$n" : $k, array_keys($events), $events))
+        // С --json-schema agy кладёт разобранный ответ в structured_output, а в response тогда идут
+        // два JSON подряд — ответ и служебный вызов завершения, — и разбирать его нельзя.
+        $answer = \is_array($result['structured_output'] ?? null)
+            ? json_encode($result['structured_output'], \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR)
+            : (trim((string) ($result['response'] ?? '')) ?: trim($streamed));
+        $trace = 'события: '.implode(', ', array_map(static fn (string $k, int $n) => $n > 1 ? "{$k}×{$n}" : $k, array_keys($events), $events))
             .($tools !== [] ? '; инструменты: '.implode(', ', array_keys($tools)) : '')
             .($result === null ? '; итогового события нет' : '');
 
