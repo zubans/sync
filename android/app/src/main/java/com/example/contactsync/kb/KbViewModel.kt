@@ -26,6 +26,8 @@ data class KbState(
     val recording: ActiveRecording? = null,
     /** Записи на планшете, ещё не принятые KB. */
     val pendingUploads: Int = 0,
+    /** Записи без проекта: ждут решения или сохранены, пока проекта нет. */
+    val recordings: List<Recording> = emptyList(),
     val meetings: List<MeetingProgress> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
@@ -48,7 +50,11 @@ class KbViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch { session.user.collect { user -> _state.update { it.copy(user = user) } } }
-        viewModelScope.launch { MeetingRecorderService.state.collect { rec -> _state.update { it.copy(recording = rec) } } }
+        viewModelScope.launch {
+            MeetingRecorderService.state.collect { rec ->
+                _state.update { it.copy(recording = rec, recordings = RecordingStore.list(getApplication())) }
+            }
+        }
     }
 
     fun onResume() {
@@ -104,16 +110,20 @@ class KbViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { refresh() }
     }
 
-    fun startRecording() {
-        val project = _state.value.project ?: return
-        MeetingRecorderService.start(getApplication(), project.slug, project.name)
-    }
+    /** Разрешения и источник звука выбирает [RecordActivity]. */
+    fun startRecording() = getApplication<App>().startActivity(RecordActivity.intent(getApplication()))
 
-    fun stopRecording() = MeetingRecorderService.stop(getApplication())
+    /** Остановить и сразу спросить, куда сохранить. */
+    fun stopRecording() = getApplication<App>().startActivity(SaveRecordingActivity.stopIntent(getApplication()))
+
+    fun openRecording(recording: Recording) =
+        getApplication<App>().startActivity(SaveRecordingActivity.intent(getApplication(), recording.id))
 
     /** @return модель сейчас работает над какой-то задачей — опрашивать чаще. */
     private suspend fun refresh(): Boolean {
-        _state.update { it.copy(pendingUploads = MeetingUploads.pending(getApplication()).size) }
+        _state.update {
+            it.copy(pendingUploads = MeetingUploads.pending(getApplication()).size, recordings = RecordingStore.list(getApplication()))
+        }
         if (!session.isLoggedIn) return false
         _state.update { it.copy(loading = true) }
         return try {

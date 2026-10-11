@@ -34,6 +34,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Запись созвона: микрофон, пока звонок держит другое приложение, и голоса собеседников.
+         Привилегированные права — выдаются, только когда приложение встроено в прошивку (priv-app). -->
+    <uses-permission
+        android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.CAPTURE_MEDIA_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission
+        android:name="android.permission.CAPTURE_VOICE_COMMUNICATION_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <!-- Автозапуск при загрузке: скрипт владельца /data/local/boot.sh от root. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Файловый менеджер: на Android 11+ — «Доступ ко всем файлам», на 8–10 — обычное разрешение на память. -->
@@ -140,7 +152,25 @@
         <service
             android:name=".kb.MeetingRecorderService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|mediaProjection" />
+
+        <!-- Запись: старт (разрешения и согласие на захват звука) и выбор, куда сохранить. -->
+        <activity
+            android:name=".kb.RecordActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@style/Theme.ContactSync.Translucent" />
+        <activity
+            android:name=".kb.SaveRecordingActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@style/Theme.ContactSync.Translucent" />
+
+        <receiver
+            android:name=".kb.RecordingActionReceiver"
+            android:exported="false" />
 
         <!-- Своя панель навигации (кнопки «назад / домой / недавние»). Включается в специальных возможностях. -->
         <service

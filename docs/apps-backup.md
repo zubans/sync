@@ -58,10 +58,23 @@
 Чтобы встроить Contact Sync в прошивку (проверено на GSI TrebleDroid Android 14):
 
 - APK — в `/system/priv-app/ContactSync/ContactSync.apk` (в GSI `/product` — это `/system/product`, отдельный раздел `product` не используется);
-- белый список — `/system/etc/permissions/privapp-permissions-contactsync.xml`, только для `com.example.contactsync` и только `INSTALL_PACKAGES`;
+- белый список — `/system/etc/permissions/privapp-permissions-contactsync.xml`, только для `com.example.contactsync`: `INSTALL_PACKAGES` и для записи созвонов `CAPTURE_AUDIO_OUTPUT`, `CAPTURE_MEDIA_OUTPUT`, `CAPTURE_VOICE_COMMUNICATION_OUTPUT` (см. [launcher.md](launcher.md), «Запись»);
 - владелец `root:root`, права `0644` (каталог `0755`), SELinux `u:object_r:system_file:s0`.
 
-Образ GSI сжат с дедупликацией блоков (`shared_blocks`), его нужно сначала распаковать: `resize2fs` с запасом → `e2fsck -fy -E unshare_blocks` → добавить файлы через `debugfs` → `resize2fs -M`. Записывать — `fastboot flash system` из fastbootd, проверка подписи vbmeta должна быть отключена. Обновлять сам Contact Sync можно обычной установкой с той же подписью: он останется привилегированным.
+Образ GSI сжат с дедупликацией блоков (`shared_blocks`), его нужно сначала распаковать: `resize2fs` с запасом → `e2fsck -fy -E unshare_blocks` → добавить файлы через `debugfs` → `resize2fs -M`. Записывать — `fastboot flash system` из fastbootd, проверка подписи vbmeta должна быть отключена. Обновлять сам Contact Sync можно обычной установкой с той же подписью: он останется привилегированным. Но новое привилегированное право обновление получает, только если его запрашивает и APK в `/system/priv-app`: добавили право в манифест — нужно заменить и системный APK. На планшете `ro.control_privapp_permissions=log`, поэтому белый список не обязателен (система только пишет предупреждение), а системный APK — обязателен.
+
+Замена системного APK на месте (root через adb, без перепрошивки; так обновлено 11.10.2026 при добавлении записи созвонов):
+
+```bash
+adb push app-debug.apk /data/local/tmp/ContactSync-new.apk
+adb shell su -c 'echo 256 > /sys/fs/ext4/dm-2/reserved_clusters; mount -o remount,rw /'
+adb shell su -c 'cat /data/local/tmp/ContactSync-new.apk > /system/priv-app/ContactSync/ContactSync.apk; sync'
+adb shell su -c 'cmp /data/local/tmp/ContactSync-new.apk /system/priv-app/ContactSync/ContactSync.apk && echo OK'
+adb shell su -c 'mount -o remount,ro /; echo 4096 > /sys/fs/ext4/dm-2/reserved_clusters'
+adb reboot
+```
+
+После `resize2fs -M` свободного места на разделе почти нет, а ext4 держит резерв 4096 кластеров (16 МБ), который `df` показывает как свободное место, — запись в него падает с «No space left on device». Резерв временно снижается и возвращается. Файл переписывать поверх (`cat >`), а не удалять и копировать: место удалённого файла освобождается не сразу. Без проверки `cmp` не перезагружаться — обрезанный системный APK лишит приложение привилегий. После перезагрузки планшет надо разблокировать: до этого компоненты приложения системе не видны.
 
 ## 4. Авторизация в сторонних приложениях
 

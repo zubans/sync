@@ -106,6 +106,7 @@ private fun KbScreen(state: KbState, vm: KbViewModel) {
                 }
             }
             RecordButton(state, vm)
+            RecordingRows(state, vm)
             state.meetings.forEach { Text("${it.title}: ${it.status}", color = TextMuted, fontSize = 14.sp) }
             state.error?.let { Text(it, color = com.example.contactsync.launcher.Down, fontSize = 14.sp) }
             LazyColumn(

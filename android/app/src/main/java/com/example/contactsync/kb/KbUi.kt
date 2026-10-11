@@ -126,13 +126,9 @@ fun ProjectMenu(state: KbState, expanded: Boolean, onDismiss: () -> Unit, vm: Kb
     }
 }
 
-/** Запись встречи в выбранный проект. Микрофон спрашиваем при первом нажатии. */
+/** Запись встречи, созвона или звонка. Проект выбирается после остановки. */
 @Composable
 fun RecordButton(state: KbState, vm: KbViewModel, modifier: Modifier = Modifier.fillMaxWidth()) {
-    val context = LocalContext.current
-    val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-        if (result[Manifest.permission.RECORD_AUDIO] == true) vm.startRecording()
-    }
     val recording = state.recording
     val label = if (recording != null) {
         val elapsed by produceState(0L, recording.startedAt) {
@@ -141,9 +137,9 @@ fun RecordButton(state: KbState, vm: KbViewModel, modifier: Modifier = Modifier.
                 delay(1000)
             }
         }
-        "■  ${duration(elapsed)} · остановить и отправить"
+        "■  ${MeetingPlan.duration(elapsed)} · остановить"
     } else {
-        "●  Записать встречу" + (state.project?.let { " в ${it.name}" } ?: "")
+        "●  Записать"
     }
     Text(
         label,
@@ -154,29 +150,34 @@ fun RecordButton(state: KbState, vm: KbViewModel, modifier: Modifier = Modifier.
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
             .background(if (recording != null) Down else Down.copy(alpha = 0.14f))
-            .clickable(enabled = state.project != null) {
-                if (recording != null) {
-                    vm.stopRecording()
-                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                    vm.startRecording()
-                } else {
-                    permissions.launch(
-                        if (Build.VERSION.SDK_INT >= 33) {
-                            arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            arrayOf(Manifest.permission.RECORD_AUDIO)
-                        },
-                    )
-                }
-            }
+            .clickable { if (recording != null) vm.stopRecording() else vm.startRecording() }
             .padding(horizontal = 16.dp, vertical = 12.dp),
     )
+}
+
+/** Записи без проекта: нажатие — то же окно «куда сохранить». */
+@Composable
+fun RecordingRows(state: KbState, vm: KbViewModel) {
+    state.recordings.forEach { rec ->
+        val status = if (rec.status == Recording.STATUS_KEPT) "без проекта" else "не разобрана"
+        val length = if (rec.durationMs > 0) " · ${MeetingPlan.duration(rec.durationMs)}" else ""
+        Text(
+            "🎙 ${rec.title}$length · $status",
+            color = TextMain,
+            fontSize = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { vm.openRecording(rec) }
+                .padding(vertical = 6.dp, horizontal = 4.dp),
+        )
+    }
 }
 
 @Composable
 private fun UploadStatus(state: KbState) {
     val lines = buildList {
         if (state.pendingUploads > 0) add("Ждёт отправки в KB: ${state.pendingUploads}")
+        if (state.recordings.isNotEmpty()) add("Записи без проекта: ${state.recordings.size} — в «Базе знаний»")
         state.meetings.forEach { add("${it.title}: ${it.status}") }
     }
     lines.forEach { Text(it, color = TextMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
@@ -406,12 +407,4 @@ fun Context.openUrl(url: String) {
     } catch (_: ActivityNotFoundException) {
         // Браузера нет — открыть нечем.
     }
-}
-
-private fun duration(millis: Long): String {
-    val seconds = millis / 1000
-    val h = seconds / 3600
-    val m = seconds % 3600 / 60
-    val s = seconds % 60
-    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }

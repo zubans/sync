@@ -4,4 +4,10 @@
     <style name="Theme.ContactSync.Launcher" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">#0E1014</item>
     </style>
+    <!-- Окна записи поверх текущего приложения: прозрачный фон, затемнение рисует Compose. -->
+    <style name="Theme.ContactSync.Translucent" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Translucent</item>
+    </style>
 </resources>

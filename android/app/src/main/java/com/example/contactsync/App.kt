@@ -6,9 +6,11 @@ import com.example.contactsync.apps.ApkInstaller
 import com.example.contactsync.calendar.CalendarAccount
 import com.example.contactsync.data.Api
 import com.example.contactsync.data.Session
+import com.example.contactsync.kb.CallWatcher
 import com.example.contactsync.kb.KbApi
 import com.example.contactsync.kb.KbSession
 import com.example.contactsync.kb.MeetingUploads
+import com.example.contactsync.kb.RecordingStore
 import com.example.contactsync.sync.SyncEngine
 import com.example.contactsync.sync.SyncScheduler
 import com.example.contactsync.vault.BiometricUnlock
@@ -52,6 +54,10 @@ class App : Application() {
         kbApi = KbApi(kbSession)
         // Записи встреч, не отправленные до перезапуска (нет сети, кончилась сессия), — снова в очередь.
         if (kbSession.isLoggedIn) MeetingUploads.resumeAll(this)
+        // Процесс умер посреди записи — записанное становится неразобранной записью.
+        RecordingStore.recoverInterrupted(this)
+        // Начался созвон или звонок — предложить запись.
+        CallWatcher.start(this)
         // Наблюдение за контактами (content URI trigger) переживает не всё — восстанавливаем при старте.
         if (session.isLoggedIn && session.backgroundSync) SyncScheduler.enable(this)
         // Аккаунт календаря мог не создаться при входе в прошлой версии приложения.

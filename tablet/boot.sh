@@ -5,6 +5,8 @@
 nohup /data/local/oc/vpnctl.sh > /dev/null 2>&1 &
 # Сторож Wi-Fi (см. wifiwatch.sh).
 nohup /data/local/wifiwatch.sh > /dev/null 2>&1 &
+# Запись созвона: согласие на захват звука приложений без окна (сбрасывается при обновлении системного APK).
+appops set com.example.contactsync PROJECT_MEDIA allow
 for f in /data/local/tmp/sounds/ui/*.ogg; do mount -o bind "$f" "/product/media/audio/ui/$(basename "$f")"; done
 # Плавность: в GSI регулятор MediaTek не поднимает частоту GPU и не ускоряет активное приложение.
 # GPU не ниже 698 МГц (ступень 4 из 16), активному приложению — ускорение планировщика.
