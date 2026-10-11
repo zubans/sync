@@ -58,6 +58,19 @@ final class NewsDigestService
         return $report;
     }
 
+    /**
+     * Сводка за произвольный период без сохранения — проверить модель и промпт, не дожидаясь смены часа.
+     *
+     * @return array{news: int, digest: ?array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>}}
+     */
+    public function preview(NewsDigestPeriod $period, ?string $model = null): array
+    {
+        $news = $this->items->findSeenBetween($period->start, $period->end, self::MAX_NEWS);
+        $model ??= ($period->period === NewsDigest::PERIOD_HOUR ? $this->hourModel : $this->dayModel) ?: null;
+
+        return ['news' => \count($news), 'digest' => $news === [] ? null : $this->summarize($period, $news, $model)];
+    }
+
     private function build(NewsSource $source, NewsDigestPeriod $period, ?NewsItem $item): string
     {
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));

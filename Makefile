@@ -8,7 +8,7 @@ HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news digest agy-login test clean apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news digest digest-preview agy-login test clean apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -67,6 +67,9 @@ news: ## Собрать новости сейчас, не дожидаясь к�
 
 digest: ## Написать сводки новостей за прошедший час и сутки, если их ещё нет (REBUILD=1 — переписать)
 	$(COMPOSE) exec news php bin/console app:news:digest $(if $(REBUILD),--rebuild)
+
+digest-preview: ## Сводка за последние часы без сохранения: make digest-preview HOURS=3 MODEL="Gemini 3.1 Pro (High)"
+	$(COMPOSE) exec news php bin/console app:news:digest --preview --hours=$(or $(HOURS),1) $(if $(MODEL),--model="$(MODEL)")
 
 agy-login: ## Войти в аккаунт Google для сводок (Antigravity CLI): откройте ссылку, вставьте код, выйдите /quit
 	$(COMPOSE) exec -it -e HOME=/app/var/agy news sh -c "mkdir -p /app/var/agy && agy"

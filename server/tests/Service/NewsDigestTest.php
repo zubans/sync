@@ -158,6 +158,21 @@ final class NewsDigestTest extends DatabaseWebTestCase
         self::assertCount(2, $this->em->getRepository(NewsDigest::class)->findAll());
     }
 
+    public function testPreviewSummarizesAnyWindowWithoutSaving(): void
+    {
+        $this->news(2, '2026-10-12 13:20:00');
+        $period = new NewsDigestPeriod(NewsDigest::PERIOD_DAY,
+            new \DateTimeImmutable('2026-10-12 11:00:00', new \DateTimeZone('UTC')),
+            new \DateTimeImmutable(self::NOW, new \DateTimeZone('UTC')));
+
+        $result = $this->service([$this->answer('Предпросмотр')])->preview($period);
+
+        self::assertSame(2, $result['news'], 'в предпросмотре нет порога в 5 новостей');
+        self::assertSame('Предпросмотр', $result['digest']['headline']);
+        self::assertSame([], $this->em->getRepository(NewsDigest::class)->findAll());
+        self::assertNull($this->digest->getLastAttemptAt());
+    }
+
     public function testDisabledDigestSourceWritesNothing(): void
     {
         $this->digest->setEnabled(false);
