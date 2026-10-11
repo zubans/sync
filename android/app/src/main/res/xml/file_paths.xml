@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Файловый менеджер отдаёт файлы другим приложениям («Открыть», «Поделиться»): вся общая память и SD-карты. -->
+<paths>
+    <external-path name="storage" path="." />
+    <root-path name="root" path="." />
+</paths>

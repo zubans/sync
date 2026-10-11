@@ -2,6 +2,7 @@ package com.example.contactsync.launcher
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
@@ -15,6 +16,40 @@ enum class VpnState(val title: String) {
     DOWN("VPN не подключён"),
 }
 
+/**
+ * Включение и выключение туннеля. Root приложению не выдаётся, поэтому оно только пишет желаемое
+ * состояние в свой файл `vpn-wanted`, а служба под root (`tablet/vpnctl.sh`) применяет его через
+ * `occtl.sh` и раз в 2 с обновляет время изменения `vpn-watch`. Нет свежей отметки — служба не запущена,
+ * и управлять туннелем отсюда нельзя.
+ */
+class VpnControl(private val dir: File) {
+
+    /** Что пользователь выбрал последним; null — ни разу не переключал. */
+    fun wanted(): Boolean? = when (read(WANTED)) {
+        "on" -> true
+        "off" -> false
+        else -> null
+    }
+
+    fun request(on: Boolean) {
+        // Через временный файл: служба не должна прочитать недописанное значение.
+        val tmp = File(dir, "$WANTED.tmp")
+        tmp.writeText(if (on) "on" else "off")
+        tmp.renameTo(File(dir, WANTED))
+    }
+
+    /** Служба отмечалась недавно: она обновляет время изменения `vpn-watch` (без внешних команд — дешевле). */
+    fun available(nowSeconds: Long): Boolean =
+        VpnLamp.controlAvailable(File(dir, WATCH).lastModified().takeIf { it > 0 }?.div(1000), nowSeconds)
+
+    private fun read(name: String): String? = runCatching { File(dir, name).readText().trim() }.getOrNull()
+
+    private companion object {
+        const val WANTED = "vpn-wanted"
+        const val WATCH = "vpn-watch"
+    }
+}
+
 /** Что увидели при проверке туннеля. */
 data class VpnProbe(val interfaceUp: Boolean, val address: String?, val kbReachable: Boolean)
 
@@ -25,6 +60,20 @@ data class VpnProbe(val interfaceUp: Boolean, val address: String?, val kbReacha
  */
 object VpnLamp {
     const val INTERFACE = "oc0"
+
+    /** Служба отмечается раз в 2 с; 10 с без отметки — считаем, что её нет. */
+    fun controlAvailable(heartbeatSeconds: Long?, nowSeconds: Long): Boolean =
+        heartbeatSeconds != null && nowSeconds - heartbeatSeconds in -5..10
+
+    /**
+     * Переключение ещё не дошло до туннеля: попросили включить, а его нет, или выключить, а он есть.
+     * Пока так — проверяем туннель чаще, чтобы лампочка сменилась сразу.
+     */
+    fun switching(wanted: Boolean?, state: VpnState): Boolean = when (wanted) {
+        true -> state == VpnState.DOWN
+        false -> state != VpnState.DOWN
+        null -> false
+    }
 
     fun state(probe: VpnProbe): VpnState = when {
         !probe.interfaceUp || probe.address == null -> VpnState.DOWN

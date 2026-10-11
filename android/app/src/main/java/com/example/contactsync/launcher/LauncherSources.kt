@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Открытые API без ключей: MOEX ISS (котировки с задержкой 15 минут), MET Norway (прогноз),
- * геокодер Open-Meteo (поиск города).
+ * геокодер Open-Meteo (поиск города), ленты новостей.
  * Сервер sync в этих запросах не участвует.
  */
 class LauncherApi(
@@ -93,13 +93,19 @@ class LauncherApi(
             ),
         )
 
+    /** Свежие заголовки одного издания. */
+    suspend fun news(source: NewsSource): List<NewsItem> =
+        NewsParser.parse(source, getText(source.url.toHttpUrl()))
+
     private fun iss(path: String): HttpUrl.Builder =
         "https://iss.moex.com/iss/$path".toHttpUrl().newBuilder().addQueryParameter("iss.meta", "off")
 
-    private suspend fun get(url: HttpUrl): JsonObject = withContext(Dispatchers.IO) {
+    private suspend fun get(url: HttpUrl): JsonObject = json.parseToJsonElement(getText(url)).jsonObject
+
+    private suspend fun getText(url: HttpUrl): String = withContext(Dispatchers.IO) {
         client.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build()).execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-            json.parseToJsonElement(response.body!!.string()).jsonObject
+            response.body!!.string()
         }
     }
 }
@@ -122,6 +128,8 @@ class CalendarSource(private val context: Context) {
             CalendarContract.Instances.END,
             CalendarContract.Instances.ALL_DAY,
             CalendarContract.Instances.DISPLAY_COLOR,
+            CalendarContract.Instances.EVENT_ID,
+            CalendarContract.Instances.EVENT_LOCATION,
         )
         val events = mutableListOf<AgendaEvent>()
         context.contentResolver.query(
@@ -135,6 +143,8 @@ class CalendarSource(private val context: Context) {
                     end = c.getLong(2),
                     allDay = c.getInt(3) == 1,
                     color = c.getInt(4),
+                    eventId = c.getLong(5),
+                    location = c.getString(6).orEmpty(),
                 )
             }
         }
@@ -160,12 +170,18 @@ class LauncherSettings(context: Context) {
             ?.let { s -> s.split(";").mapNotNull(Instrument::decode) } ?: DEFAULT_INSTRUMENTS
         set(value) = prefs.edit().putString(KEY_INSTRUMENTS, value.joinToString(";") { it.encode() }).apply()
 
-    /** Пакеты приложений в доке, по порядку. */
+    /** Иконки в доке по порядку: компоненты (`пакет/.Активность`); старые записи — пакеты, см. `migrateDock`. */
     var dock: List<String>
         get() = prefs.getString(KEY_DOCK, null)?.split(";")?.filter { it.isNotBlank() } ?: DEFAULT_DOCK
         set(value) = prefs.edit().putString(KEY_DOCK, value.joinToString(";")).apply()
 
+    /** Выбранное в виджете новостей издание; null — все вместе. */
+    var newsSource: NewsSource?
+        get() = prefs.getString(KEY_NEWS, null)?.let { name -> NewsSource.entries.firstOrNull { it.name == name } }
+        set(value) = prefs.edit().putString(KEY_NEWS, value?.name).apply()
+
     private companion object {
+        const val KEY_NEWS = "news_source"
         const val KEY_CITY = "city"
         const val KEY_INSTRUMENTS = "instruments"
         const val KEY_DOCK = "dock"
@@ -173,6 +189,7 @@ class LauncherSettings(context: Context) {
         /** Док до первой настройки; приложения, которых нет на устройстве, просто не показываются. */
         val DEFAULT_DOCK = listOf(
             "com.example.contactsync",
+            "ws.xsoh.etar",
             "com.android.calendar",
             "com.android.camera2",
             "com.android.gallery3d",

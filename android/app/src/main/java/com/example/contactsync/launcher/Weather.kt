@@ -26,11 +26,28 @@ data class Weather(
     val hours: List<HourForecast>,
     /** Следующие дни, без сегодняшнего. */
     val days: List<DayForecast>,
+    /** Ближайшие сутки по часам — для подробного экрана. */
+    val hourly: List<HourForecast> = emptyList(),
 )
 
-data class HourForecast(val time: LocalDateTime, val temperature: Double, val condition: WeatherCondition)
+data class HourForecast(
+    val time: LocalDateTime,
+    val temperature: Double,
+    val condition: WeatherCondition,
+    /** Ветер, м/с. */
+    val wind: Double = 0.0,
+    /** Осадки за час, мм; null — прогноз их не даёт. */
+    val precipitation: Double? = null,
+)
 
-data class DayForecast(val date: LocalDate, val min: Double, val max: Double, val condition: WeatherCondition)
+data class DayForecast(
+    val date: LocalDate,
+    val min: Double,
+    val max: Double,
+    val condition: WeatherCondition,
+    /** Самый сильный ветер за день, м/с. */
+    val maxWind: Double = 0.0,
+)
 
 enum class WeatherCondition(val title: String, val symbol: String) {
     CLEAR("ясно", "☀️"),
@@ -67,7 +84,14 @@ enum class WeatherCondition(val title: String, val symbol: String) {
  */
 object WeatherParser {
 
-    fun parse(root: JsonObject, now: Instant, zone: ZoneId, hourCount: Int = 5, dayCount: Int = 4): Weather {
+    fun parse(
+        root: JsonObject,
+        now: Instant,
+        zone: ZoneId,
+        hourCount: Int = 5,
+        dayCount: Int = 9,
+        hourlyCount: Int = 24,
+    ): Weather {
         val points = root.getValue("properties").jsonObject.getValue("timeseries").jsonArray.map { it.jsonObject }
             .map { entry ->
                 val data = entry.getValue("data").jsonObject
@@ -81,16 +105,19 @@ object WeatherParser {
                     temperature = details.number("air_temperature"),
                     wind = details.number("wind_speed"),
                     condition = symbol?.let(WeatherCondition::fromMetNo),
+                    precipitation = data["next_1_hours"]?.jsonObject?.get("details")?.jsonObject
+                        ?.get("precipitation_amount")?.jsonPrimitive?.doubleOrNull,
                 )
             }
         val local = now.atZone(zone).toLocalDateTime()
         val current = points.lastOrNull { !it.time.isAfter(local) } ?: points.first()
 
-        val hours = points
-            .filter { it.time.isAfter(local) && it.condition != null }
+        val upcoming = points.filter { it.time.isAfter(local) && it.condition != null }
+        val hours = upcoming
             .filterIndexed { n, _ -> n % 3 == 0 }
             .take(hourCount)
-            .map { HourForecast(it.time, it.temperature, it.condition!!) }
+            .map { it.forecast() }
+        val hourly = upcoming.take(hourlyCount).map { it.forecast() }
 
         val days = points.groupBy { it.time.toLocalDate() }
             .filterKeys { it.isAfter(local.toLocalDate()) }
@@ -104,6 +131,7 @@ object WeatherParser {
                     min = day.minOf { it.temperature },
                     max = day.maxOf { it.temperature },
                     condition = noon.condition!!,
+                    maxWind = day.maxOf { it.wind },
                 )
             }
 
@@ -113,6 +141,7 @@ object WeatherParser {
             condition = current.condition ?: WeatherCondition.CLOUDY,
             hours = hours,
             days = days,
+            hourly = hourly,
         )
     }
 
@@ -128,7 +157,15 @@ object WeatherParser {
             )
         }
 
-    private class Point(val time: LocalDateTime, val temperature: Double, val wind: Double, val condition: WeatherCondition?)
+    private class Point(
+        val time: LocalDateTime,
+        val temperature: Double,
+        val wind: Double,
+        val condition: WeatherCondition?,
+        val precipitation: Double?,
+    ) {
+        fun forecast() = HourForecast(time, temperature, condition!!, wind, precipitation)
+    }
 
     private fun JsonObject.number(key: String): Double = this[key]?.jsonPrimitive?.doubleOrNull ?: 0.0
 }

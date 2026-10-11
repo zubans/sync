@@ -36,14 +36,27 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Автозапуск при загрузке: скрипт владельца /data/local/boot.sh от root. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Файловый менеджер: на Android 11+ — «Доступ ко всем файлам», на 8–10 — обычное разрешение на память. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <application
         android:name=".App"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_sync"
+        android:roundIcon="@mipmap/ic_sync"
         tools:targetApi="31"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
+        android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.ContactSync">
         <activity
@@ -66,6 +79,7 @@
             android:resumeWhilePausing="true"
             android:screenOrientation="unspecified"
             android:stateNotNeeded="true"
+            android:taskAffinity="com.example.contactsync.home"
             android:theme="@style/Theme.ContactSync.Launcher">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -78,13 +92,41 @@
         <activity
             android:name=".kb.KbActivity"
             android:exported="true"
+            android:icon="@mipmap/ic_kb"
+            android:roundIcon="@mipmap/ic_kb"
             android:label="База знаний"
+            android:taskAffinity="com.example.contactsync.kb"
             android:theme="@style/Theme.ContactSync.Launcher">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Отдельная иконка «Файлы»: файловый менеджер. -->
+        <activity
+            android:name=".files.FilesActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_files"
+            android:roundIcon="@mipmap/ic_files"
+            android:label="Файлы"
+            android:taskAffinity="com.example.contactsync.files"
+            android:theme="@style/Theme.ContactSync.Launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <service
             android:name=".kb.MeetingRecorderService"

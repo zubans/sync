@@ -2,6 +2,7 @@ package com.example.contactsync.launcher
 
 import android.Manifest
 import android.content.ActivityNotFoundException
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.provider.CalendarContract
@@ -16,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -58,7 +60,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -67,6 +71,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
@@ -89,7 +96,9 @@ import com.example.contactsync.kb.openUrl
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
+import java.time.Instant
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 
@@ -110,35 +119,48 @@ fun LauncherScreen(
     var drawerOpen by remember { mutableStateOf(false) }
     var cityDialog by remember { mutableStateOf(false) }
     var instrumentDialog by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf<LauncherWidget?>(null) }
+    // Где на экране стоит каждый виджет: раскрытие начинается с его рамки. Перерисовка не нужна — не state.
+    val widgetBounds = remember { HashMap<LauncherWidget, Rect>() }
     val scope = rememberCoroutineScope()
     val toHome: () -> Unit = {
         drawerOpen = false
         scope.launch { pager.animateScrollToPage(0) }
     }
     BackHandler(enabled = pager.currentPage != 0) { toHome() }
+    // Экраны, которые сейчас хоть частично на экране: текущий и соседний, пока идёт листание.
+    val visiblePages by remember {
+        derivedStateOf {
+            val position = pager.currentPage + pager.currentPageOffsetFraction
+            (0 until pager.pageCount).filter { abs(it - position) < 1f }.toSet()
+        }
+    }
 
     MaterialTheme(colorScheme = LauncherColors) {
+      Box(Modifier.fillMaxSize().background(Background)) {
         Column(
             Modifier
                 .fillMaxSize()
-                .background(Background)
                 .safeDrawingPadding()
                 .padding(horizontal = 32.dp, vertical = 24.dp),
         ) {
             HorizontalPager(
                 state = pager,
                 userScrollEnabled = pager.currentPage == 0,
-                beyondViewportPageCount = 1,
+                // Все три экрана держим созданными: иначе WebView базы знаний и VS Code
+                // пересоздавались бы при каждом возврате на дашборд и теряли состояние.
+                beyondViewportPageCount = 2,
                 modifier = Modifier.weight(1f),
             ) { page ->
-                if (page == 0) {
-                    Dashboard(state, vm, kb, kbVm, onAllApps = { drawerOpen = true }, onCity = { cityDialog = true },
-                        onAddInstrument = { instrumentDialog = true })
-                } else {
-                    KbWebPage(kb, kbVm, kbCookies(), onHome = toHome, modifier = Modifier.fillMaxSize())
+                when (page) {
+                    0 -> Dashboard(state, vm, kb, kbVm, onAllApps = { drawerOpen = true }, onCity = { cityDialog = true },
+                        onAddInstrument = { instrumentDialog = true }, onExpand = { expanded = it }, widgetBounds = widgetBounds)
+                    1 -> KbWebPage(kb, kbVm, kbCookies(), onHome = toHome, modifier = Modifier.fillMaxSize(), visible = page in visiblePages)
+                    else -> CodePage(active = pager.currentPage == 2, onHome = toHome, modifier = Modifier.fillMaxSize(),
+                        visible = page in visiblePages)
                 }
             }
-            PageDots(pager.currentPage, pager.pageCount)
+            PageDots(pager.currentPage, pager.pageCount) { scope.launch { pager.animateScrollToPage(it) } }
             Dock(
                 state.dock,
                 onAllApps = { drawerOpen = true },
@@ -146,6 +168,20 @@ fun LauncherScreen(
                 onHome = toHome,
             )
         }
+
+        expanded?.let { widget ->
+            key(widget) {
+                ExpandedWidget(from = widgetBounds[widget] ?: Rect.Zero, onClosed = { expanded = null }) { close ->
+                    when (widget) {
+                        LauncherWidget.WEATHER -> WeatherDetail(state, onCity = { cityDialog = true }, onClose = close)
+                        LauncherWidget.AGENDA -> AgendaDetail(state, onClose = close)
+                        LauncherWidget.QUOTES -> QuotesDetail(state, vm, onAdd = { instrumentDialog = true }, onClose = close)
+                        LauncherWidget.NEWS -> NewsDetail(state, vm, onClose = close)
+                    }
+                }
+            }
+        }
+      }
 
         if (drawerOpen) AppDrawer(state, vm, onDismiss = { drawerOpen = false })
         if (cityDialog) CityDialog(vm, onDismiss = { cityDialog = false })
@@ -162,7 +198,11 @@ private fun Dashboard(
     onAllApps: () -> Unit,
     onCity: () -> Unit,
     onAddInstrument: () -> Unit,
+    onExpand: (LauncherWidget) -> Unit,
+    widgetBounds: MutableMap<LauncherWidget, Rect>,
 ) {
+    fun Modifier.widget(widget: LauncherWidget) = onGloballyPositioned { widgetBounds[widget] = it.boundsInRoot() }
+    val expand = { widget: LauncherWidget -> { onExpand(widget) } }
     val swipeThreshold = with(LocalDensity.current) { 80.dp.toPx() }
     BoxWithConstraints(
         Modifier
@@ -179,25 +219,31 @@ private fun Dashboard(
     ) {
         val wide = maxWidth >= 700.dp
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            Header(state, onCityClick = onCity)
+            Header(state, onCityClick = onCity, onVpnSwitch = vm::setVpn)
             SearchBar()
-            state.weather?.let { WeatherStrip(it) }
+            state.weather?.let { WeatherStrip(it, Modifier.widget(LauncherWidget.WEATHER), onClick = expand(LauncherWidget.WEATHER)) }
             if (wide) {
                 Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                     Column(Modifier.weight(1.15f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                        AgendaCard(state, vm, Modifier.weight(0.8f).fillMaxWidth())
+                        AgendaCard(state, vm, Modifier.weight(0.8f).fillMaxWidth().widget(LauncherWidget.AGENDA), expand(LauncherWidget.AGENDA))
                         KbCard(kb, kbVm, Modifier.weight(1.2f).fillMaxWidth())
                     }
-                    QuotesCard(state, vm, onAdd = onAddInstrument, Modifier.weight(1f).fillMaxHeight())
+                    Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                        QuotesCard(state, vm, onAdd = onAddInstrument, Modifier.weight(0.85f).fillMaxWidth().widget(LauncherWidget.QUOTES),
+                            expand(LauncherWidget.QUOTES))
+                        NewsCard(state, vm, Modifier.weight(1.15f).fillMaxWidth().widget(LauncherWidget.NEWS), expand(LauncherWidget.NEWS))
+                    }
                 }
             } else {
                 Column(
                     Modifier.weight(1f).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                 ) {
-                    AgendaCard(state, vm, Modifier.fillMaxWidth().heightIn(min = 240.dp))
+                    AgendaCard(state, vm, Modifier.fillMaxWidth().heightIn(min = 240.dp).widget(LauncherWidget.AGENDA), expand(LauncherWidget.AGENDA))
                     KbCard(kb, kbVm, Modifier.fillMaxWidth().height(420.dp))
-                    QuotesCard(state, vm, onAdd = onAddInstrument, Modifier.fillMaxWidth().height(420.dp))
+                    QuotesCard(state, vm, onAdd = onAddInstrument, Modifier.fillMaxWidth().height(420.dp).widget(LauncherWidget.QUOTES),
+                        expand(LauncherWidget.QUOTES))
+                    NewsCard(state, vm, Modifier.fillMaxWidth().height(520.dp).widget(LauncherWidget.NEWS), expand(LauncherWidget.NEWS))
                 }
             }
         }
@@ -205,16 +251,24 @@ private fun Dashboard(
 }
 
 @Composable
-private fun PageDots(current: Int, count: Int) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.Center) {
+/**
+ * Точки экранов. На экранах с веб-страницей свайп забирает сама страница, поэтому между
+ * экранами переходят и нажатием на точку — область нажатия больше самой точки.
+ */
+private fun PageDots(current: Int, count: Int, onSelect: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center) {
         repeat(count) {
             Box(
-                Modifier
-                    .padding(horizontal = 4.dp)
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(if (it == current) TextMain else CardRaised),
-            )
+                Modifier.size(28.dp).clip(CircleShape).clickable { onSelect(it) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier
+                        .size(if (it == current) 10.dp else 8.dp)
+                        .clip(CircleShape)
+                        .background(if (it == current) TextMain else CardRaised),
+                )
+            }
         }
     }
 }
@@ -287,7 +341,7 @@ private fun SearchBar() {
 /* ---------- Часы и погода ---------- */
 
 @Composable
-private fun Header(state: LauncherState, onCityClick: () -> Unit) {
+private fun Header(state: LauncherState, onCityClick: () -> Unit, onVpnSwitch: (Boolean) -> Unit) {
     val now by produceState(LocalDateTime.now()) {
         while (true) {
             value = LocalDateTime.now()
@@ -314,7 +368,7 @@ private fun Header(state: LauncherState, onCityClick: () -> Unit) {
             horizontalAlignment = Alignment.End,
             modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable(onClick = onCityClick).padding(8.dp),
         ) {
-            VpnIndicator(state)
+            VpnIndicator(state, onSwitch = onVpnSwitch)
             val weather = state.weather
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(weather?.condition?.symbol ?: "", fontSize = 44.sp)
@@ -334,36 +388,73 @@ private fun Header(state: LauncherState, onCityClick: () -> Unit) {
     }
 }
 
-/** Лампочка туннеля openconnect: зелёная — подключён, жёлтая — переподключается, красная — нет. */
+/**
+ * Лампочка туннеля openconnect: зелёная — подключён, жёлтая — переподключается, красная — нет,
+ * серая — выключен пользователем. Нажатие открывает меню: адрес в туннеле и «Включить / Выключить».
+ */
 @Composable
-private fun VpnIndicator(state: LauncherState) {
-    var details by remember { mutableStateOf(false) }
-    val color = when (state.vpn) {
-        VpnState.UP -> Up
-        VpnState.DEGRADED -> Amber
-        VpnState.DOWN -> Down
+private fun VpnIndicator(state: LauncherState, onSwitch: (Boolean) -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    val switchedOff = state.vpnWanted == false && state.vpn == VpnState.DOWN
+    val switching = state.vpnControl && VpnLamp.switching(state.vpnWanted, state.vpn)
+    val color = when {
+        switching -> TextMuted
+        switchedOff -> TextMuted
+        state.vpn == VpnState.UP -> Up
+        state.vpn == VpnState.DEGRADED -> Amber
+        else -> Down
     }
-    Row(
-        Modifier.clip(RoundedCornerShape(10.dp)).clickable { details = !details }.padding(horizontal = 6.dp, vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.size(12.dp).clip(CircleShape).background(color))
-        Spacer(Modifier.width(8.dp))
-        Text(
-            if (details) listOfNotNull(state.vpn.title, state.vpnAddress).joinToString(" · ") else "VPN",
-            color = TextMuted,
-            fontSize = 14.sp,
-        )
+    val title = when {
+        switching && state.vpnWanted == true -> "VPN включается…"
+        switching -> "VPN выключается…"
+        switchedOff -> "VPN выключен"
+        else -> state.vpn.title
+    }
+    Box {
+        Row(
+            Modifier.clip(RoundedCornerShape(10.dp)).clickable { menu = true }.padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(12.dp).clip(CircleShape).background(color))
+            Spacer(Modifier.width(8.dp))
+            Text(if (switching) title else "VPN", color = TextMuted, fontSize = 14.sp)
+        }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text(listOfNotNull(title, state.vpnAddress).joinToString(" · "), color = TextMuted) },
+                onClick = {},
+                enabled = false,
+            )
+            val turnOn = switchedOff || (state.vpn == VpnState.DOWN && state.vpnWanted != true)
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        when {
+                            !state.vpnChecked -> "Проверка VPN…"
+                            !state.vpnControl -> "Управление недоступно: служба vpnctl не запущена"
+                            turnOn -> "Включить VPN"
+                            else -> "Выключить VPN"
+                        },
+                    )
+                },
+                onClick = { menu = false; onSwitch(turnOn) },
+                // До первой проверки состояние неизвестно — не предлагать «Включить» работающему VPN.
+                enabled = state.vpnChecked && state.vpnControl,
+            )
+        }
     }
 }
 
 @Composable
-private fun WeatherStrip(weather: Weather) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+private fun WeatherStrip(weather: Weather, modifier: Modifier, onClick: () -> Unit) {
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable(onClick = onClick),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
         weather.hours.forEach {
             WeatherChip(it.time.format(DateTimeFormatter.ofPattern("HH:mm")), it.condition.symbol, temperature(it.temperature))
         }
-        weather.days.forEach {
+        weather.days.take(4).forEach {
             WeatherChip(
                 it.date.format(DateTimeFormatter.ofPattern("EE", RU)),
                 it.condition.symbol,
@@ -388,16 +479,17 @@ private fun androidx.compose.foundation.layout.RowScope.WeatherChip(label: Strin
 /* ---------- События ---------- */
 
 @Composable
-private fun AgendaCard(state: LauncherState, vm: LauncherViewModel, modifier: Modifier) {
+private fun AgendaCard(state: LauncherState, vm: LauncherViewModel, modifier: Modifier, onExpand: () -> Unit) {
     val context = LocalContext.current
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         vm.onCalendarPermission()
     }
     DashboardCard(
         title = "Ближайшее",
-        action = "Календарь",
-        onAction = { context.openCalendar(System.currentTimeMillis()) },
+        action = "+ Событие",
+        onAction = { context.newEvent() },
         modifier = modifier,
+        onClick = onExpand,
     ) {
         when {
             !state.calendarAllowed -> {
@@ -408,7 +500,7 @@ private fun AgendaCard(state: LauncherState, vm: LauncherViewModel, modifier: Mo
             }
             state.agenda.isEmpty() -> Text("Ближайшие две недели свободны", color = TextMuted, fontSize = 16.sp)
             else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(state.agenda) { row -> AgendaItem(row, onClick = { context.openCalendar(row.begin) }) }
+                items(state.agenda.take(AGENDA_CARD_ROWS)) { row -> AgendaItem(row, onClick = { context.openEvent(row) }) }
             }
         }
     }
@@ -441,10 +533,55 @@ private fun AgendaItem(row: AgendaRow, onClick: () -> Unit) {
     }
 }
 
+/** Экран события в приложении календаря: оттуда его можно изменить или удалить. */
+internal fun Context.openEvent(row: AgendaRow) {
+    if (row.eventId == 0L) return openCalendar(row.begin)
+    // Тип указываем явно: календарь AOSP ловит эти запросы по MIME-типу.
+    val intent = Intent(Intent.ACTION_VIEW)
+        .setDataAndType(ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, row.eventId), "vnd.android.cursor.item/event")
+        .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, row.begin)
+        .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, row.end)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        .preferCalendarApp(this)
+    try {
+        startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+        openCalendar(row.begin)
+    }
+}
+
+/** Новое событие со следующего часа; календарь выбирается в самом приложении «Календарь». */
+internal fun Context.newEvent() {
+    val hour = 60 * 60 * 1000L
+    val start = (System.currentTimeMillis() / hour + 1) * hour
+    val intent = Intent(Intent.ACTION_INSERT)
+        .setDataAndType(CalendarContract.Events.CONTENT_URI, "vnd.android.cursor.dir/event")
+        .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, start)
+        .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, start + hour)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        .preferCalendarApp(this)
+    try {
+        startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+        openCalendar(start)
+    }
+}
+
+/**
+ * Системный «Календарь» этой прошивки урезан: экрана редактирования в нём нет, и он падает.
+ * Если стоит Etar (свободный форк того же календаря из F-Droid), открываем события сразу в нём.
+ */
+private const val ETAR = "ws.xsoh.etar"
+
+private fun Intent.preferCalendarApp(context: Context): Intent {
+    val etar = Intent(this).setPackage(ETAR)
+    return if (etar.resolveActivity(context.packageManager) != null) etar else this
+}
+
 private fun Context.openCalendar(at: Long) {
     val uri = CalendarContract.CONTENT_URI.buildUpon().appendPath("time").appendPath(at.toString()).build()
     try {
-        startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).preferCalendarApp(this))
     } catch (_: ActivityNotFoundException) {
         // Приложения календаря нет — открывать нечего.
     }
@@ -454,15 +591,14 @@ private fun Context.openCalendar(at: Long) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun QuotesCard(state: LauncherState, vm: LauncherViewModel, onAdd: () -> Unit, modifier: Modifier) {
+private fun QuotesCard(state: LauncherState, vm: LauncherViewModel, onAdd: () -> Unit, modifier: Modifier, onExpand: () -> Unit) {
     val updated = if (state.quotesAt > 0) {
-        "обновлено " + java.time.Instant.ofEpochMilli(state.quotesAt).atZone(java.time.ZoneId.systemDefault())
+        "обновлено " + Instant.ofEpochMilli(state.quotesAt).atZone(ZoneId.systemDefault())
             .format(DateTimeFormatter.ofPattern("HH:mm"))
     } else {
         "загрузка…"
     }
-    DashboardCard(
-title = "Мосбиржа", action = "Добавить", onAction = onAdd, modifier = modifier) {
+    DashboardCard(title = "Мосбиржа", action = "Добавить", onAction = onAdd, modifier = modifier, onClick = onExpand) {
         Text(
             if (state.offline) "нет связи · данные могут быть устаревшими" else "$updated · задержка 15 мин",
             color = if (state.offline) Down else TextMuted,
@@ -473,7 +609,7 @@ title = "Мосбиржа", action = "Добавить", onAction = onAdd, modif
             items(state.quotes, key = { it.secid }) { quote ->
                 var menu by remember { mutableStateOf(false) }
                 Box {
-                    QuoteRow(quote, Modifier.combinedClickable(onClick = {}, onLongClick = { menu = true }))
+                    QuoteRow(quote, Modifier.combinedClickable(onClick = onExpand, onLongClick = { menu = true }))
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(
                             text = { Text("Убрать с экрана") },
@@ -519,7 +655,73 @@ private fun QuoteRow(quote: Quote, modifier: Modifier) {
     }
 }
 
-private fun price(quote: Quote): String {
+/** Сколько событий помещается в карточку; остальные — на подробном экране. */
+private const val AGENDA_CARD_ROWS = 6
+
+/* ---------- Новости ---------- */
+
+@Composable
+private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modifier, onExpand: () -> Unit) {
+    val context = LocalContext.current
+    val zone = ZoneId.systemDefault()
+    val now = Instant.now()
+    val selected = state.newsSource
+    val items = remember(state.news, selected) {
+        if (selected != null) state.news[selected].orEmpty() else NewsFeed.merge(state.news.values.flatten(), now, zone)
+    }
+    DashboardCard(title = "Новости", action = null, onAction = {}, modifier = modifier, onClick = onExpand) {
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            NewsChip("Все", selected == null, failed = false) { vm.selectNewsSource(null) }
+            NewsSource.entries.forEach { source ->
+                NewsChip(source.title, selected == source, failed = source in state.newsFailed) { vm.selectNewsSource(source) }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        when {
+            items.isNotEmpty() -> LazyColumn {
+                items(items, key = { it.source.name + it.link }) { item ->
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { context.openUrl(item.link) }
+                            .padding(horizontal = 4.dp, vertical = 8.dp),
+                    ) {
+                        Text(item.title, color = TextMain, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(NewsFeed.caption(item, now, zone), color = TextMuted, fontSize = 13.sp)
+                    }
+                }
+            }
+            selected != null && selected in state.newsFailed ->
+                Text("${selected.title} сейчас не отвечает", color = Down, fontSize = 16.sp)
+            else -> Text("загрузка…", color = TextMuted, fontSize = 16.sp)
+        }
+    }
+}
+
+/** Вкладка издания; красная точка — издание не ответило, показаны прошлые заголовки. */
+@Composable
+internal fun NewsChip(label: String, selected: Boolean, failed: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Accent.copy(alpha = 0.2f) else CardRaised)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = if (selected) Accent else TextMain, fontSize = 14.sp)
+        if (failed) {
+            Spacer(Modifier.width(6.dp))
+            Box(Modifier.size(6.dp).clip(CircleShape).background(Down))
+        }
+    }
+}
+
+internal fun price(quote: Quote): String {
     val value = quote.price ?: return "—"
     val text = number(value, quote.decimals)
     return when (quote.unit) {
@@ -529,13 +731,13 @@ private fun price(quote: Quote): String {
     }
 }
 
-private fun number(value: Double, decimals: Int): String =
+internal fun number(value: Double, decimals: Int): String =
     NumberFormat.getNumberInstance(RU).apply {
         minimumFractionDigits = decimals.coerceAtMost(2)
         maximumFractionDigits = decimals
     }.format(value)
 
-private fun temperature(value: Double): String {
+internal fun temperature(value: Double): String {
     val rounded = Math.round(value).toInt()
     return when {
         rounded > 0 -> "+$rounded°"
@@ -552,9 +754,16 @@ internal fun DashboardCard(
     action: String?,
     onAction: () -> Unit,
     modifier: Modifier,
+    /** Нажатие на свободное место карточки — раскрыть виджет на весь экран. */
+    onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Column(modifier.clip(RoundedCornerShape(28.dp)).background(CardColor).padding(24.dp)) {
+    val shape = RoundedCornerShape(28.dp)
+    Column(
+        modifier.clip(shape).background(CardColor)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(24.dp),
+    ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
             if (action != null) TextButton(onClick = onAction) { Text(action, color = Accent) }

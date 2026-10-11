@@ -23,10 +23,18 @@ android {
             ?.takeIf { it.isNotBlank() } ?: "8001"
         val serverUrl = providers.gradleProperty("serverUrl").getOrElse("http://10.0.2.2:$httpPort")
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"$serverUrl\"")
+
+        // VS Code на третьем экране главного экрана (code-server): -PcodeServerUrl=http://host:port
+        val codeServerUrl = providers.gradleProperty("codeServerUrl").getOrElse("http://94.103.9.172:8083")
+        buildConfigField("String", "CODE_SERVER_URL", "\"$codeServerUrl\"")
     }
 
     buildTypes {
         release {
+            // Приложение ставится не из магазина, своего ключа нет: release подписан debug-ключом этой машины,
+            // поэтому ставится поверх debug-сборки без потери данных. Release нужен ради скорости:
+            // debuggable-сборка Compose на планшете не успевает в 60 кадров (см. docs/launcher.md).
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

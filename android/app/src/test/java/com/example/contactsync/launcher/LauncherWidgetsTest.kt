@@ -24,6 +24,22 @@ class LauncherWidgetsTest {
     }
 
     @Test
+    fun `vpn control is available only with a fresh heartbeat`() {
+        assertEquals(true, VpnLamp.controlAvailable(1_000, 1_008))
+        assertEquals(false, VpnLamp.controlAvailable(1_000, 1_011))
+        assertEquals(false, VpnLamp.controlAvailable(null, 1_000))
+    }
+
+    @Test
+    fun `vpn is switching until the tunnel matches the request`() {
+        assertEquals(true, VpnLamp.switching(true, VpnState.DOWN))
+        assertEquals(false, VpnLamp.switching(true, VpnState.DEGRADED))
+        assertEquals(true, VpnLamp.switching(false, VpnState.UP))
+        assertEquals(false, VpnLamp.switching(false, VpnState.DOWN))
+        assertEquals(false, VpnLamp.switching(null, VpnState.DOWN))
+    }
+
+    @Test
     fun `boot command skips missing script and logs output`() {
         val command = BootScript.command("/data/local/boot.sh", "/data/local/boot.log")
         assertEquals(

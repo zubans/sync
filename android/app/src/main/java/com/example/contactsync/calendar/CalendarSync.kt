@@ -50,9 +50,23 @@ class CalendarSync(
 
         server.forEach { calendar ->
             val id = bySyncId.getValue(calendar.id)
+            adoptOrganizer(id)
             push(calendar, id)
             pull(calendar, id)
         }
+    }
+
+    /** События, записанные прошлыми версиями без организатора, «Календарь» не давал править. */
+    private fun adoptOrganizer(calendarId: Long) {
+        provider.update(
+            asSyncAdapter(Events.CONTENT_URI),
+            ContentValues().apply {
+                put(Events.ORGANIZER, account.name)
+                put(Events.GUESTS_CAN_MODIFY, 1)
+            },
+            "${Events.CALENDAR_ID} = ? AND ${Events.ORGANIZER} IS NULL",
+            arrayOf(calendarId.toString()),
+        )
     }
 
     private suspend fun push(calendar: ServerCalendar, calendarId: Long) {
@@ -121,6 +135,10 @@ class CalendarSync(
             put(Events.DESCRIPTION, local.description)
             if (local.color != null) put(Events.EVENT_COLOR, local.color) else putNull(Events.EVENT_COLOR)
             if (local.rrule != null) put(Events.RRULE, local.rrule) else putNull(Events.RRULE)
+            // «Календарь» даёт править только события, где организатор — владелец календаря;
+            // в семейном календаре правят и другие члены семьи.
+            put(Events.ORGANIZER, account.name)
+            put(Events.GUESTS_CAN_MODIFY, 1)
             put(Events._SYNC_ID, event.id)
             put(Events.SYNC_DATA1, event.revision.toString())
             put(Events.DIRTY, 0)

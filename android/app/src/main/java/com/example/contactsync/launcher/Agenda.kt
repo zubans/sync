@@ -16,6 +16,9 @@ data class AgendaEvent(
     val end: Long,
     val allDay: Boolean,
     val color: Int,
+    /** id события в календаре Android — чтобы открыть его для просмотра и правки. */
+    val eventId: Long = 0,
+    val location: String = "",
 )
 
 /** Строка ленты «Ближайшее». */
@@ -28,8 +31,13 @@ data class AgendaRow(
     /** Для ближайшего события: «через 40 мин», «идёт». null — без подсветки. */
     val soon: String?,
     val color: Int,
-    /** Начало, мс UTC — чтобы открыть этот момент в приложении календаря. */
+    /** Начало и конец вхождения, мс UTC — их ждёт экран события в приложении календаря. */
     val begin: Long,
+    val end: Long = begin,
+    val eventId: Long = 0,
+    /** День в ленте (для идущих с прошлых дней — сегодня): по нему подробный экран группирует события. */
+    val date: LocalDate? = null,
+    val location: String = "",
 )
 
 /**
@@ -58,6 +66,10 @@ object Agenda {
                     soon = if (event.allDay) null else soonLabel(event, now),
                     color = event.color,
                     begin = event.begin,
+                    end = event.end,
+                    eventId = event.eventId,
+                    date = start,
+                    location = event.location,
                 )
             }
     }

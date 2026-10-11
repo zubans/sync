@@ -61,6 +61,84 @@
 - Попытка изменить чужой календарь — `403`.
 - Невалидные данные — `422`.
 
+## Примеры запросов
+
+Токен выдаёт вход: `POST /api/auth/login` с `{email, password}` → `{token}`. Дальше каждый запрос — с заголовком `Authorization: Bearer <token>`.
+
+**Календари**
+
+```http
+GET /api/calendars
+→ 200 {"calendars": [
+    {"id": "01a12…", "name": "Личный", "color": "#4285F4", "familyShared": false,
+     "owner": "anna@example.com", "mine": true, "revision": 3},
+    {"id": "01a13…", "name": "Семья", "color": "#34A853", "familyShared": true,
+     "owner": "boris@example.com", "mine": false, "revision": 12}]}
+
+POST /api/calendars
+{"name": "Работа", "color": "#EA4335", "familyShared": false}
+→ 201 {"id": "01a14…", "name": "Работа", …}
+```
+
+**Событие со временем и на весь день**
+
+```http
+POST /api/calendars/01a12…/events
+{"title": "Созвон по sync", "start": "2026-10-10T15:00:00+03:00", "end": "2026-10-10T15:30:00+03:00",
+ "location": "Zoom", "description": "Обсудить календарь"}
+→ 201 {"id": "01a15…", "calendarId": "01a12…", "revision": 4, "deleted": false,
+       "title": "Созвон по sync", "start": "2026-10-10T12:00:00Z", "end": "2026-10-10T12:30:00Z",
+       "allDay": false, "location": "Zoom", "description": "Обсудить календарь",
+       "color": null, "rrule": null, "updatedBy": "anna@example.com", "updatedAt": "2026-10-10T09:01:00+00:00"}
+
+POST /api/calendars/01a12…/events
+{"title": "ДР мамы", "start": "2026-10-11", "end": "2026-10-12", "allDay": true}
+
+POST /api/calendars/01a12…/events
+{"title": "Планёрка", "start": "2026-10-12T10:00:00+03:00", "end": "2026-10-12T10:15:00+03:00",
+ "rrule": "FREQ=WEEKLY;BYDAY=MO"}
+```
+
+**События за период**
+
+```http
+GET /api/events?from=2026-10-10&to=2026-10-17
+GET /api/events?from=2026-10-10T00:00:00+03:00&to=2026-10-11T00:00:00+03:00&calendar=01a12…
+→ 200 {"events": [ …события, отсортированные по началу… ]}
+```
+
+**Правка и удаление**
+
+```http
+PUT /api/events/01a15…
+{"title": "Созвон по календарю", "start": "2026-10-10T12:00:00Z", "end": "2026-10-10T13:00:00Z", "baseRevision": 4}
+→ 200 {…, "revision": 5}
+→ 409 {"error": "Событие изменилось с тех пор.", "current": {…текущая версия…}}   — если правили после ревизии 4
+
+DELETE /api/events/01a15…?baseRevision=5
+→ 204
+```
+
+**Синхронизация (устройства)**
+
+```http
+GET /api/calendars/01a12…/events?since=3
+→ 200 {"revision": 6, "events": [
+    {"id": "01a15…", "revision": 6, "deleted": true, "title": null, …}]}
+
+POST /api/calendars/01a12…/changes
+{"changes": [
+  {"id": "5554c874-…", "title": "С планшета", "start": "2026-10-10T13:00:00Z", "end": "2026-10-10T13:30:00Z"},
+  {"id": "01a16…", "baseRevision": 2, "title": "Правка", "start": "…", "end": "…"},
+  {"id": "01a17…", "baseRevision": 5, "deleted": true}]}
+→ 200 {"revision": 9, "results": [
+    {"id": "5554c874-…", "status": "ok", "revision": 7, "event": {…}},
+    {"id": "01a16…", "status": "conflict", "current": {…}},
+    {"id": "01a17…", "status": "ok", "revision": 9, "event": {…}}]}
+```
+
+Проверено 10.10.2026 на планшете с сервером на VPS: создание, правка и удаление события на планшете доходят до сервера, ревизии растут. Доставка изменений с сервера на планшет проверена тестами, вживую — ещё нет.
+
 ## Android
 
 Календари sync попадают в календарь устройства (`CalendarContract`) под системным аккаунтом приложения (тип `com.example.contactsync`, имя — email). Код — пакет `calendar`.
@@ -78,6 +156,8 @@
 1. Список календарей: новые создаются на устройстве, пропавшие удаляются, название и цвет обновляются. Семейный календарь другого человека подписан его email и доступен для правки.
 2. Правки с устройства (`DIRTY`, `DELETED`) уходят пакетом. Новое событие получает UUID на устройстве.
 3. Изменения сервера с последней ревизии (`CAL_SYNC1` календаря) записываются на устройство. Ревизия события хранится в `SYNC_DATA1`, серверный id — в `_SYNC_ID`.
+
+**Организатор.** Событиям на устройстве записывается организатор — аккаунт sync (`ORGANIZER`) и `GUESTS_CAN_MODIFY=1`: без этого календарные приложения не дают править событие, а в семейном календаре его правят и другие члены семьи. События, записанные прошлыми версиями без организатора, получают его при следующей синхронизации.
 
 **Конфликт** решается в пользу сервера: событие на устройстве переписывается его версией.
 

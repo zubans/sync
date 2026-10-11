@@ -3,6 +3,7 @@ package com.example.contactsync.launcher
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
@@ -30,6 +31,31 @@ object BootScript {
     }
 }
 
+/**
+ * Звуки интерфейса система загружает один раз при старте. Если скрипт подменил их позже
+ * (при загрузке или вручную через adb), просим перечитать — по числу подмен в /proc/mounts.
+ */
+object UiSounds {
+    private var lastMounts = -1
+
+    fun reloadIfChanged(context: Context) {
+        val mounts = runCatching { java.io.File("/proc/mounts").readLines().count { "/media/audio/ui/" in it } }.getOrDefault(0)
+        if (mounts == lastMounts) return
+        val first = lastMounts == -1
+        lastMounts = mounts
+        // При первом запуске перечитываем, только если подмена уже есть: иначе трогать нечего.
+        if (first && mounts == 0) return
+        reload(context)
+    }
+
+    fun reload(context: Context) {
+        context.getSystemService(AudioManager::class.java)?.run {
+            unloadSoundEffects()
+            loadSoundEffects()
+        }
+    }
+}
+
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
@@ -37,6 +63,8 @@ class BootReceiver : BroadcastReceiver() {
         thread(name = "boot-script") {
             try {
                 BootScript.run()
+                // Звуки интерфейса система загрузила раньше, чем скрипт их подменил, — перечитываем.
+                UiSounds.reload(context)
             } catch (e: Exception) {
                 // su нет или root не дали — грузимся как обычно, без скрипта.
             } finally {

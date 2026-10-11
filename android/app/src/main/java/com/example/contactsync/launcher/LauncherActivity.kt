@@ -40,7 +40,7 @@ class LauncherActivity : ComponentActivity() {
         setContent {
             val state by vm.state.collectAsStateWithLifecycle()
             val kb by kbVm.state.collectAsStateWithLifecycle()
-            val pager = rememberPagerState(pageCount = { 2 })
+            val pager = rememberPagerState(pageCount = { 3 })
             LaunchedEffect(Unit) { homePressed.collect { pager.animateScrollToPage(0) } }
             LauncherScreen(state, vm, kb, kbVm, kbCookies = { (application as App).kbSession.cookieHeaders() }, pager = pager)
         }
@@ -54,6 +54,7 @@ class LauncherActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         NavBarService.launcherVisible.value = true
+        UiSounds.reloadIfChanged(this)
         vm.onResume()
         kbVm.onResume()
     }

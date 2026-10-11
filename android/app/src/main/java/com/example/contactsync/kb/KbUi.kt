@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
@@ -268,7 +269,14 @@ fun KbLoginDialog(state: KbState, vm: KbViewModel, onDismiss: () -> Unit) {
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun KbWebPage(state: KbState, vm: KbViewModel, cookies: List<String>, onHome: () -> Unit, modifier: Modifier) {
+fun KbWebPage(
+    state: KbState,
+    vm: KbViewModel,
+    cookies: List<String>,
+    onHome: () -> Unit,
+    modifier: Modifier,
+    visible: Boolean = true,
+) {
     val context = LocalContext.current
     var projectMenu by remember { mutableStateOf(false) }
     var login by remember { mutableStateOf(false) }
@@ -358,6 +366,7 @@ fun KbWebPage(state: KbState, vm: KbViewModel, cookies: List<String>, onHome: ()
             AndroidView(
                 factory = { webView },
                 modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)),
+                update = { it.showWhen(visible) },
             )
             Box(Modifier.align(Alignment.CenterStart).width(20.dp).fillMaxHeight().then(swipeHome))
         }
@@ -377,6 +386,18 @@ private fun Chip(text: String, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 10.dp),
     )
+}
+
+/**
+ * Экран с WebView держится созданным и за пределами видимого (чтобы страница не перезагружалась),
+ * но рисоваться ему там незачем: на планшете WebView в каждом кадре дашборда заметно тормозит
+ * отрисовку. Скрытый WebView не рисуется, а `onPause` останавливает его анимации.
+ */
+fun WebView.showWhen(visible: Boolean) {
+    val target = if (visible) View.VISIBLE else View.INVISIBLE
+    if (visibility == target) return
+    visibility = target
+    if (visible) onResume() else onPause()
 }
 
 fun Context.openUrl(url: String) {

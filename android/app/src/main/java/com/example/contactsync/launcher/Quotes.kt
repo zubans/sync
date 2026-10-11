@@ -44,6 +44,14 @@ data class Quote(
     val unit: PriceUnit,
     /** Знаков после запятой, как у цены на бирже. */
     val decimals: Int,
+    /** Цена открытия, минимум и максимум за день — для подробного экрана; null — торгов ещё не было. */
+    val open: Double? = null,
+    val low: Double? = null,
+    val high: Double? = null,
+    /** Оборот за день, ₽; у валют ISS его не отдаёт. */
+    val turnover: Double? = null,
+    /** Время последней сделки по бирже, «18:59:56». */
+    val lastTradeTime: String? = null,
 )
 
 enum class PriceUnit { RUBLE, PERCENT_OF_FACE, POINTS, OTHER }
@@ -90,6 +98,12 @@ object IssParser {
             yield = if (market == "bonds") md.number("YIELD") else null,
             unit = unit,
             decimals = (sec["DECIMALS"] as? JsonPrimitive)?.intOrNull ?: 2,
+            // У индексов открытие — OPENVALUE; оборот у акций и облигаций есть в рублях (VALTODAY_RUR).
+            open = if (last != null) md.number("OPEN") ?: md.number("OPENVALUE") else null,
+            low = if (last != null) md.number("LOW") else null,
+            high = if (last != null) md.number("HIGH") else null,
+            turnover = md.number("VALTODAY_RUR") ?: md.number("VALTODAY"),
+            lastTradeTime = if (last != null) md.text("TIME") else null,
         )
     }
 
