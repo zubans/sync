@@ -169,11 +169,19 @@ private fun StoryTimeline(page: ReaderPage.Story, state: LauncherState, vm: Laun
 /**
  * Обычная новость: ссылка на оригинал, заголовок и полный текст, сохранённый сервером.
  * Полного текста нет (сайт издания закрыт) — анонс и пояснение.
+ * Переведённая сервером новость показывается по-русски; плашка под ссылкой переключает на оригинал
+ * и обратно — только на время чтения, в настройки выбор не пишется.
  */
 @Composable
 private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel) {
     val context = LocalContext.current
     val source = item.sourceTitle ?: state.newsSources.firstOrNull { it.code == item.source }?.title ?: item.source
+    var showOriginal by remember(item.id) { mutableStateOf(false) }
+    val original = item.original?.takeIf { showOriginal }
+    val title = original?.title ?: item.title
+    val summary = original?.summary ?: item.summary
+    // Текст статьи не переведён — в content уже оригинал.
+    val paragraphs = original?.paragraphs?.ifEmpty { item.content } ?: item.content
     LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
         item {
             Text(
@@ -186,6 +194,21 @@ private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel
                     .clickable { context.openUrl(item.link) }
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             )
+        }
+        if (item.original != null) {
+            item {
+                val from = NewsFeed.languageName(item.language)?.let { " $it" }.orEmpty()
+                Text(
+                    if (showOriginal) "Оригинал · Показать перевод" else "Перевод$from · Показать оригинал",
+                    color = Accent,
+                    fontSize = 16.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Accent.copy(alpha = 0.12f))
+                        .clickable { showOriginal = !showOriginal }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
         }
         item.storyline?.let { line ->
             item {
@@ -203,16 +226,16 @@ private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel
             }
         }
         item {
-            Text(item.title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)
+            Text(title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)
         }
         when {
-            item.content.isNotEmpty() -> items(item.content) { paragraph ->
+            paragraphs.isNotEmpty() -> items(paragraphs) { paragraph ->
                 Text(paragraph, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp)
             }
             !item.loaded -> item { Text("Загрузка…", color = TextMuted, fontSize = 18.sp) }
             else -> {
-                if (item.summary.isNotEmpty()) {
-                    item { Text(item.summary, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp) }
+                if (summary.isNotEmpty()) {
+                    item { Text(summary, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp) }
                 }
                 item {
                     Text(

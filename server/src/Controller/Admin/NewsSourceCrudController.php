@@ -55,6 +55,12 @@ final class NewsSourceCrudController extends AbstractCrudController
             'Новостная карта сайта' => NewsSource::FORMAT_NEWS_SITEMAP,
             'Сводка (пишет модель)' => NewsSource::FORMAT_DIGEST,
         ]);
+        yield ChoiceField::new('language', 'Язык')->setChoices([
+            'Русский' => NewsSource::LANGUAGE_RU,
+            'Английский' => NewsSource::LANGUAGE_EN,
+            'Французский' => NewsSource::LANGUAGE_FR,
+            'Украинский' => NewsSource::LANGUAGE_UK,
+        ])->setHelp('Не русский — заголовки, анонсы и тексты новостей переводятся на русский');
         yield BooleanField::new('enabled', 'Собирать')->renderAsSwitch(false);
         yield BooleanField::new('showInWidget', 'В виджете')->renderAsSwitch(false)
             ->setHelp('Выключено — новости идут только в сводку, вкладки у издания нет');

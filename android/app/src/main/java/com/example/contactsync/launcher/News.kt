@@ -40,7 +40,14 @@ data class NewsItem(
     val sourceTitle: String? = null,
     /** Сюжетная линия новости: id, название и сколько в ней новостей; null — не разобрана или без названия. */
     val storyline: StorylineRef? = null,
+    /** Язык издания: ru, en, fr, uk. */
+    val language: String = "ru",
+    /** Новость на языке издания — у переведённых сервером; [title], [summary] и [content] тогда перевод. */
+    val original: NewsOriginal? = null,
 )
+
+/** Оригинал переведённой новости: заголовок, анонс и абзацы полного текста (пусто — текст не переведён или не загружен). */
+data class NewsOriginal(val title: String, val summary: String, val paragraphs: List<String> = emptyList())
 
 data class StorylineRef(val id: Long, val title: String, val newsCount: Int)
 
@@ -116,7 +123,19 @@ object NewsFeed {
         content = if (dto.fullText) dto.content else emptyList(),
         sourceTitle = dto.sourceTitle,
         storyline = dto.storyline?.let { StorylineRef(it.id, it.title, it.newsCount) },
+        language = dto.language,
+        original = dto.original?.takeIf { dto.translated }?.let {
+            NewsOriginal(it.title, it.summary.orEmpty(), if (dto.fullText) dto.originalContent else emptyList())
+        },
     )
+
+    /** Подпись перевода: «с английского»; null — язык неизвестен клиенту. */
+    fun languageName(code: String): String? = when (code) {
+        "en" -> "с английского"
+        "fr" -> "с французского"
+        "uk" -> "с украинского"
+        else -> null
+    }
 
     fun storyline(dto: StorylineDto) = NewsStoryline(
         id = dto.id,

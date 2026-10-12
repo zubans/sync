@@ -8,6 +8,7 @@ use App\Entity\Contact;
 use App\Entity\Device;
 use App\Entity\Family;
 use App\Entity\InstalledApp;
+use App\Entity\NewsSource;
 use App\Entity\User;
 use App\Entity\Vault;
 use App\Tests\DatabaseWebTestCase;
@@ -197,6 +198,28 @@ final class AdminTest extends DatabaseWebTestCase
         // Правка отправляется один раз.
         $result = $sync('Борис Петров');
         self::assertSame([], $result['updates']);
+    }
+
+    public function testAdminSetsNewsSourceLanguage(): void
+    {
+        $source = new NewsSource('bbc', 'BBC', 'https://bbc.example/feed');
+        $this->em->persist($source);
+        $this->em->flush();
+        $this->client->loginUser($this->createUser('admin@example.com', admin: true));
+
+        $this->client->request('GET', '/admin/news-source');
+        self::assertSelectorTextContains('table', 'Русский');
+
+        $crawler = $this->client->request('GET', '/admin/news-source/'.$source->getId().'/edit');
+        $form = $crawler->filter('form[name="NewsSource"]')->form();
+        $form['NewsSource[language]']->select(NewsSource::LANGUAGE_EN);
+        $this->client->submit($form);
+
+        self::assertResponseRedirects();
+        $this->em->clear();
+        $saved = $this->em->getRepository(NewsSource::class)->find($source->getId());
+        self::assertSame(NewsSource::LANGUAGE_EN, $saved->getLanguage());
+        self::assertTrue($saved->needsTranslation());
     }
 
     public function testFamilyContactOwnerMustBeFamilyMember(): void

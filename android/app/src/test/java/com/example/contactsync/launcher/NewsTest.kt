@@ -3,6 +3,7 @@ package com.example.contactsync.launcher
 import com.example.contactsync.data.NewsArticleDto
 import com.example.contactsync.data.NewsDigestDto
 import com.example.contactsync.data.NewsItemDto
+import com.example.contactsync.data.NewsOriginalDto
 import com.example.contactsync.data.NewsSourceDto
 import com.example.contactsync.data.NewsStoryDto
 import com.example.contactsync.data.NewsStorySourceDto
@@ -84,6 +85,37 @@ class NewsTest {
 
         assertEquals(listOf("Первый.", "Второй."), NewsFeed.item(full).content)
         assertEquals(emptyList<String>(), NewsFeed.item(teaser).content)
+    }
+
+    @Test
+    fun `translated item keeps original title and paragraphs`() {
+        val dto = dto(13, "bbc", "2026-10-11T19:00:00+00:00").copy(
+            title = "Удар по аэропорту",
+            summary = "Хуситы атакуют.",
+            language = "en",
+            translated = true,
+            original = NewsOriginalDto("Airport hit", "Houthis strike."),
+            content = listOf("Раз.", "Два."),
+            originalContent = listOf("One.", "Two."),
+            fullText = true,
+        )
+
+        val item = NewsFeed.item(dto)
+
+        assertEquals("Удар по аэропорту", item.title)
+        assertEquals(listOf("Раз.", "Два."), item.content)
+        assertEquals(NewsOriginal("Airport hit", "Houthis strike.", listOf("One.", "Two.")), item.original)
+        assertEquals("en", item.language)
+        assertEquals(null, NewsFeed.item(dto.copy(translated = false, original = null)).original)
+        assertEquals("старый сервер — русский", "ru", NewsFeed.item(dto(14, "rbc", "2026-10-11T19:00:00+00:00")).language)
+    }
+
+    @Test
+    fun `language caption for translated news`() {
+        assertEquals("с английского", NewsFeed.languageName("en"))
+        assertEquals("с французского", NewsFeed.languageName("fr"))
+        assertEquals("с украинского", NewsFeed.languageName("uk"))
+        assertEquals(null, NewsFeed.languageName("de"))
     }
 
     @Test

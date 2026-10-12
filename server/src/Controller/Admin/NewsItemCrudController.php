@@ -10,6 +10,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Config\Filters;
 use EasyCorp\Bundle\EasyAdminBundle\Controller\AbstractCrudController;
 use EasyCorp\Bundle\EasyAdminBundle\Field\AssociationField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\DateTimeField;
+use EasyCorp\Bundle\EasyAdminBundle\Field\IntegerField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextareaField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\UrlField;
@@ -32,7 +33,7 @@ final class NewsItemCrudController extends AbstractCrudController
             ->setEntityLabelInSingular('Новость')
             ->setEntityLabelInPlural('Новости')
             ->setDefaultSort(['sortAt' => 'DESC'])
-            ->setSearchFields(['title', 'summary']);
+            ->setSearchFields(['title', 'summary', 'translatedTitle']);
     }
 
     public function configureActions(Actions $actions): Actions
@@ -53,9 +54,14 @@ final class NewsItemCrudController extends AbstractCrudController
         yield AssociationField::new('source', 'Издание');
         yield AssociationField::new('storyline', 'Сюжет')->onlyOnDetail();
         yield TextField::new('title', 'Заголовок');
+        yield TextField::new('translatedTitle', 'Перевод заголовка');
         yield UrlField::new('link', 'Статья')->onlyOnDetail();
         yield TextareaField::new('summary', 'Анонс')->onlyOnDetail();
+        yield TextareaField::new('translatedSummary', 'Перевод анонса')->onlyOnDetail();
         yield TextareaField::new('content', 'Полный текст')->onlyOnDetail();
+        yield TextareaField::new('translatedContent', 'Перевод текста')->onlyOnDetail();
+        yield IntegerField::new('headlineTranslationAttempts', 'Неудачных попыток перевода заголовка')->onlyOnDetail();
+        yield IntegerField::new('contentTranslationAttempts', 'Неудачных попыток перевода текста')->onlyOnDetail();
         yield DateTimeField::new('publishedAt', 'Опубликована (UTC)')->onlyOnDetail();
         yield DateTimeField::new('firstSeenAt', 'Собрана (UTC)')->onlyOnDetail();
     }

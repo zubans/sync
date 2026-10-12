@@ -25,7 +25,18 @@ data class NewsItemDto(
     val fullText: Boolean = false,
     /** Сюжетная линия новости, если у неё уже есть название. */
     val storyline: StorylineRefDto? = null,
+    /** Язык издания (ru, en, fr, uk); у старого сервера поля нет — русский. */
+    val language: String = "ru",
+    /** Новость переведена на русский: [title] и [summary] — перевод, оригинал — в [original]. */
+    val translated: Boolean = false,
+    /** Заголовок и анонс на языке издания — только у переведённых новостей. */
+    val original: NewsOriginalDto? = null,
+    /** Только в `GET /api/news/{id}` у переведённых статей: полный текст на языке издания, [content] — перевод. */
+    val originalContent: List<String> = emptyList(),
 )
+
+@Serializable
+data class NewsOriginalDto(val title: String, val summary: String? = null)
 
 @Serializable
 data class StorylineRefDto(val id: Long, val title: String, val newsCount: Int = 0)
