@@ -134,6 +134,24 @@ final class NewsCollectorTest extends DatabaseWebTestCase
         self::assertNull($source->getEtag(), 'у издания из нескольких лент кэш-заголовки не ведутся');
     }
 
+    public function testStalledNewsSitemapKeepsWhatArrived(): void
+    {
+        $source = new NewsSource('albayan', 'Аль-Баян', 'https://albayan.example/news-sitemap.xml', NewsSource::FORMAT_NEWS_SITEMAP);
+        $this->em->persist($source);
+        $this->em->flush();
+        $start = '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">'
+            .'<url><loc>https://albayan.example/1</loc><news:news><news:publication_date>2026-10-12T22:42:46+04:00</news:publication_date><news:title>Первая</news:title></news:news></url>'
+            .'<url><loc>https://albayan.example/2</loc><news:ne';
+        // Пустая часть в MockResponse — сервер замолчал: соединение открыто, данных нет.
+        $stalled = new MockResponse((static function () use ($start) {
+            yield $start;
+            yield '';
+            yield '</urlset>';
+        })());
+
+        self::assertSame(['new' => 1, 'updated' => 0, 'error' => null], $this->collector([$stalled])->collect($source));
+    }
+
     public function testDisabledSourceAndDigestAreNotCollected(): void
     {
         $this->source()->setEnabled(false);

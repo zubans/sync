@@ -80,6 +80,22 @@ final class NewsFeedParserTest extends TestCase
         self::assertCount(3, (new NewsFeedParser())->parse(NewsSource::FORMAT_NEWS_SITEMAP, $xml), 'без фильтра — все');
     }
 
+    public function testBrokenNewsSitemapGivesWhatIsReadable(): void
+    {
+        $head = '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">';
+        $url = static fn (string $id, string $title) => "<url><loc>https://albayan.example/$id</loc><news:news><news:publication_date>2026-10-12T22:42:46+04:00</news:publication_date><news:title><![CDATA[ $title ]]></news:title></news:news></url>";
+        $parser = new NewsFeedParser();
+
+        $cut = $head.$url('1', 'أوليفيرا يهدي فريق الإمارات').'<url><loc>https://albayan.example/2</loc><news:ne';
+        self::assertSame(['أوليفيرا يهدي فريق الإمارات'], array_map(static fn ($e) => $e->title, $parser->newsSitemap($cut)), 'оборванная карта');
+
+        $ampersand = $head.$url('3', 'A & B').$url('4', 'Второй').'</urlset>';
+        self::assertContains('Второй', array_map(static fn ($e) => $e->title, $parser->newsSitemap($ampersand)), 'неэкранированный &');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $parser->newsSitemap('<html><body>Service Unavailable');
+    }
+
     public function testRssInWindows1251IsDecoded(): void
     {
         $xml = mb_convert_encoding('<?xml version="1.0" encoding="windows-1251"?><rss><channel><item><title>Газета</title><link>https://g.example/1</link></item></channel></rss>', 'Windows-1251', 'UTF-8');

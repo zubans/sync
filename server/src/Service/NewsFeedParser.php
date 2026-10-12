@@ -85,6 +85,9 @@ final class NewsFeedParser
      * Новостная карта сайта: `<url><loc>` с `<news:title>` и `<news:publication_date>`. Анонса в ней нет.
      * Порядок в карте произвольный (у BBC — вперемешку), поэтому записи сортируются по времени.
      *
+     * Карта разбирается в режиме восстановления: у «Аль-Баян» она приходит то оборванной на середине,
+     * то с неэкранированным `&` — берётся всё, что читается. Ни одной записи из битой карты — ошибка.
+     *
      * @return list<NewsEntry>
      */
     public function newsSitemap(string $xml, ?string $filter = null): array
@@ -92,12 +95,13 @@ final class NewsFeedParser
         $doc = new \DOMDocument();
         $previous = libxml_use_internal_errors(true);
         try {
-            $loaded = $doc->loadXML($xml, LIBXML_NONET | LIBXML_COMPACT);
+            $loaded = $doc->loadXML($xml, LIBXML_NONET | LIBXML_COMPACT | LIBXML_RECOVER);
+            $broken = libxml_get_errors() !== [];
         } finally {
             libxml_clear_errors();
             libxml_use_internal_errors($previous);
         }
-        if (!$loaded || $doc->doctype !== null) {
+        if (!$loaded || $doc->doctype !== null || $doc->documentElement === null) {
             throw new \InvalidArgumentException('Карта сайта не разбирается как XML');
         }
         $entries = [];
@@ -120,6 +124,9 @@ final class NewsFeedParser
                 $published = null;
             }
             $entries[] = new NewsEntry(key: $link, link: $link, title: $title, publishedAt: $published);
+        }
+        if ($entries === [] && $broken) {
+            throw new \InvalidArgumentException('Карта сайта не разбирается как XML');
         }
         usort($entries, static fn (NewsEntry $a, NewsEntry $b) => $b->publishedAt <=> $a->publishedAt);
 

@@ -7,7 +7,9 @@ use App\Entity\NewsSource;
 use App\Repository\NewsItemRepository;
 use App\Repository\NewsSourceRepository;
 use Doctrine\ORM\EntityManagerInterface;
+use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
+use Symfony\Contracts\HttpClient\ResponseInterface;
 
 /**
  * Сбор новостей: обходит включённые издания, скачивает ленты и сохраняет новости без дублей —
@@ -17,6 +19,8 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 final class NewsCollector
 {
     private const USER_AGENT = 'ContactSync-News/1.0';
+    /** Сколько ждать следующую часть новостной карты сайта, прежде чем взять пришедшее. */
+    private const SITEMAP_IDLE = 15;
 
     public function __construct(
         private readonly HttpClientInterface $http,
@@ -77,12 +81,12 @@ final class NewsCollector
                 if ($status !== 200) {
                     throw new \RuntimeException("HTTP $status".($single ? '' : " ($url)"));
                 }
-                array_push($entries, ...$this->parser->parse($source->getFormat(), $response->getContent(), $filter));
                 if ($single) {
                     $responseHeaders = $response->getHeaders();
                     $etag = $responseHeaders['etag'][0] ?? null;
                     $lastModified = $responseHeaders['last-modified'][0] ?? null;
                 }
+                array_push($entries, ...$this->parser->parse($source->getFormat(), $this->body($response, $source->getFormat()), $filter));
             }
             [$new, $updated] = $this->save($source, $entries, $now);
             $source->markSuccess($now, $etag, $lastModified);
@@ -95,6 +99,37 @@ final class NewsCollector
 
             return ['new' => 0, 'updated' => 0, 'error' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Тело ответа. Новостную карту сайта читаем потоком и берём то, что успело прийти: «Аль-Баян»
+     * и The Times отдают начало карты (самые свежие новости) и замолкают, не закрывая соединение.
+     * Карта разбирается в режиме восстановления (NewsFeedParser::newsSitemap).
+     */
+    private function body(ResponseInterface $response, string $format): string
+    {
+        if ($format !== NewsSource::FORMAT_NEWS_SITEMAP) {
+            return $response->getContent();
+        }
+        $body = '';
+        try {
+            foreach ($this->http->stream($response, self::SITEMAP_IDLE) as $chunk) {
+                if ($chunk->isTimeout()) {
+                    break;
+                }
+                $body .= $chunk->getContent();
+            }
+        } catch (TransportExceptionInterface $e) {
+            if ($body === '') {
+                throw $e;
+            }
+        }
+        $response->cancel();
+        if ($body === '') {
+            throw new \RuntimeException('Карта сайта не пришла');
+        }
+
+        return $body;
     }
 
     /**
