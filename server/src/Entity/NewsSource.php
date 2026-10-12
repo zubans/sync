@@ -31,6 +31,9 @@ class NewsSource
     public const LANGUAGE_EN = 'en';
     public const LANGUAGE_FR = 'fr';
     public const LANGUAGE_UK = 'uk';
+    public const LANGUAGE_JA = 'ja';
+    public const LANGUAGE_ZH = 'zh';
+    public const LANGUAGE_PT = 'pt';
 
     #[ORM\Id]
     #[ORM\GeneratedValue]
