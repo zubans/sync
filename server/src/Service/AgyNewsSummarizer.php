@@ -32,9 +32,9 @@ final class AgyNewsSummarizer implements NewsSummarizer
         $this->prepareHome();
         $base = ['agy', '--input-format', 'stream-json', '--output-format', 'stream-json'];
         if ($model !== null && $model !== '') {
+            // Уровень уже в названии модели («Gemini 3.8 Flash (Medium)»): с --effort agy такой запуск отклоняет.
             array_push($base, '--model', $model);
-        }
-        if ($effort !== null) {
+        } elseif ($effort !== null) {
             array_push($base, '--effort', $effort);
         }
         if ($schema !== null) {
