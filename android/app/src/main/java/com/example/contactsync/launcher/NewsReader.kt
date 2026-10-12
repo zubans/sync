@@ -54,17 +54,19 @@ import java.time.ZoneId
  */
 @Composable
 internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
-    // Последняя открытая сводка: пока экран уезжает, он должен показывать её, а не пустоту.
-    var shown by remember { mutableStateOf<NewsItem?>(null) }
+    // Последний открытый экран: пока он уезжает, он должен показывать содержимое, а не пустоту.
+    var shown by remember { mutableStateOf<ReaderPage?>(null) }
     state.reading?.let { shown = it }
     AnimatedVisibility(
         visible = state.reading != null,
         enter = fadeIn(tween(300)) + slideInVertically(tween(300)) { it / 12 },
         exit = fadeOut(tween(250)) + slideOutVertically(tween(250)) { it / 12 },
     ) {
-        val item = shown ?: return@AnimatedVisibility
+        val page = shown ?: return@AnimatedVisibility
         BackHandler { vm.closeReading() }
-        val digest = item.digest
+        val zone = ZoneId.systemDefault()
+        val item = (page as? ReaderPage.News)?.item
+        val digest = item?.digest
         Box(
             Modifier
                 .fillMaxSize()
@@ -78,10 +80,10 @@ internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
             Column(Modifier.widthIn(max = 860.dp).fillMaxSize()) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (digest != null) {
-                            "${NewsFeed.period(digest, ZoneId.systemDefault())} · новостей ${digest.newsCount}"
-                        } else {
-                            NewsFeed.caption(item, state.newsSources, Instant.now(), ZoneId.systemDefault())
+                        when {
+                            page is ReaderPage.Story -> "Сюжет · " + NewsFeed.storylineCaption(page.line, Instant.now(), zone)
+                            digest != null -> "${NewsFeed.period(digest, zone)} · новостей ${digest.newsCount}"
+                            else -> NewsFeed.caption(item!!, state.newsSources, Instant.now(), zone)
                         },
                         color = Accent,
                         fontSize = 16.sp,
@@ -97,8 +99,12 @@ internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
                     }
                 }
                 Spacer(Modifier.height(20.dp))
+                if (page is ReaderPage.Story) {
+                    StoryTimeline(page, state, vm)
+                    return@Column
+                }
                 if (digest == null) {
-                    NewsText(item, state)
+                    NewsText(item!!, state, vm)
                     return@Column
                 }
                 val article = digest.article
@@ -113,11 +119,59 @@ internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
 }
 
 /**
+ * Хроника сюжетной линии: название, о чём история, издания и все её новости по дням, свежие сверху.
+ * Нажатие на новость открывает её поверх хроники.
+ */
+@Composable
+private fun StoryTimeline(page: ReaderPage.Story, state: LauncherState, vm: LauncherViewModel) {
+    val zone = ZoneId.systemDefault()
+    val days = page.items.groupBy { it.time.atZone(zone).toLocalDate() }
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(page.line.title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)
+                if (page.line.summary.isNotEmpty()) Text(page.line.summary, color = TextMain, fontSize = 19.sp, lineHeight = 28.sp)
+                val sources = page.items.groupingBy { it.sourceTitle ?: it.source }.eachCount().entries.sortedByDescending { it.value }
+                if (sources.isNotEmpty()) {
+                    Text(sources.joinToString(" · ") { "${it.key} ${it.value}" }, color = TextMuted, fontSize = 15.sp)
+                }
+            }
+        }
+        if (!page.loaded) item { Text("Загрузка…", color = TextMuted, fontSize = 18.sp) }
+        days.forEach { (day, items) ->
+            item(key = "day-$day") {
+                Text(
+                    day.format(java.time.format.DateTimeFormatter.ofPattern("EEEE, d MMMM", RU)).replaceFirstChar { it.uppercase() },
+                    color = TextMuted,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(top = 14.dp),
+                )
+            }
+            items(items, key = { it.id }) { news ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(CardColor)
+                        .clickable { vm.read(news) }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                ) {
+                    Text(news.time.atZone(zone).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")), color = TextMuted, fontSize = 15.sp, modifier = Modifier.widthIn(min = 56.dp))
+                    Text(news.sourceTitle ?: news.source, color = Accent, fontSize = 15.sp, modifier = Modifier.widthIn(min = 110.dp).padding(end = 8.dp))
+                    Text(news.title, color = TextMain, fontSize = 17.sp, lineHeight = 24.sp)
+                }
+            }
+        }
+    }
+}
+
+/**
  * Обычная новость: ссылка на оригинал, заголовок и полный текст, сохранённый сервером.
  * Полного текста нет (сайт издания закрыт) — анонс и пояснение.
  */
 @Composable
-private fun NewsText(item: NewsItem, state: LauncherState) {
+private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel) {
     val context = LocalContext.current
     val source = item.sourceTitle ?: state.newsSources.firstOrNull { it.code == item.source }?.title ?: item.source
     LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -132,6 +186,21 @@ private fun NewsText(item: NewsItem, state: LauncherState) {
                     .clickable { context.openUrl(item.link) }
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             )
+        }
+        item.storyline?.let { line ->
+            item {
+                // История, к которой относится новость: вся хроника — одним нажатием.
+                Text(
+                    "Сюжет: ${line.title} · ${line.newsCount} →",
+                    color = Accent,
+                    fontSize = 16.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Accent.copy(alpha = 0.12f))
+                        .clickable { vm.openStoryline(line) }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
         }
         item {
             Text(item.title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)

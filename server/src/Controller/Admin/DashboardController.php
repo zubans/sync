@@ -68,6 +68,7 @@ final class DashboardController extends AbstractDashboardController
         yield MenuItem::section('Новости');
         yield MenuItem::linkTo(NewsItemCrudController::class, 'Лента', 'fa fa-newspaper');
         yield MenuItem::linkTo(NewsSourceCrudController::class, 'Издания', 'fa fa-rss');
+        yield MenuItem::linkTo(NewsStorylineCrudController::class, 'Сюжеты', 'fa fa-timeline');
 
         yield MenuItem::section('Аккаунты');
         yield MenuItem::linkTo(UserCrudController::class, 'Пользователи', 'fa fa-user');

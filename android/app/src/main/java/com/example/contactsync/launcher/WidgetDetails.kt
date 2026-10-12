@@ -8,6 +8,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -62,6 +63,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -439,7 +441,27 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
     val zone = ZoneId.systemDefault()
     val now = Instant.now()
     val items = state.news.items
-    Column(Modifier.fillMaxSize()) {
+    val swipeThreshold = with(LocalDensity.current) { 96.dp.toPx() }
+    val tabs = NewsFeed.tabCodes(state.newsSources)
+    Column(
+        Modifier
+            .fillMaxSize()
+            // Горизонтальный свайп — на соседнюю вкладку. Вертикальную прокрутку списков он не трогает,
+            // а полоса вкладок листается сама и свайп до этой обработки не доходит.
+            .pointerInput(tabs, state.newsSource) {
+                var dragged = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { dragged = 0f },
+                    onHorizontalDrag = { _, dx -> dragged += dx },
+                    onDragEnd = {
+                        if (abs(dragged) > swipeThreshold) {
+                            val next = NewsFeed.swipeTab(tabs, state.newsSource, dragged)
+                            if (next != state.newsSource) vm.selectNewsSource(next)
+                        }
+                    },
+                )
+            },
+    ) {
         DetailHeader(
             title = "Новости",
             subtitle = state.newsError ?: state.newsSources.joinToString(", ") { it.title },
@@ -449,6 +471,10 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
         Spacer(Modifier.height(16.dp))
         if (state.newsSource == NewsFeed.DIGEST) {
             DigestList(state, vm)
+            return@Column
+        }
+        if (state.newsSource == NewsFeed.STORYLINES) {
+            StorylineList(state, vm)
             return@Column
         }
         LazyVerticalGrid(
@@ -525,6 +551,44 @@ private fun DigestList(state: LauncherState, vm: LauncherViewModel) {
                     }
                 }
                 Text("Читать целиком →", color = Accent, fontSize = 15.sp)
+            }
+        }
+    }
+}
+
+/** Сюжетные линии: название, о чём история, сколько дней и новостей, какие издания пишут. */
+@Composable
+private fun StorylineList(state: LauncherState, vm: LauncherViewModel) {
+    val now = Instant.now()
+    val zone = ZoneId.systemDefault()
+    if (state.storylines.isEmpty()) {
+        Text(state.newsError ?: "Сюжетов пока нет: они появятся, когда сервер свяжет новости в истории", color = TextMuted, fontSize = 17.sp)
+        return
+    }
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minSize = 420.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        modifier = Modifier.fillMaxHeight(),
+    ) {
+        items(state.storylines.size, key = { state.storylines[it].id }) { index ->
+            val line = state.storylines[index]
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(CardColor)
+                    .clickable { vm.openStoryline(line) }
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(NewsFeed.storylineCaption(line, now, zone), color = Accent, fontSize = 14.sp)
+                Text(line.title, color = TextMain, fontSize = 19.sp, fontWeight = FontWeight.Medium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                if (line.summary.isNotEmpty()) {
+                    Text(line.summary, color = TextMuted, fontSize = 15.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+                val sources = line.sources.take(5).joinToString(" · ") { (title, n) -> "$title $n" }
+                if (sources.isNotEmpty()) Text(sources, color = TextMuted, fontSize = 13.sp)
             }
         }
     }

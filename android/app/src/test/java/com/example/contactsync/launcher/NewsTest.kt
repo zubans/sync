@@ -6,6 +6,7 @@ import com.example.contactsync.data.NewsItemDto
 import com.example.contactsync.data.NewsSourceDto
 import com.example.contactsync.data.NewsStoryDto
 import com.example.contactsync.data.NewsStorySourceDto
+import com.example.contactsync.data.StorylineDto
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.time.Instant
@@ -89,6 +90,32 @@ class NewsTest {
     fun `digest-only source is captioned by its server title`() {
         val item = NewsFeed.item(dto(12, "lemonde", "2026-10-11T19:00:00+00:00").copy(sourceTitle = "Le Monde"))
         assertEquals("Le Monde · 22:00", NewsFeed.caption(item, sources, now, zone))
+    }
+
+    @Test
+    fun `storyline caption counts days news and recent ones`() {
+        val line = NewsFeed.storyline(
+            StorylineDto(
+                id = 1, title = "Удары по Эр-Рияду", firstSeenAt = "2026-10-09T10:00:00+00:00", lastSeenAt = "2026-10-11T19:00:00+00:00",
+                newsCount = 45, recent = 12, sources = mapOf("BBC" to 5, "РБК" to 20),
+            ),
+        )
+
+        assertEquals("3-й день · 45 новостей · 12 за сутки", NewsFeed.storylineCaption(line, now, zone))
+        assertEquals(listOf("РБК" to 20, "BBC" to 5), line.sources)
+        assertEquals("сегодня · 1 новость", NewsFeed.storylineCaption(line.copy(firstSeen = now, newsCount = 1, recent = 1), now, zone))
+        assertEquals("сегодня · 3 новости", NewsFeed.storylineCaption(line.copy(firstSeen = now, newsCount = 3, recent = 3), now, zone))
+    }
+
+    @Test
+    fun `swipe moves to the neighbour tab in the order of the tab strip`() {
+        val tabs = NewsFeed.tabCodes(sources + NewsSource("digest", "Сводка"))
+        assertEquals(listOf(null, "digest", "storylines", "rbc", "nyt"), tabs)
+
+        assertEquals("палец влево — вкладка левее", "digest", NewsFeed.swipeTab(tabs, "storylines", dragX = -200f))
+        assertEquals("палец вправо — вкладка правее", "rbc", NewsFeed.swipeTab(tabs, "storylines", dragX = 200f))
+        assertEquals("левее «Все» вкладок нет", null, NewsFeed.swipeTab(tabs, null, dragX = -200f))
+        assertEquals("правее последней вкладок нет", "nyt", NewsFeed.swipeTab(tabs, "nyt", dragX = 200f))
     }
 
     @Test

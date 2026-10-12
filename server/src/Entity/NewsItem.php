@@ -56,6 +56,15 @@ class NewsItem
     #[ORM\Column(options: ['default' => 0])]
     private int $contentAttempts = 0;
 
+    /** Вектор заголовка с анонсом ([NewsVector]); null — ещё не посчитан. */
+    #[ORM\Column(type: Types::TEXT, nullable: true)]
+    private ?string $embedding = null;
+
+    /** Сюжетная линия новости; null — ещё не разобрана или векторов нет. */
+    #[ORM\ManyToOne]
+    #[ORM\JoinColumn(nullable: true, onDelete: 'SET NULL')]
+    private ?NewsStoryline $storyline = null;
+
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $publishedAt = null;
 
@@ -121,6 +130,28 @@ class NewsItem
     public function markContentAttempt(): void
     {
         ++$this->contentAttempts;
+    }
+
+    /** @param list<float> $vector */
+    public function setEmbedding(array $vector): void
+    {
+        $this->embedding = \App\Service\NewsVector::encode($vector);
+    }
+
+    /** @return list<float>|null */
+    public function getEmbedding(): ?array
+    {
+        return $this->embedding === null ? null : \App\Service\NewsVector::decode($this->embedding);
+    }
+
+    public function getStoryline(): ?NewsStoryline
+    {
+        return $this->storyline;
+    }
+
+    public function setStoryline(?NewsStoryline $storyline): void
+    {
+        $this->storyline = $storyline;
     }
 
     public function getContentFetchedAt(): ?\DateTimeImmutable

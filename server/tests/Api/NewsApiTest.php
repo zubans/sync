@@ -105,6 +105,40 @@ final class NewsApiTest extends DatabaseWebTestCase
         self::assertSame(['Новость a'], array_column($this->api('GET', '/api/news', token: $token)['items'], 'title'));
     }
 
+    public function testStorylinesListAndTimeline(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $rbc = new NewsSource('rbc', 'РБК', 'https://rbc.example/feed');
+        $bbc = new NewsSource('bbc', 'BBC', 'https://bbc.example/feed');
+        $this->em->persist($rbc);
+        $this->em->persist($bbc);
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $line = new \App\Entity\NewsStoryline([1.0, 0.0], $now->modify('-2 days'));
+        $line->add([1.0, 0.0], $now->modify('-1 hour'));
+        $line->add([1.0, 0.0], $now->modify('-30 minutes'));
+        $line->name('Удары по Эр-Рияду', 'Хуситы атакуют аэропорт.');
+        $unnamed = new \App\Entity\NewsStoryline([0.0, 1.0], $now);
+        $this->em->persist($line);
+        $this->em->persist($unnamed);
+        foreach ([[$rbc, 'a', '-2 days'], [$rbc, 'b', '-1 hour'], [$bbc, 'c', '-30 minutes']] as [$source, $key, $ago]) {
+            $this->item($source, $key, $now->modify($ago)->format('Y-m-d H:i:s'))->setStoryline($line);
+        }
+        $this->em->flush();
+
+        $list = $this->api('GET', '/api/news/storylines', token: $token)['storylines'];
+        self::assertCount(1, $list, 'без названия линия не показывается');
+        self::assertSame('Удары по Эр-Рияду', $list[0]['title']);
+        self::assertSame(['РБК' => 2, 'BBC' => 1], $list[0]['sources']);
+        self::assertSame(2, $list[0]['recent'], 'за последние сутки');
+
+        $timeline = $this->api('GET', '/api/news/storylines/'.$line->getId(), token: $token);
+        self::assertSame(['Новость c', 'Новость b', 'Новость a'], array_column($timeline['items'], 'title'));
+        self::assertSame(['id' => $line->getId(), 'title' => 'Удары по Эр-Рияду', 'newsCount' => 3], $timeline['items'][0]['storyline']);
+
+        $this->api('GET', '/api/news/storylines/999999', token: $token);
+        self::assertResponseStatusCodeSame(404);
+    }
+
     public function testUnknownSourceAndBadCursorAreRejected(): void
     {
         $token = $this->login($this->createUser('anna@example.com')->getEmail());

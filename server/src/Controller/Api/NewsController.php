@@ -5,8 +5,10 @@ namespace App\Controller\Api;
 use App\Entity\NewsDigest;
 use App\Entity\NewsItem;
 use App\Entity\NewsSource;
+use App\Entity\NewsStoryline;
 use App\Repository\NewsItemRepository;
 use App\Repository\NewsSourceRepository;
+use App\Repository\NewsStorylineRepository;
 use App\Service\EventTime;
 use App\Service\NewsArticleFetcher;
 use Doctrine\ORM\EntityManagerInterface;
@@ -32,6 +34,7 @@ final class NewsController extends AbstractController
         private readonly NewsItemRepository $items,
         private readonly NewsSourceRepository $sources,
         private readonly EntityManagerInterface $em,
+        private readonly NewsStorylineRepository $storylines,
     ) {
     }
 
@@ -90,6 +93,40 @@ final class NewsController extends AbstractController
             // Полный текст — скачанный со страницы или достаточно длинный из ленты (РБК), а не анонс.
             'fullText' => $item->getContentFetchedAt() !== null || mb_strlen($content) >= NewsArticleFetcher::FULL_TEXT || $item->getSource()->isDigest(),
         ] + (isset($digest[$id]) ? ['digest' => $digest[$id]] : []));
+    }
+
+    /**
+     * Сюжетные линии за последние часы — экран «Сюжеты» на планшете: названные линии, где хотя бы
+     * $minNews новостей, самые оживлённые за сутки первыми; у линии — сколько новостей каждого издания.
+     */
+    #[Route('/storylines', name: 'api_news_storylines', methods: ['GET'])]
+    public function storylines(
+        #[MapQueryParameter] ?int $hours = null,
+        #[MapQueryParameter] ?int $minNews = null,
+    ): JsonResponse {
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $lines = $this->storylines->findForList($now->modify('-'.max(1, min($hours ?? 72, 24 * 30)).' hours'), max(2, $minNews ?? 3), 200);
+        $stats = $this->storylineStats($lines, $now->modify('-24 hours'));
+        $views = array_map(fn (NewsStoryline $l) => $this->storylineView($l, $stats[$l->getId()] ?? ['sources' => [], 'recent' => 0]), $lines);
+        usort($views, static fn (array $a, array $b) => [$b['recent'], $b['newsCount']] <=> [$a['recent'], $a['newsCount']]);
+
+        return $this->json(['storylines' => \array_slice($views, 0, 60)]);
+    }
+
+    /** Линия целиком: описание и все её новости, свежие первыми, — хроника истории. */
+    #[Route('/storylines/{id}', name: 'api_news_storyline', requirements: ['id' => '\\d+'], methods: ['GET'])]
+    public function storyline(int $id): JsonResponse
+    {
+        $line = $this->storylines->find($id);
+        if ($line === null) {
+            return $this->json(['error' => 'Сюжет не найден.'], Response::HTTP_NOT_FOUND);
+        }
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $stats = $this->storylineStats([$line], $now->modify('-24 hours'));
+
+        return $this->json($this->storylineView($line, $stats[$id] ?? ['sources' => [], 'recent' => 0]) + [
+            'items' => array_map(self::itemView(...), $this->items->findByStoryline($line)),
+        ]);
     }
 
     #[Route('/sources', name: 'api_news_sources', methods: ['GET'])]
@@ -178,6 +215,61 @@ final class NewsController extends AbstractController
             'firstSeenAt' => self::time($item->getFirstSeenAt()),
             // Время для подписи и сортировки: публикация, без неё — когда сервер увидел новость.
             'time' => self::time($item->getSortAt()),
+            // Сюжетная линия, если у неё уже есть название, — с экрана чтения можно открыть всю историю.
+            'storyline' => $item->getStoryline()?->getTitle() !== null
+                ? ['id' => $item->getStoryline()->getId(), 'title' => $item->getStoryline()->getTitle(), 'newsCount' => $item->getStoryline()->getNewsCount()]
+                : null,
+        ];
+    }
+
+    /**
+     * Сколько новостей каждого издания в линиях (по названию издания: у изданий «только для сводки»
+     * нет вкладки, где взять название) и сколько из них за последние сутки — одним запросом.
+     *
+     * @param list<NewsStoryline> $lines
+     *
+     * @return array<int, array{sources: array<string, int>, recent: int}>
+     */
+    private function storylineStats(array $lines, \DateTimeImmutable $recentSince): array
+    {
+        if ($lines === []) {
+            return [];
+        }
+        $rows = $this->em->createQuery(
+            'SELECT IDENTITY(n.storyline) AS line, s.title AS source, COUNT(n.id) AS total,
+                SUM(CASE WHEN n.sortAt >= :recent THEN 1 ELSE 0 END) AS recent
+             FROM App\Entity\NewsItem n JOIN n.source s
+             WHERE n.storyline IN (:lines) GROUP BY n.storyline, s.title',
+        )->setParameter('lines', $lines)->setParameter('recent', $recentSince)->getArrayResult();
+        $stats = [];
+        foreach ($rows as $row) {
+            $id = (int) $row['line'];
+            $stats[$id]['sources'][$row['source']] = (int) $row['total'];
+            $stats[$id]['recent'] = ($stats[$id]['recent'] ?? 0) + (int) $row['recent'];
+        }
+
+        return $stats;
+    }
+
+    /**
+     * @param array{sources: array<string, int>, recent: int} $stats
+     *
+     * @return array<string, mixed>
+     */
+    private function storylineView(NewsStoryline $line, array $stats): array
+    {
+        arsort($stats['sources']);
+
+        return [
+            'id' => $line->getId(),
+            'title' => $line->getTitle(),
+            'summary' => $line->getSummary(),
+            'firstSeenAt' => self::time($line->getFirstSeenAt()),
+            'lastSeenAt' => self::time($line->getLastSeenAt()),
+            'newsCount' => $line->getNewsCount(),
+            // Новостей за последние сутки — по ним видно, набирает история обороты или затихает.
+            'recent' => $stats['recent'],
+            'sources' => $stats['sources'],
         ];
     }
 

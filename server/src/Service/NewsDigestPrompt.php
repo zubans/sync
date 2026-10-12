@@ -59,13 +59,20 @@ final class NewsDigestPrompt
         $lines = [];
         foreach ($items as $item) {
             $summary = mb_substr((string) $item->getSummary(), 0, self::SUMMARY_CHARS[$period->period]);
+            // История: новость продолжает сюжетную линию, начавшуюся раньше периода сводки.
+            $line = $item->getStoryline();
+            $history = $line !== null && $line->getTitle() !== null && EventTime::fromDb($line->getFirstSeenAt()) < $period->start
+                ? sprintf(' {сюжет «%s», с %s, новостей %d}', $line->getTitle(),
+                    EventTime::fromDb($line->getFirstSeenAt())->setTimezone($tz)->format('d.m'), $line->getNewsCount())
+                : '';
             $lines[] = sprintf(
-                '[%d] %s, %s — %s%s',
+                '[%d] %s, %s — %s%s%s',
                 $item->getId(),
                 $item->getSource()->getTitle(),
                 EventTime::fromDb($item->getSortAt())->setTimezone($tz)->format('d.m H:i'),
                 $item->getTitle(),
                 $summary !== '' ? '. '.$summary : '',
+                $history,
             );
         }
         $range = $period->start->setTimezone($tz)->format('d.m H:i').'–'.$period->end->setTimezone($tz)->format('d.m H:i');
@@ -76,7 +83,8 @@ final class NewsDigestPrompt
 
         return <<<PROMPT
             Ты — редактор новостной сводки. Ниже новости за $span ($range, время московское) из нескольких изданий.
-            Каждая строка: [id] издание, время — заголовок. Анонс.
+            Каждая строка: [id] издание, время — заголовок. Анонс. В фигурных скобках — сюжетная линия, если история
+            началась раньше: её название, с какого дня она идёт и сколько в ней новостей.
 
             Составь краткую сводку на русском языке:
             - новости об одном событии из разных изданий объедини в один сюжет;
@@ -85,6 +93,7 @@ final class NewsDigestPrompt
             - у сюжета заголовок до 80 символов и суть в 1–3 предложениях, без оценок; новости на других языках (английском, французском, украинском) переведи на русский;
             - у сюжета перечисли id всех новостей, на которых он основан;
             - не добавляй фактов, которых нет в новостях.
+            - если сюжет продолжает историю, начавшуюся раньше, скажи об этом коротко («продолжение», «третий день», «с 10 октября»).
 
             Кроме сюжетов, напиши по тем же новостям одну связную статью — обзор за $span:
             - общий заголовок до 100 символов;

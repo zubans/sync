@@ -44,13 +44,14 @@ final class NewsItemCrudController extends AbstractCrudController
 
     public function configureFilters(Filters $filters): Filters
     {
-        return $filters->add('source')->add('sortAt');
+        return $filters->add('source')->add('storyline')->add('sortAt');
     }
 
     public function configureFields(string $pageName): iterable
     {
         yield DateTimeField::new('sortAt', 'Время (UTC)');
         yield AssociationField::new('source', 'Издание');
+        yield AssociationField::new('storyline', 'Сюжет')->onlyOnDetail();
         yield TextField::new('title', 'Заголовок');
         yield UrlField::new('link', 'Статья')->onlyOnDetail();
         yield TextareaField::new('summary', 'Анонс')->onlyOnDetail();

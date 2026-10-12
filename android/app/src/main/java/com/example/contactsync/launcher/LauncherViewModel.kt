@@ -55,7 +55,9 @@ data class LauncherState(
      * Новости, открытые для чтения на весь экран, стопкой: из сводки можно открыть исходную новость,
      * и «Назад» вернёт к сводке. Пусто — ничего не открыто.
      */
-    val readingStack: List<NewsItem> = emptyList(),
+    val readingStack: List<ReaderPage> = emptyList(),
+    /** Сюжетные линии для вкладки «Сюжеты»; пусто — ещё не загружены или сервер их не строит. */
+    val storylines: List<NewsStoryline> = emptyList(),
     /** Почему новостей нет: не вошли в sync или сервер не ответил; null — всё в порядке. */
     val newsError: String? = null,
     val calendarAllowed: Boolean = false,
@@ -74,7 +76,7 @@ data class LauncherState(
     val offline: Boolean = false,
 ) {
     /** Новость на экране чтения — верхняя в стопке. */
-    val reading: NewsItem? get() = readingStack.lastOrNull()
+    val reading: ReaderPage? get() = readingStack.lastOrNull()
 }
 
 /**
@@ -221,7 +223,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
      * он хранит статьи, скачанные со страниц изданий (`app:news:articles`).
      */
     fun read(item: NewsItem) {
-        _state.update { it.copy(readingStack = it.readingStack + item) }
+        _state.update { it.copy(readingStack = it.readingStack + ReaderPage.News(item)) }
         if (item.digest != null || item.id == 0L) return
         viewModelScope.launch {
             val full = try {
@@ -231,9 +233,33 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             } catch (e: Exception) {
                 item.copy(loaded = true)
             }
-            _state.update { s -> s.copy(readingStack = s.readingStack.map { if (it.id == item.id) full else it }) }
+            replacePage { page -> if (page is ReaderPage.News && page.item.id == item.id) ReaderPage.News(full) else page }
         }
     }
+
+    /** Хроника сюжета на весь экран — из вкладки «Сюжеты» или со ссылки «Сюжет: …» на экране новости. */
+    fun openStoryline(line: NewsStoryline) {
+        _state.update { it.copy(readingStack = it.readingStack + ReaderPage.Story(line)) }
+        viewModelScope.launch {
+            val loaded = try {
+                val dto = syncApi.storyline(line.id)
+                ReaderPage.Story(NewsFeed.storyline(dto), dto.items.map(NewsFeed::item), loaded = true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ReaderPage.Story(line, loaded = true)
+            }
+            replacePage { page -> if (page is ReaderPage.Story && page.line.id == line.id) loaded else page }
+        }
+    }
+
+    /** Ссылка «Сюжет: …» на экране новости: о линии известны только id, название и число новостей. */
+    fun openStoryline(ref: StorylineRef) = openStoryline(
+        NewsStoryline(ref.id, ref.title, "", Instant.now(), Instant.now(), ref.newsCount, 0, emptyList()),
+    )
+
+    private fun replacePage(transform: (ReaderPage) -> ReaderPage) =
+        _state.update { s -> s.copy(readingStack = s.readingStack.map(transform)) }
 
     /** «Назад» на экране чтения: к предыдущей открытой новости, а с первой — на главный экран. */
     fun closeReading() = _state.update { it.copy(readingStack = it.readingStack.dropLast(1)) }
@@ -301,6 +327,13 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         val code = _state.value.newsSource
         try {
             val sources = syncApi.newsSources().map(NewsFeed::source)
+            if (code == NewsFeed.STORYLINES) {
+                // «Сюжеты» — не издание: вместо ленты список сюжетных линий.
+                val lines = syncApi.storylines().map(NewsFeed::storyline).filter { it.title.isNotEmpty() }
+                newsAt = System.currentTimeMillis()
+                _state.update { s -> s.copy(newsSources = sources, storylines = lines, newsError = null) }
+                return
+            }
             val page = newsPage(code, before = null)
             newsCache[code] = page
             // Время — после ответа: прерванное уходом с экрана обновление повторится при возврате.

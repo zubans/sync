@@ -23,7 +23,32 @@ data class NewsItemDto(
     val content: List<String> = emptyList(),
     /** Текст полный, а не анонс (у закрытых сайтов, как NYT, — false). */
     val fullText: Boolean = false,
+    /** Сюжетная линия новости, если у неё уже есть название. */
+    val storyline: StorylineRefDto? = null,
 )
+
+@Serializable
+data class StorylineRefDto(val id: Long, val title: String, val newsCount: Int = 0)
+
+/** Сюжетная линия: одна история во времени из новостей разных изданий (`GET /api/news/storylines`). */
+@Serializable
+data class StorylineDto(
+    val id: Long,
+    val title: String? = null,
+    val summary: String? = null,
+    val firstSeenAt: String,
+    val lastSeenAt: String,
+    val newsCount: Int = 0,
+    /** Новостей за последние сутки. */
+    val recent: Int = 0,
+    /** Сколько новостей каждого издания: название → число. */
+    val sources: Map<String, Int> = emptyMap(),
+    /** Только в `GET /api/news/storylines/{id}`: новости линии, свежие первыми. */
+    val items: List<NewsItemDto> = emptyList(),
+)
+
+@Serializable
+data class StorylinesResponse(val storylines: List<StorylineDto>)
 
 @Serializable
 data class NewsDigestDto(

@@ -672,6 +672,7 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
         NewsTabs(state, vm, Arrangement.spacedBy(8.dp))
         Spacer(Modifier.height(8.dp))
         when {
+            state.newsSource == NewsFeed.STORYLINES -> StorylineRows(state, vm)
             items.isNotEmpty() -> LazyColumn {
                 items(items, key = { it.id }) { item ->
                     Column(
@@ -697,6 +698,31 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
     }
 }
 
+/** Сюжеты в карточке: название и «3-й день · 45 новостей · 12 за сутки»; нажатие — хроника на весь экран. */
+@Composable
+private fun StorylineRows(state: LauncherState, vm: LauncherViewModel) {
+    val now = Instant.now()
+    val zone = ZoneId.systemDefault()
+    if (state.storylines.isEmpty()) {
+        Text(state.newsError ?: "Сюжетов пока нет", color = TextMuted, fontSize = 16.sp)
+        return
+    }
+    LazyColumn {
+        items(state.storylines, key = { it.id }) { line ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { vm.openStoryline(line) }
+                    .padding(horizontal = 4.dp, vertical = 8.dp),
+            ) {
+                Text(line.title, color = TextMain, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(NewsFeed.storylineCaption(line, now, zone), color = TextMuted, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
 /** Вкладки изданий — список с сервера; «Все» — все издания вместе. */
 @Composable
 internal fun NewsTabs(state: LauncherState, vm: LauncherViewModel, arrangement: Arrangement.Horizontal) {
@@ -704,6 +730,10 @@ internal fun NewsTabs(state: LauncherState, vm: LauncherViewModel, arrangement: 
         NewsChip("Все", state.newsSource == null, failed = false) { vm.selectNewsSource(null) }
         NewsFeed.tabs(state.newsSources).forEach { source ->
             NewsChip(source.title, state.newsSource == source.code, failed = source.stale) { vm.selectNewsSource(source.code) }
+            // «Сюжеты» — сразу после сводки: это тоже взгляд на все издания сразу, только во времени.
+            if (source.code == NewsFeed.DIGEST) {
+                NewsChip("Сюжеты", state.newsSource == NewsFeed.STORYLINES, failed = false) { vm.selectNewsSource(NewsFeed.STORYLINES) }
+            }
         }
     }
 }

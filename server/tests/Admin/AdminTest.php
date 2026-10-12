@@ -72,7 +72,7 @@ final class AdminTest extends DatabaseWebTestCase
 
         $this->client->loginUser($this->createUser('admin@example.com', admin: true));
 
-        foreach (['/admin', '/admin/user', '/admin/family', '/admin/device', '/admin/google-account', '/admin/installed-app', '/admin/vault', '/admin/calendar', '/admin/calendar-event', '/admin/news-source', '/admin/news-item'] as $url) {
+        foreach (['/admin', '/admin/user', '/admin/family', '/admin/device', '/admin/google-account', '/admin/installed-app', '/admin/vault', '/admin/calendar', '/admin/calendar-event', '/admin/news-source', '/admin/news-item', '/admin/news-storyline'] as $url) {
             $this->client->request('GET', $url);
             self::assertResponseIsSuccessful($url);
         }
