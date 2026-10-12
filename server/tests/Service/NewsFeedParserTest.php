@@ -87,6 +87,18 @@ final class NewsFeedParserTest extends TestCase
         self::assertSame('Газета', (new NewsFeedParser())->rss($xml)[0]->title);
     }
 
+    public function testRdfFeedTakesTimeFromDcDate(): void
+    {
+        $xml = '<?xml version="1.0" encoding="utf-8"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            .'<channel rdf:about="https://asahi.example/"><title>朝日</title></channel>'
+            .'<item rdf:about="https://asahi.example/1"><title>九州新幹線が運転見合わせ</title><link>https://asahi.example/1</link><dc:date>2026-10-12T23:33:00+09:00</dc:date></item></rdf:RDF>';
+
+        $entry = (new NewsFeedParser())->rss($xml)[0];
+
+        self::assertSame('九州新幹線が運転見合わせ', $entry->title);
+        self::assertSame('2026-10-12T14:33:00+00:00', $entry->publishedAt?->format('c'));
+    }
+
     public function testCnnLiteGivesAbsoluteLinksWithoutTime(): void
     {
         $html = <<<'HTML'

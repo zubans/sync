@@ -70,7 +70,8 @@ final class NewsFeedParser
                 title: $title,
                 summary: $summary !== '' ? mb_substr($summary, 0, self::SUMMARY_LIMIT) : null,
                 content: $content !== '' ? $content : null,
-                publishedAt: self::date(self::child($item, 'pubDate')),
+                // RSS 1.0 (RDF, «Асахи») — время в dc:date.
+                publishedAt: self::date(self::child($item, 'pubDate') ?? self::childAnyNs($item, 'date')),
             );
             if (\count($entries) >= self::LIMIT) {
                 break;
