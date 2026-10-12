@@ -63,7 +63,7 @@ internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
         exit = fadeOut(tween(250)) + slideOutVertically(tween(250)) { it / 12 },
     ) {
         val item = shown ?: return@AnimatedVisibility
-        BackHandler { vm.read(null) }
+        BackHandler { vm.closeReading() }
         val digest = item.digest
         Box(
             Modifier
@@ -90,7 +90,7 @@ internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
                     if (digest != null) DigestFormatToggle(state, vm)
                     Spacer(Modifier.size(12.dp))
                     Box(
-                        Modifier.size(52.dp).clip(CircleShape).background(CardRaised).clickable { vm.read(null) },
+                        Modifier.size(52.dp).clip(CircleShape).background(CardRaised).clickable { vm.closeReading() },
                         contentAlignment = Alignment.Center,
                     ) {
                         Text("✕", color = TextMain, fontSize = 22.sp)
@@ -103,9 +103,9 @@ internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
                 }
                 val article = digest.article
                 if (state.digestFormat == DigestFormat.ARTICLE && article != null) {
-                    ArticleText(article, digest.sources, state)
+                    ArticleText(article, digest.sources, state, vm)
                 } else {
-                    StoriesText(item, digest, state, note = if (state.digestFormat == DigestFormat.ARTICLE) "У этой сводки нет статьи — показаны сюжеты" else null)
+                    StoriesText(item, digest, state, vm, note = if (state.digestFormat == DigestFormat.ARTICLE) "У этой сводки нет статьи — показаны сюжеты" else null)
                 }
             }
         }
@@ -119,7 +119,7 @@ internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
 @Composable
 private fun NewsText(item: NewsItem, state: LauncherState) {
     val context = LocalContext.current
-    val source = state.newsSources.firstOrNull { it.code == item.source }?.title ?: item.source
+    val source = item.sourceTitle ?: state.newsSources.firstOrNull { it.code == item.source }?.title ?: item.source
     LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
         item {
             Text(
@@ -167,7 +167,7 @@ internal fun DigestFormatToggle(state: LauncherState, vm: LauncherViewModel) {
 }
 
 @Composable
-private fun ArticleText(article: NewsArticle, sources: List<NewsStorySource>, state: LauncherState) {
+private fun ArticleText(article: NewsArticle, sources: List<NewsStorySource>, state: LauncherState, vm: LauncherViewModel) {
     val context = LocalContext.current
     LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
         item {
@@ -185,7 +185,7 @@ private fun ArticleText(article: NewsArticle, sources: List<NewsStorySource>, st
                     Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .clickable { context.openUrl(source.link) }
+                        .clickable { openSource(source, vm, context) }
                         .padding(vertical = 6.dp),
                 ) {
                     Text(sourceTitle(source, state), color = Accent, fontSize = 15.sp, modifier = Modifier.widthIn(min = 80.dp))
@@ -197,7 +197,7 @@ private fun ArticleText(article: NewsArticle, sources: List<NewsStorySource>, st
 }
 
 @Composable
-private fun StoriesText(item: NewsItem, digest: NewsDigest, state: LauncherState, note: String?) {
+private fun StoriesText(item: NewsItem, digest: NewsDigest, state: LauncherState, vm: LauncherViewModel, note: String?) {
     val context = LocalContext.current
     LazyColumn(verticalArrangement = Arrangement.spacedBy(22.dp)) {
         item {
@@ -220,7 +220,7 @@ private fun StoriesText(item: NewsItem, digest: NewsDigest, state: LauncherState
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(CardRaised)
-                                    .clickable { context.openUrl(source.link) }
+                                    .clickable { openSource(source, vm, context) }
                                     .padding(horizontal = 12.dp, vertical = 6.dp),
                             )
                         }
@@ -232,4 +232,9 @@ private fun StoriesText(item: NewsItem, digest: NewsDigest, state: LauncherState
 }
 
 private fun sourceTitle(source: NewsStorySource, state: LauncherState): String =
-    state.newsSources.firstOrNull { it.code == source.source }?.title ?: source.source
+    source.sourceTitle ?: state.newsSources.firstOrNull { it.code == source.source }?.title ?: source.source
+
+/** Исходная новость сюжета — с сервера, поверх сводки; у старых ответов без id — на сайте издания. */
+private fun openSource(source: NewsStorySource, vm: LauncherViewModel, context: android.content.Context) {
+    if (source.id != 0L) vm.read(source.toItem(Instant.now())) else context.openUrl(source.link)
+}

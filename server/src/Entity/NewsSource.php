@@ -20,10 +20,12 @@ class NewsSource
     /** Текстовая версия CNN (lite.cnn.com): RSS CNN не обновляется с 2023 года. */
     public const FORMAT_CNN_LITE = 'cnn_lite';
 
+    /** Новостная карта сайта (Google News sitemap) — у изданий без RSS, как The Times. */
+    public const FORMAT_NEWS_SITEMAP = 'news_sitemap';
     /** Сводка: не скачивается, а пишется моделью по новостям остальных изданий (`app:news:digest`). */
     public const FORMAT_DIGEST = 'digest';
 
-    public const FORMATS = [self::FORMAT_RSS, self::FORMAT_CNN_LITE, self::FORMAT_DIGEST];
+    public const FORMATS = [self::FORMAT_RSS, self::FORMAT_CNN_LITE, self::FORMAT_NEWS_SITEMAP, self::FORMAT_DIGEST];
 
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -38,6 +40,10 @@ class NewsSource
     #[ORM\Column(length: 100)]
     private string $title;
 
+    /**
+     * Адрес ленты; у изданий без общей ленты (Газета.Ru) — несколько разделов через пробел.
+     * Часть после # — фильтр ссылок для карт сайта (BBC: #/news/articles/), на сайт она не уходит.
+     */
     #[ORM\Column(length: 500)]
     private string $url;
 
@@ -46,6 +52,10 @@ class NewsSource
 
     #[ORM\Column]
     private bool $enabled = true;
+
+    /** Показывать во вкладках и во «Все»; выключено — издание идёт только в сводку (Le Monde, «Українська правда»). */
+    #[ORM\Column(options: ['default' => true])]
+    private bool $showInWidget = true;
 
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $lastAttemptAt = null;
@@ -117,6 +127,24 @@ class NewsSource
     public function setTitle(string $title): static
     {
         $this->title = $title;
+
+        return $this;
+    }
+
+    /** @return list<string> адреса лент издания */
+    public function getUrls(): array
+    {
+        return array_values(array_filter(preg_split('/\s+/', trim($this->url)) ?: []));
+    }
+
+    public function isShowInWidget(): bool
+    {
+        return $this->showInWidget;
+    }
+
+    public function setShowInWidget(bool $showInWidget): static
+    {
+        $this->showInWidget = $showInWidget;
 
         return $this;
     }

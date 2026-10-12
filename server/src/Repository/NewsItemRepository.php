@@ -105,8 +105,9 @@ class NewsItemRepository extends ServiceEntityRepository
         if ($sources !== []) {
             $qb->andWhere('n.source IN (:sources)')->setParameter('sources', $sources);
         } else {
-            // «Все» — новости изданий; сводки пересказывают их же и живут на своей вкладке.
-            $qb->andWhere('s.format <> :digest')->setParameter('digest', NewsSource::FORMAT_DIGEST);
+            // «Все» — новости изданий из вкладок; сводки пересказывают их же и живут на своей вкладке,
+            // а издания «только для сводки» в виджете не показываются.
+            $qb->andWhere('s.format <> :digest AND s.showInWidget = true')->setParameter('digest', NewsSource::FORMAT_DIGEST);
         }
         if ($beforeAt !== null && $beforeId !== null) {
             $qb->andWhere('n.sortAt < :at OR (n.sortAt = :at AND n.id < :id)')

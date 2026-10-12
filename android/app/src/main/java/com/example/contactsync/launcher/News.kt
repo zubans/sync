@@ -36,6 +36,7 @@ data class NewsItem(
     val content: List<String> = emptyList(),
     /** Текст загружен с сервера: [content] — полный текст, а если пусто — у издания есть только анонс. */
     val loaded: Boolean = false,
+    val sourceTitle: String? = null,
 )
 
 /** Сводка новостей за час или за сутки — её пишет сервер (`app:news:digest`). */
@@ -60,8 +61,17 @@ enum class DigestFormat { STORIES, ARTICLE }
 
 data class NewsStory(val title: String, val text: String, val sources: List<NewsStorySource>)
 
-/** Исходная новость сюжета: код издания, заголовок и адрес статьи. */
-data class NewsStorySource(val source: String, val title: String, val link: String)
+/** Исходная новость сюжета: код и название издания, заголовок, адрес статьи и id новости на сервере. */
+data class NewsStorySource(
+    val source: String,
+    val title: String,
+    val link: String,
+    val id: Long = 0,
+    val sourceTitle: String? = null,
+) {
+    /** Новость для экрана чтения: полный текст и время экран догрузит с сервера по id. */
+    fun toItem(now: java.time.Instant) = NewsItem(id = id, source = source, title = title, link = link, summary = "", time = now)
+}
 
 /** Новости одной вкладки и курсор следующей страницы; null — дальше новостей нет. */
 data class NewsPage(val items: List<NewsItem>, val nextCursor: String?)
@@ -78,6 +88,7 @@ object NewsFeed {
         time = OffsetDateTime.parse(dto.time).toInstant(),
         digest = dto.digest?.let(::digest),
         content = if (dto.fullText) dto.content else emptyList(),
+        sourceTitle = dto.sourceTitle,
     )
 
     private fun digest(dto: NewsDigestDto) = NewsDigest(
@@ -86,7 +97,7 @@ object NewsFeed {
         end = OffsetDateTime.parse(dto.end).toInstant(),
         newsCount = dto.newsCount,
         stories = dto.stories.map { story ->
-            NewsStory(story.title, story.text, story.sources.map { NewsStorySource(it.source, it.title, it.link) })
+            NewsStory(story.title, story.text, story.sources.map { NewsStorySource(it.source, it.title, it.link, it.id, it.sourceTitle) })
         },
         article = dto.article?.let { article ->
             NewsArticle(article.title, article.text.split(Regex("\\n\\s*\\n")).map { it.trim() }.filter { it.isNotEmpty() })
@@ -114,7 +125,7 @@ object NewsFeed {
 
     /** Подпись под заголовком: «РБК · 23:08», за прошлые дни — «NYT · 9 окт., 21:00». */
     fun caption(item: NewsItem, sources: List<NewsSource>, now: Instant, zone: ZoneId): String {
-        val title = sources.firstOrNull { it.code == item.source }?.title ?: item.source
+        val title = sources.firstOrNull { it.code == item.source }?.title ?: item.sourceTitle ?: item.source
         val local = item.time.atZone(zone)
         val time = if (local.toLocalDate() == now.atZone(zone).toLocalDate()) local.format(TIME) else local.format(DAY_TIME)
         return "$title · $time"

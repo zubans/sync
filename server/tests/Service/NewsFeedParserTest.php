@@ -62,6 +62,31 @@ final class NewsFeedParserTest extends TestCase
         (new NewsFeedParser())->rss('<html>не лента');
     }
 
+    public function testNewsSitemapIsFilteredAndSortedByTime(): void
+    {
+        $xml = <<<'XML'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+            <url><loc>https://bbc.example/news/articles/old</loc><news:news><news:publication_date>2026-10-12T05:00:00Z</news:publication_date><news:title>Old &amp; gold</news:title></news:news></url>
+            <url><loc>https://bbc.example/serbian/articles/x</loc><news:news><news:publication_date>2026-10-12T07:00:00Z</news:publication_date><news:title>Сербская</news:title></news:news></url>
+            <url><loc>https://bbc.example/news/articles/new</loc><news:news><news:publication_date>2026-10-12T06:00:00+01:00</news:publication_date><news:title>New</news:title></news:news></url>
+            </urlset>
+            XML;
+
+        $entries = (new NewsFeedParser())->parse(NewsSource::FORMAT_NEWS_SITEMAP, $xml, '/news/articles/');
+
+        self::assertSame(['Old & gold', 'New'], array_map(static fn ($e) => $e->title, $entries), 'по убыванию времени, 05:00Z позже 05:00+01:00');
+        self::assertSame('2026-10-12T05:00:00+00:00', $entries[1]->publishedAt?->format(\DATE_ATOM));
+        self::assertCount(3, (new NewsFeedParser())->parse(NewsSource::FORMAT_NEWS_SITEMAP, $xml), 'без фильтра — все');
+    }
+
+    public function testRssInWindows1251IsDecoded(): void
+    {
+        $xml = mb_convert_encoding('<?xml version="1.0" encoding="windows-1251"?><rss><channel><item><title>Газета</title><link>https://g.example/1</link></item></channel></rss>', 'Windows-1251', 'UTF-8');
+
+        self::assertSame('Газета', (new NewsFeedParser())->rss($xml)[0]->title);
+    }
+
     public function testCnnLiteGivesAbsoluteLinksWithoutTime(): void
     {
         $html = <<<'HTML'

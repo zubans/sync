@@ -22,6 +22,12 @@ class NewsSourceRepository extends ServiceEntityRepository
         return $this->findBy(['enabled' => true], ['id' => 'ASC']);
     }
 
+    /** @return list<NewsSource> вкладки виджета: включённые издания, кроме тех, что идут только в сводку */
+    public function findVisible(): array
+    {
+        return $this->findBy(['enabled' => true, 'showInWidget' => true], ['id' => 'ASC']);
+    }
+
     /** @return list<NewsSource> включённые издания с лентой — без сводки, её не скачивают */
     public function findCollectable(): array
     {

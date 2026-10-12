@@ -10,6 +10,8 @@ data class NewsFeedResponse(val items: List<NewsItemDto>, val nextCursor: String
 data class NewsItemDto(
     val id: Long,
     val source: String,
+    /** Название издания — у изданий «только для сводки» вкладки нет. */
+    val sourceTitle: String? = null,
     val title: String,
     val link: String,
     val summary: String? = null,
@@ -42,7 +44,15 @@ data class NewsArticleDto(val title: String, val text: String)
 data class NewsStoryDto(val title: String, val text: String = "", val sources: List<NewsStorySourceDto> = emptyList())
 
 @Serializable
-data class NewsStorySourceDto(val source: String, val title: String, val link: String)
+data class NewsStorySourceDto(
+    val source: String,
+    val title: String,
+    val link: String,
+    /** id исходной новости — открыть её с сервера; 0 — у старых ответов сервера. */
+    val id: Long = 0,
+    /** Название издания: у изданий «только для сводки» вкладки нет, и взять его больше негде. */
+    val sourceTitle: String? = null,
+)
 
 @Serializable
 data class NewsSourcesResponse(val sources: List<NewsSourceDto>)

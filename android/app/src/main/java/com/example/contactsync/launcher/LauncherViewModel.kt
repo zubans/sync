@@ -51,8 +51,11 @@ data class LauncherState(
     val newsSource: String? = null,
     /** Формат сводки: сюжеты или одна статья. */
     val digestFormat: DigestFormat = DigestFormat.STORIES,
-    /** Сводка, открытая для чтения на весь экран; null — не открыта. */
-    val reading: NewsItem? = null,
+    /**
+     * Новости, открытые для чтения на весь экран, стопкой: из сводки можно открыть исходную новость,
+     * и «Назад» вернёт к сводке. Пусто — ничего не открыто.
+     */
+    val readingStack: List<NewsItem> = emptyList(),
     /** Почему новостей нет: не вошли в sync или сервер не ответил; null — всё в порядке. */
     val newsError: String? = null,
     val calendarAllowed: Boolean = false,
@@ -69,7 +72,10 @@ data class LauncherState(
     val vpnWanted: Boolean? = null,
     /** Последняя ошибка сети — показываем мелко, данные на экране остаются прежними. */
     val offline: Boolean = false,
-)
+) {
+    /** Новость на экране чтения — верхняя в стопке. */
+    val reading: NewsItem? get() = readingStack.lastOrNull()
+}
 
 /**
  * Главный экран обновляет данные, только пока он на экране: котировки раз в минуту,
@@ -214,9 +220,9 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
      * Новость на весь экран — нажатие на неё в карточке или в списке. Полный текст берётся с сервера:
      * он хранит статьи, скачанные со страниц изданий (`app:news:articles`).
      */
-    fun read(item: NewsItem?) {
-        _state.update { it.copy(reading = item) }
-        if (item == null || item.digest != null) return
+    fun read(item: NewsItem) {
+        _state.update { it.copy(readingStack = it.readingStack + item) }
+        if (item.digest != null || item.id == 0L) return
         viewModelScope.launch {
             val full = try {
                 NewsFeed.item(syncApi.newsItem(item.id)).copy(loaded = true)
@@ -225,9 +231,12 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             } catch (e: Exception) {
                 item.copy(loaded = true)
             }
-            _state.update { s -> if (s.reading?.id == item.id) s.copy(reading = full) else s }
+            _state.update { s -> s.copy(readingStack = s.readingStack.map { if (it.id == item.id) full else it }) }
         }
     }
+
+    /** «Назад» на экране чтения: к предыдущей открытой новости, а с первой — на главный экран. */
+    fun closeReading() = _state.update { it.copy(readingStack = it.readingStack.dropLast(1)) }
 
     /** Следующая страница вкладки — когда подробный экран долистали до конца. */
     fun loadMoreNews() {

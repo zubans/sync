@@ -82,12 +82,27 @@ final class NewsApiTest extends DatabaseWebTestCase
         self::assertSame('2026-10-11T13:00:00+00:00', $digests[0]['digest']['start']);
         self::assertSame(['title' => 'Статья', 'text' => "А.\n\nБ."], $digests[0]['digest']['article']);
         self::assertSame(
-            [['source' => 'rbc', 'title' => 'Новость a', 'link' => 'https://example.com/a']],
+            [['id' => $news->getId(), 'source' => 'rbc', 'sourceTitle' => 'РБК', 'title' => 'Новость a', 'link' => 'https://example.com/a']],
             $digests[0]['digest']['stories'][0]['sources'],
         );
 
         $sources = $this->api('GET', '/api/news/sources', token: $token)['sources'];
         self::assertSame([false, true], array_column($sources, 'stale'), 'сводка с ошибкой последней попытки помечена сразу');
+    }
+
+    public function testDigestOnlySourcesStayOutOfWidget(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $rbc = new NewsSource('rbc', 'РБК', 'https://rbc.example/feed');
+        $lemonde = (new NewsSource('lemonde', 'Le Monde', 'https://lemonde.example/feed'))->setShowInWidget(false);
+        $this->em->persist($rbc);
+        $this->em->persist($lemonde);
+        $this->item($rbc, 'a', '2026-10-11 07:00:00');
+        $this->item($lemonde, 'b', '2026-10-11 08:00:00');
+        $this->em->flush();
+
+        self::assertSame(['rbc'], array_column($this->api('GET', '/api/news/sources', token: $token)['sources'], 'code'));
+        self::assertSame(['Новость a'], array_column($this->api('GET', '/api/news', token: $token)['items'], 'title'));
     }
 
     public function testUnknownSourceAndBadCursorAreRejected(): void

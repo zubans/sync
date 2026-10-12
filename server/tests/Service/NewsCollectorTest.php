@@ -110,6 +110,30 @@ final class NewsCollectorTest extends DatabaseWebTestCase
         self::assertNotNull($broken->getLastAttemptAt());
     }
 
+    public function testSourceWithSeveralFeedsCollectsAllOfThem(): void
+    {
+        $source = new NewsSource('gazeta', 'Газета', "https://g.example/politics.xml https://g.example/business.xml");
+        $this->em->persist($source);
+        $this->em->flush();
+        $second = str_replace(['<guid>a</guid>', '<guid>b</guid>', '/a<', '/b<'], ['<guid>c</guid>', '<guid>d</guid>', '/c<', '/d<'], \sprintf(self::FEED, 'Третья'));
+        $urls = [];
+        $collector = new NewsCollector(
+            new MockHttpClient(static function (string $method, string $url) use (&$urls, $second) {
+                $urls[] = $url;
+
+                return new MockResponse(str_contains($url, 'politics') ? \sprintf(self::FEED, 'Первая') : $second, ['response_headers' => ['ETag' => '"x"']]);
+            }),
+            $this->em,
+            static::getContainer()->get(NewsSourceRepository::class),
+            static::getContainer()->get(NewsItemRepository::class),
+            new NewsFeedParser(),
+        );
+
+        self::assertSame(['new' => 4, 'updated' => 0, 'error' => null], $collector->collect($source));
+        self::assertSame(['https://g.example/politics.xml', 'https://g.example/business.xml'], $urls);
+        self::assertNull($source->getEtag(), 'у издания из нескольких лент кэш-заголовки не ведутся');
+    }
+
     public function testDisabledSourceAndDigestAreNotCollected(): void
     {
         $this->source()->setEnabled(false);

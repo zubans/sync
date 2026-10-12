@@ -46,32 +46,46 @@ final class NewsCollector
         // В базе время хранится в UTC без пояса, как у событий календаря (см. EventTime).
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         try {
-            $headers = ['User-Agent' => self::USER_AGENT];
-            if ($source->getEtag() !== null) {
-                $headers['If-None-Match'] = $source->getEtag();
-            }
-            if ($source->getLastModified() !== null) {
-                $headers['If-Modified-Since'] = $source->getLastModified();
-            }
-            $response = $this->http->request('GET', $source->getUrl(), [
-                'headers' => $headers,
-                'timeout' => 20,
-                'max_duration' => 40,
-            ]);
-            $status = $response->getStatusCode();
-            if ($status === 304) {
-                $source->markSuccess($now, $source->getEtag(), $source->getLastModified());
-                $this->em->flush();
+            // У издания из нескольких лент (Газета.Ru — разделы) кэш-заголовки не ведём: они одни на издание.
+            $urls = $source->getUrls();
+            $single = \count($urls) === 1;
+            $entries = [];
+            $etag = $lastModified = null;
+            foreach ($urls as $url) {
+                $headers = ['User-Agent' => self::USER_AGENT];
+                if ($single && $source->getEtag() !== null) {
+                    $headers['If-None-Match'] = $source->getEtag();
+                }
+                if ($single && $source->getLastModified() !== null) {
+                    $headers['If-Modified-Since'] = $source->getLastModified();
+                }
+                // Часть после # — фильтр ссылок (см. NewsFeedParser::parse), на сайт она не уходит.
+                $filter = parse_url($url, \PHP_URL_FRAGMENT) ?: null;
+                $url = explode('#', $url, 2)[0];
+                $response = $this->http->request('GET', $url, [
+                    'headers' => $headers,
+                    'timeout' => 20,
+                    'max_duration' => 40,
+                ]);
+                $status = $response->getStatusCode();
+                if ($status === 304) {
+                    $source->markSuccess($now, $source->getEtag(), $source->getLastModified());
+                    $this->em->flush();
 
-                return ['new' => 0, 'updated' => 0, 'error' => null];
+                    return ['new' => 0, 'updated' => 0, 'error' => null];
+                }
+                if ($status !== 200) {
+                    throw new \RuntimeException("HTTP $status".($single ? '' : " ($url)"));
+                }
+                array_push($entries, ...$this->parser->parse($source->getFormat(), $response->getContent(), $filter));
+                if ($single) {
+                    $responseHeaders = $response->getHeaders();
+                    $etag = $responseHeaders['etag'][0] ?? null;
+                    $lastModified = $responseHeaders['last-modified'][0] ?? null;
+                }
             }
-            if ($status !== 200) {
-                throw new \RuntimeException("HTTP $status");
-            }
-            $entries = $this->parser->parse($source->getFormat(), $response->getContent());
-            $responseHeaders = $response->getHeaders();
             [$new, $updated] = $this->save($source, $entries, $now);
-            $source->markSuccess($now, $responseHeaders['etag'][0] ?? null, $responseHeaders['last-modified'][0] ?? null);
+            $source->markSuccess($now, $etag, $lastModified);
             $this->em->flush();
 
             return ['new' => $new, 'updated' => $updated, 'error' => null];

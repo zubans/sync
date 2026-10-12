@@ -12,7 +12,6 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\ChoiceField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\DateTimeField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextareaField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
-use EasyCorp\Bundle\EasyAdminBundle\Field\UrlField;
 
 /**
  * Издания для сбора новостей: новое RSS-издание добавляется здесь без правки кода.
@@ -49,13 +48,16 @@ final class NewsSourceCrudController extends AbstractCrudController
     {
         yield TextField::new('title', 'Название');
         yield TextField::new('code', 'Код в API')->setHelp('Латиницей: rg, rbc, cnn…');
-        yield UrlField::new('url', 'Лента');
+        yield TextField::new('url', 'Лента')->setHelp('Несколько лент одного издания — через пробел');
         yield ChoiceField::new('format', 'Формат')->setChoices([
             'RSS' => NewsSource::FORMAT_RSS,
             'CNN Lite' => NewsSource::FORMAT_CNN_LITE,
+            'Новостная карта сайта' => NewsSource::FORMAT_NEWS_SITEMAP,
             'Сводка (пишет модель)' => NewsSource::FORMAT_DIGEST,
         ]);
         yield BooleanField::new('enabled', 'Собирать')->renderAsSwitch(false);
+        yield BooleanField::new('showInWidget', 'В виджете')->renderAsSwitch(false)
+            ->setHelp('Выключено — новости идут только в сводку, вкладки у издания нет');
         yield DateTimeField::new('lastSuccessAt', 'Последний сбор (UTC)')->hideOnForm();
         yield TextareaField::new('lastError', 'Ошибка')->hideOnForm();
     }

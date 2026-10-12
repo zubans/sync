@@ -44,6 +44,20 @@ final class NewsArticleTest extends DatabaseWebTestCase
         self::assertSame([], NewsArticleExtractor::extract('<html><body><p>Коротко.</p></body></html>'), 'анонс — не статья');
     }
 
+    public function testExtractorFindsArticleWhenEachParagraphHasItsOwnWrappers(): void
+    {
+        // Как у BBC: каждый абзац в нескольких своих обёртках, общий у них только <article>.
+        $block = static fn (string $text) => "<div><div><div><div><p>$text</p></div></div></div></div>";
+        $article = implode('', array_map(static fn (int $n) => $block(str_repeat("Абзац статьи номер $n. ", 8)), range(1, 6)));
+        $html = '<html><body><div><div><p>'.str_repeat('Абзац рекламы рядом со статьёй. ', 6).'</p></div></div>'
+            ."<article>$article</article></body></html>";
+
+        $paragraphs = NewsArticleExtractor::extract($html);
+
+        self::assertCount(6, $paragraphs);
+        self::assertStringStartsWith('Абзац статьи номер 1.', $paragraphs[0]);
+    }
+
     public function testLeadFromFeedGoesFirstWhenPageLacksIt(): void
     {
         self::assertSame(['Анонс из ленты.', 'Текст.'], NewsArticleFetcher::withLead(['Текст.'], 'Анонс из ленты.'));

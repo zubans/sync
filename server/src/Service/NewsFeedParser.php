@@ -21,11 +21,16 @@ final class NewsFeedParser
      *
      * @throws \InvalidArgumentException лента не разбирается
      */
-    public function parse(string $format, string $body): array
+    /**
+     * @param string|null $filter только ссылки, содержащие эту строку (часть адреса ленты после #) — для карт сайта,
+     *                            где вперемешку разделы и языки, как у BBC
+     */
+    public function parse(string $format, string $body, ?string $filter = null): array
     {
         return match ($format) {
             NewsSource::FORMAT_RSS => $this->rss($body),
             NewsSource::FORMAT_CNN_LITE => $this->cnnLite($body),
+            NewsSource::FORMAT_NEWS_SITEMAP => $this->newsSitemap($body, $filter),
             default => throw new \InvalidArgumentException("Неизвестный формат ленты: $format"),
         };
     }
@@ -76,6 +81,51 @@ final class NewsFeedParser
     }
 
     /**
+     * Новостная карта сайта: `<url><loc>` с `<news:title>` и `<news:publication_date>`. Анонса в ней нет.
+     * Порядок в карте произвольный (у BBC — вперемешку), поэтому записи сортируются по времени.
+     *
+     * @return list<NewsEntry>
+     */
+    public function newsSitemap(string $xml, ?string $filter = null): array
+    {
+        $doc = new \DOMDocument();
+        $previous = libxml_use_internal_errors(true);
+        try {
+            $loaded = $doc->loadXML($xml, LIBXML_NONET | LIBXML_COMPACT);
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($previous);
+        }
+        if (!$loaded || $doc->doctype !== null) {
+            throw new \InvalidArgumentException('Карта сайта не разбирается как XML');
+        }
+        $entries = [];
+        foreach ($doc->getElementsByTagNameNS('*', 'url') as $url) {
+            $link = trim((string) self::childAnyNs($url, 'loc', true));
+            $news = null;
+            foreach ($url->childNodes as $node) {
+                if ($node instanceof \DOMElement && $node->localName === 'news') {
+                    $news = $node;
+                }
+            }
+            $title = $news !== null ? self::clean(self::childAnyNs($news, 'title', true)) : '';
+            if ($link === '' || $title === '' || ($filter !== null && $filter !== '' && !str_contains($link, $filter))) {
+                continue;
+            }
+            $date = $news !== null ? trim((string) self::childAnyNs($news, 'publication_date', true)) : '';
+            try {
+                $published = $date !== '' ? (new \DateTimeImmutable($date))->setTimezone(new \DateTimeZone('UTC')) : null;
+            } catch (\Exception) {
+                $published = null;
+            }
+            $entries[] = new NewsEntry(key: $link, link: $link, title: $title, publishedAt: $published);
+        }
+        usort($entries, static fn (NewsEntry $a, NewsEntry $b) => $b->publishedAt <=> $a->publishedAt);
+
+        return \array_slice($entries, 0, self::LIMIT);
+    }
+
+    /**
      * Заголовки lite.cnn.com: ссылки вида /2026/10/10/us/…; времени публикации страница не показывает.
      *
      * @return list<NewsEntry>
@@ -110,10 +160,10 @@ final class NewsFeedParser
         return null;
     }
 
-    private static function childAnyNs(\DOMElement $item, string $localName): ?string
+    private static function childAnyNs(\DOMElement $item, string $localName, bool $anyNamespace = false): ?string
     {
         foreach ($item->childNodes as $node) {
-            if ($node instanceof \DOMElement && $node->localName === $localName && $node->namespaceURI !== null) {
+            if ($node instanceof \DOMElement && $node->localName === $localName && ($anyNamespace || $node->namespaceURI !== null)) {
                 return $node->textContent;
             }
         }

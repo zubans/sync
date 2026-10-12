@@ -108,7 +108,7 @@ final class NewsController extends AbstractController
                 'stale' => $s->getLastAttemptAt() !== null && ($s->isDigest()
                     ? $s->getLastError() !== null
                     : $s->getLastSuccessAt() === null || EventTime::fromDb($s->getLastSuccessAt()) < $staleBefore),
-            ], $this->sources->findEnabled()),
+            ], $this->sources->findVisible()),
         ]);
     }
 
@@ -135,7 +135,14 @@ final class NewsController extends AbstractController
         }
         $sources = [];
         foreach ($ids === [] ? [] : $this->items->findBy(['id' => array_values(array_unique($ids))]) as $news) {
-            $sources[$news->getId()] = ['source' => $news->getSource()->getCode(), 'title' => $news->getTitle(), 'link' => $news->getLink()];
+            // id — открыть новость с сервера; sourceTitle — у изданий «только для сводки» нет вкладки, где взять название.
+            $sources[$news->getId()] = [
+                'id' => $news->getId(),
+                'source' => $news->getSource()->getCode(),
+                'sourceTitle' => $news->getSource()->getTitle(),
+                'title' => $news->getTitle(),
+                'link' => $news->getLink(),
+            ];
         }
 
         $views = [];
@@ -163,6 +170,7 @@ final class NewsController extends AbstractController
         return [
             'id' => $item->getId(),
             'source' => $item->getSource()->getCode(),
+            'sourceTitle' => $item->getSource()->getTitle(),
             'title' => $item->getTitle(),
             'link' => $item->getLink(),
             'summary' => $item->getSummary(),

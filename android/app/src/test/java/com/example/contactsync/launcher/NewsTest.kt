@@ -86,6 +86,12 @@ class NewsTest {
     }
 
     @Test
+    fun `digest-only source is captioned by its server title`() {
+        val item = NewsFeed.item(dto(12, "lemonde", "2026-10-11T19:00:00+00:00").copy(sourceTitle = "Le Monde"))
+        assertEquals("Le Monde · 22:00", NewsFeed.caption(item, sources, now, zone))
+    }
+
+    @Test
     fun `digest tab goes first`() {
         val tabs = NewsFeed.tabs(sources + NewsSource("digest", "Сводка"))
         assertEquals(listOf("digest", "rbc", "nyt"), tabs.map { it.code })
