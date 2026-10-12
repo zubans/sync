@@ -85,14 +85,17 @@ final class NewsController extends AbstractController
             return $this->json(['error' => 'Новость не найдена.'], Response::HTTP_NOT_FOUND);
         }
         $content = trim((string) $item->getContent());
-        $paragraphs = $content === '' ? [] : array_values(array_filter(array_map('trim', preg_split('/\n\s*\n/u', $content) ?: [])));
+        $paragraphs = NewsItem::paragraphs($content);
+        $translated = NewsItem::paragraphs($item->getTranslatedContent());
         $digest = $this->digestViews([$item]);
 
         return $this->json(self::itemView($item) + [
-            'content' => $paragraphs,
+            // Есть перевод — текст по-русски, оригинал отдельно: на планшете его можно показать вместо перевода.
+            'content' => $translated !== [] ? $translated : $paragraphs,
             // Полный текст — скачанный со страницы или достаточно длинный из ленты (РБК), а не анонс.
             'fullText' => $item->getContentFetchedAt() !== null || mb_strlen($content) >= NewsArticleFetcher::FULL_TEXT || $item->getSource()->isDigest(),
-        ] + (isset($digest[$id]) ? ['digest' => $digest[$id]] : []));
+        ] + ($translated !== [] ? ['originalContent' => $paragraphs] : [])
+            + (isset($digest[$id]) ? ['digest' => $digest[$id]] : []));
     }
 
     /**
@@ -177,7 +180,7 @@ final class NewsController extends AbstractController
                 'id' => $news->getId(),
                 'source' => $news->getSource()->getCode(),
                 'sourceTitle' => $news->getSource()->getTitle(),
-                'title' => $news->getTitle(),
+                'title' => $news->getTranslatedTitle() ?? $news->getTitle(),
                 'link' => $news->getLink(),
             ];
         }
@@ -201,16 +204,28 @@ final class NewsController extends AbstractController
         return $views;
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * Новость для ленты. У переведённых `title` и `summary` — перевод (старые клиенты сразу видят русский),
+     * оригинал — в `original`. Переведённой считается новость с переводом заголовка или текста: шаги перевода
+     * независимы, и при русском `content` в `item()` клиенту нужен оригинал, чтобы переключиться на него.
+     *
+     * @return array<string, mixed>
+     */
     private static function itemView(NewsItem $item): array
     {
+        $translated = $item->isTranslated();
+        $headline = $item->getTranslatedTitle() !== null;
+
         return [
             'id' => $item->getId(),
             'source' => $item->getSource()->getCode(),
             'sourceTitle' => $item->getSource()->getTitle(),
-            'title' => $item->getTitle(),
+            'title' => $item->getTranslatedTitle() ?? $item->getTitle(),
             'link' => $item->getLink(),
-            'summary' => $item->getSummary(),
+            'summary' => $headline ? $item->getTranslatedSummary() ?? $item->getSummary() : $item->getSummary(),
+            'language' => $item->getSource()->getLanguage(),
+            'translated' => $translated,
+            'original' => $translated ? ['title' => $item->getTitle(), 'summary' => $item->getSummary()] : null,
             'publishedAt' => self::time($item->getPublishedAt()),
             'firstSeenAt' => self::time($item->getFirstSeenAt()),
             // Время для подписи и сортировки: публикация, без неё — когда сервер увидел новость.

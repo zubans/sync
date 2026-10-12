@@ -139,6 +139,95 @@ final class NewsApiTest extends DatabaseWebTestCase
         self::assertResponseStatusCodeSame(404);
     }
 
+    public function testTranslatedNewsReturnsRussianWithOriginal(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $bbc = (new NewsSource('bbc', 'BBC', 'https://bbc.example/feed'))->setLanguage(NewsSource::LANGUAGE_EN);
+        $rbc = new NewsSource('rbc', 'РБК', 'https://rbc.example/feed');
+        $this->em->persist($bbc);
+        $this->em->persist($rbc);
+        $this->item($bbc, 'a', '2026-10-11 08:00:00')->setHeadlineTranslation('Перевод a', 'Перевод анонса a');
+        $this->item($bbc, 'b', '2026-10-11 07:00:00');
+        $this->item($rbc, 'c', '2026-10-11 06:00:00');
+        $this->em->flush();
+
+        $items = $this->api('GET', '/api/news', token: $token)['items'];
+
+        self::assertSame(['Перевод a', 'Новость b', 'Новость c'], array_column($items, 'title'));
+        self::assertSame('Перевод анонса a', $items[0]['summary']);
+        self::assertSame(['title' => 'Новость a', 'summary' => 'Анонс a'], $items[0]['original']);
+        self::assertSame(['en', 'en', 'ru'], array_column($items, 'language'));
+        self::assertSame([true, false, false], array_column($items, 'translated'));
+        self::assertNull($items[1]['original'], 'ещё не переведена — оригинал в title');
+    }
+
+    public function testTranslatedArticleContentAndOriginalContent(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $bbc = (new NewsSource('bbc', 'BBC', 'https://bbc.example/feed'))->setLanguage(NewsSource::LANGUAGE_EN);
+        $this->em->persist($bbc);
+        $item = $this->item($bbc, 'a', '2026-10-11 08:00:00');
+        $item->setFetchedContent("One.\n\nTwo.", new \DateTimeImmutable('2026-10-11 08:05:00'));
+        $plain = $this->item($bbc, 'b', '2026-10-11 07:00:00');
+        $plain->setFetchedContent("Three.\n\nFour.", new \DateTimeImmutable('2026-10-11 08:05:00'));
+        $this->em->flush();
+        $item->setHeadlineTranslation('Перевод a', null);
+        $item->setContentTranslation(['Раз.', 'Два.']);
+        $this->em->flush();
+
+        $read = $this->api('GET', '/api/news/'.$item->getId(), token: $token);
+        self::assertSame(['Раз.', 'Два.'], $read['content']);
+        self::assertSame(['One.', 'Two.'], $read['originalContent']);
+        self::assertTrue($read['fullText']);
+
+        $untranslated = $this->api('GET', '/api/news/'.$plain->getId(), token: $token);
+        self::assertSame(['Three.', 'Four.'], $untranslated['content']);
+        self::assertArrayNotHasKey('originalContent', $untranslated);
+        self::assertFalse($untranslated['translated']);
+    }
+
+    public function testArticleTranslatedBeforeHeadlineStillOffersOriginal(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $bbc = (new NewsSource('bbc', 'BBC', 'https://bbc.example/feed'))->setLanguage(NewsSource::LANGUAGE_EN);
+        $this->em->persist($bbc);
+        $item = $this->item($bbc, 'a', '2026-10-11 08:00:00');
+        $item->setFetchedContent("One.\n\nTwo.", new \DateTimeImmutable('2026-10-11 08:05:00'));
+        $this->em->flush();
+        $item->setContentTranslation(['Раз.', 'Два.']);
+        $this->em->flush();
+
+        $read = $this->api('GET', '/api/news/'.$item->getId(), token: $token);
+
+        self::assertSame(['Раз.', 'Два.'], $read['content']);
+        self::assertTrue($read['translated'], 'русский текст — клиент должен предложить оригинал');
+        self::assertSame(['title' => 'Новость a', 'summary' => 'Анонс a'], $read['original']);
+        self::assertSame(['One.', 'Two.'], $read['originalContent']);
+        self::assertSame('Новость a', $read['title'], 'заголовок ещё не переведён — оригинал');
+    }
+
+    public function testDigestSourcesUseTranslatedTitle(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $lemonde = (new NewsSource('lemonde', 'Le Monde', 'https://lemonde.example/feed'))->setLanguage(NewsSource::LANGUAGE_FR)->setShowInWidget(false);
+        $digestSource = new NewsSource('digest', 'Сводка', '', NewsSource::FORMAT_DIGEST);
+        $this->em->persist($lemonde);
+        $this->em->persist($digestSource);
+        $news = $this->item($lemonde, 'a', '2026-10-11 13:20:00');
+        $news->setHeadlineTranslation('Забастовка во Франции', null);
+        $digestItem = $this->item($digestSource, 'hour:2026-10-11T14:00Z', '2026-10-11 14:00:00');
+        $this->em->flush();
+        $digest = new NewsDigest($digestItem, NewsDigest::PERIOD_HOUR,
+            new \DateTimeImmutable('2026-10-11 13:00:00'), new \DateTimeImmutable('2026-10-11 14:00:00'));
+        $digest->update([['title' => 'Сюжет', 'text' => 'Суть.', 'items' => [(int) $news->getId()]]], 1, null, null);
+        $this->em->persist($digest);
+        $this->em->flush();
+
+        $digests = $this->api('GET', '/api/news?source=digest', token: $token)['items'];
+
+        self::assertSame('Забастовка во Франции', $digests[0]['digest']['stories'][0]['sources'][0]['title']);
+    }
+
     public function testUnknownSourceAndBadCursorAreRejected(): void
     {
         $token = $this->login($this->createUser('anna@example.com')->getEmail());

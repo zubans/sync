@@ -65,6 +65,50 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
+     * Новости изданий не на русском без перевода заголовка — свежие первыми, без сводок: лента и сюжеты
+     * нужны для актуальных новостей, архив догоняется следующими проходами.
+     *
+     * @return list<NewsItem>
+     */
+    public function findNeedingHeadlineTranslation(int $limit, int $maxAttempts): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->addSelect('s')
+            ->where('s.format <> :digest AND s.language <> :ru AND n.translatedTitle IS NULL AND n.headlineTranslationAttempts < :attempts')
+            ->setParameter('digest', NewsSource::FORMAT_DIGEST)
+            ->setParameter('ru', NewsSource::LANGUAGE_RU)
+            ->setParameter('attempts', $maxAttempts)
+            ->orderBy('n.sortAt', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Новости изданий не на русском с полным текстом, но без его перевода, — свежие первыми.
+     * Полный текст — то же правило, что `fullText` в API: скачан со страницы или из ленты не короче $fullText.
+     *
+     * @return list<NewsItem>
+     */
+    public function findNeedingContentTranslation(int $limit, int $fullText, int $maxAttempts): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->addSelect('s')
+            ->where('s.format <> :digest AND s.language <> :ru AND n.translatedContent IS NULL AND n.contentTranslationAttempts < :attempts')
+            ->andWhere('n.contentFetchedAt IS NOT NULL OR LENGTH(n.content) >= :fullText')
+            ->setParameter('digest', NewsSource::FORMAT_DIGEST)
+            ->setParameter('ru', NewsSource::LANGUAGE_RU)
+            ->setParameter('attempts', $maxAttempts)
+            ->setParameter('fullText', $fullText)
+            ->orderBy('n.sortAt', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Новости без вектора — свежие первыми, без сводок: сюжетные линии нужны для актуальных новостей,
      * а архив досчитается следующими проходами.
      *

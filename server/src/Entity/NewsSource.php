@@ -27,6 +27,11 @@ class NewsSource
 
     public const FORMATS = [self::FORMAT_RSS, self::FORMAT_CNN_LITE, self::FORMAT_NEWS_SITEMAP, self::FORMAT_DIGEST];
 
+    public const LANGUAGE_RU = 'ru';
+    public const LANGUAGE_EN = 'en';
+    public const LANGUAGE_FR = 'fr';
+    public const LANGUAGE_UK = 'uk';
+
     #[ORM\Id]
     #[ORM\GeneratedValue]
     #[ORM\Column]
@@ -56,6 +61,14 @@ class NewsSource
     /** Показывать во вкладках и во «Все»; выключено — издание идёт только в сводку (Le Monde, «Українська правда»). */
     #[ORM\Column(options: ['default' => true])]
     private bool $showInWidget = true;
+
+    /**
+     * Язык издания (ISO 639-1): новости не на русском сервер переводит ([NewsTranslator]).
+     * Задаётся изданием, а не определяется по тексту: украинский по кириллице надёжно не отличить,
+     * а язык издания известен заранее.
+     */
+    #[ORM\Column(length: 8, options: ['default' => self::LANGUAGE_RU])]
+    private string $language = self::LANGUAGE_RU;
 
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $lastAttemptAt = null;
@@ -167,6 +180,24 @@ class NewsSource
     public function isDigest(): bool
     {
         return $this->format === self::FORMAT_DIGEST;
+    }
+
+    public function getLanguage(): string
+    {
+        return $this->language;
+    }
+
+    public function setLanguage(string $language): static
+    {
+        $this->language = $language;
+
+        return $this;
+    }
+
+    /** Новости издания переводятся на русский; сводку пишет модель сразу по-русски. */
+    public function needsTranslation(): bool
+    {
+        return $this->language !== self::LANGUAGE_RU && !$this->isDigest();
     }
 
     public function getFormat(): string
