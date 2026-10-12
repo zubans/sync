@@ -170,6 +170,24 @@ final class AdminTest extends DatabaseWebTestCase
         self::assertSame(['natasha@example.com'], $calendar->getSharedWith()->map(static fn (User $u) => $u->getEmail())->getValues());
     }
 
+    public function testStorylineListHidesUnnamedSingleNewsLines(): void
+    {
+        $now = new \DateTimeImmutable('2026-10-12 08:00:00');
+        $named = new \App\Entity\NewsStoryline([1.0, 0.0], $now);
+        $named->add([1.0, 0.0], $now);
+        $named->name('Удары по Эр-Рияду', null);
+        $this->em->persist($named);
+        $this->em->persist(new \App\Entity\NewsStoryline([0.0, 1.0], $now));
+        $this->em->flush();
+        $this->client->loginUser($this->createUser('admin@example.com', admin: true));
+
+        $crawler = $this->client->request('GET', '/admin/news-storyline');
+
+        self::assertResponseIsSuccessful();
+        self::assertSelectorTextContains('table', 'Удары по Эр-Рияду');
+        self::assertCount(1, $crawler->filter('table tbody tr'), 'безымянная одиночная линия скрыта');
+    }
+
     public function testAdminCreatesFamilyContact(): void
     {
         $family = (new Family())->setName('Ивановы');
