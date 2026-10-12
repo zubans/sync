@@ -8,6 +8,7 @@ use App\Entity\NewsSource;
 use App\Repository\NewsItemRepository;
 use App\Repository\NewsSourceRepository;
 use App\Service\EventTime;
+use App\Service\NewsArticleFetcher;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -67,6 +68,28 @@ final class NewsController extends AbstractController
                 ? EventTime::fromDb($last->getSortAt())->getTimestamp().'.'.$last->getId()
                 : null,
         ]);
+    }
+
+    /**
+     * Новость целиком — для чтения на планшете: полный текст абзацами. Нет полного текста
+     * (сайт издания закрыт, как NYT) — `content` пустой и `fullText: false`, показывается анонс.
+     */
+    #[Route('/{id}', name: 'api_news_item', requirements: ['id' => '\d+'], methods: ['GET'])]
+    public function item(int $id): JsonResponse
+    {
+        $item = $this->items->find($id);
+        if ($item === null) {
+            return $this->json(['error' => 'Новость не найдена.'], Response::HTTP_NOT_FOUND);
+        }
+        $content = trim((string) $item->getContent());
+        $paragraphs = $content === '' ? [] : array_values(array_filter(array_map('trim', preg_split('/\n\s*\n/u', $content) ?: [])));
+        $digest = $this->digestViews([$item]);
+
+        return $this->json(self::itemView($item) + [
+            'content' => $paragraphs,
+            // Полный текст — скачанный со страницы или достаточно длинный из ленты (РБК), а не анонс.
+            'fullText' => $item->getContentFetchedAt() !== null || mb_strlen($content) >= NewsArticleFetcher::FULL_TEXT || $item->getSource()->isDigest(),
+        ] + (isset($digest[$id]) ? ['digest' => $digest[$id]] : []));
     }
 
     #[Route('/sources', name: 'api_news_sources', methods: ['GET'])]

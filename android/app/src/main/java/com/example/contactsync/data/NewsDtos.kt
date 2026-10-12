@@ -17,6 +17,10 @@ data class NewsItemDto(
     val time: String,
     /** Только у сводок (издание digest): период и сюжеты со ссылками на исходные новости. */
     val digest: NewsDigestDto? = null,
+    /** Только в `GET /api/news/{id}`: полный текст абзацами; пусто — есть только анонс. */
+    val content: List<String> = emptyList(),
+    /** Текст полный, а не анонс (у закрытых сайтов, как NYT, — false). */
+    val fullText: Boolean = false,
 )
 
 @Serializable

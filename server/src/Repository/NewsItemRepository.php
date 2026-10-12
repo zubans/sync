@@ -43,6 +43,27 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
+     * Новости, у которых ещё нет полного текста, свежие первыми: текст не скачан со страницы,
+     * лента дала только анонс (короче [NewsArticleFetcher::FULL_TEXT]) и попытки не исчерпаны.
+     *
+     * @return list<NewsItem>
+     */
+    public function findNeedingContent(int $limit, int $fullText, int $maxAttempts): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->where('s.format <> :digest AND n.contentFetchedAt IS NULL AND n.contentAttempts < :attempts')
+            ->andWhere('n.content IS NULL OR LENGTH(n.content) < :fullText')
+            ->setParameter('digest', NewsSource::FORMAT_DIGEST)
+            ->setParameter('attempts', $maxAttempts)
+            ->setParameter('fullText', $fullText)
+            ->orderBy('n.sortAt', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Новости изданий (без сводок), которые сервер впервые увидел за период, — материал для сводки.
      * Время первого появления, а не публикации: так в сводку попадает и CNN, и новость,
      * опубликованная задним числом.

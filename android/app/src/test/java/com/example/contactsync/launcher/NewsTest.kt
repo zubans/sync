@@ -77,6 +77,15 @@ class NewsTest {
     }
 
     @Test
+    fun `full text is taken only when server says it is full`() {
+        val full = dto(11, "rg", "2026-10-11T14:00:00+00:00").copy(content = listOf("Первый.", "Второй."), fullText = true)
+        val teaser = full.copy(content = listOf("Анонс."), fullText = false)
+
+        assertEquals(listOf("Первый.", "Второй."), NewsFeed.item(full).content)
+        assertEquals(emptyList<String>(), NewsFeed.item(teaser).content)
+    }
+
+    @Test
     fun `digest tab goes first`() {
         val tabs = NewsFeed.tabs(sources + NewsSource("digest", "Сводка"))
         assertEquals(listOf("digest", "rbc", "nyt"), tabs.map { it.code })

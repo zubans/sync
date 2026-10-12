@@ -46,6 +46,16 @@ class NewsItem
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $content = null;
 
+    /**
+     * Когда полный текст скачан со страницы статьи; null — ещё нет (или он пришёл из ленты, как у РБК).
+     * Попытки считаются, чтобы закрытый сайт (NYT отвечает 403) не запрашивался бесконечно.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $contentFetchedAt = null;
+
+    #[ORM\Column(options: ['default' => 0])]
+    private int $contentAttempts = 0;
+
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $publishedAt = null;
 
@@ -80,6 +90,10 @@ class NewsItem
         ?\DateTimeImmutable $publishedAt,
         \DateTimeImmutable $now,
     ): bool {
+        // Полный текст со страницы статьи лента не затирает: в ней только анонс или ничего.
+        if ($this->contentFetchedAt !== null) {
+            $content = $this->content;
+        }
         $unchanged = isset($this->title) && $this->link === $link && $this->title === $title
             && $this->summary === $summary && $this->content === $content && $this->publishedAt == $publishedAt;
         if ($unchanged) {
@@ -94,6 +108,29 @@ class NewsItem
         $this->updatedAt = $now;
 
         return true;
+    }
+
+    /** Полный текст со страницы статьи: абзацы через пустую строку. */
+    public function setFetchedContent(string $content, \DateTimeImmutable $at): void
+    {
+        $this->content = $content;
+        $this->contentFetchedAt = $at;
+        ++$this->contentAttempts;
+    }
+
+    public function markContentAttempt(): void
+    {
+        ++$this->contentAttempts;
+    }
+
+    public function getContentFetchedAt(): ?\DateTimeImmutable
+    {
+        return $this->contentFetchedAt;
+    }
+
+    public function getContentAttempts(): int
+    {
+        return $this->contentAttempts;
     }
 
     public function getId(): ?int

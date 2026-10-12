@@ -352,6 +352,9 @@ class Api(
         return get("/api/news?$query")
     }
 
+    /** Новость целиком: полный текст со страницы издания, сохранённый сервером. */
+    suspend fun newsItem(id: Long): NewsItemDto = get("/api/news/$id")
+
     suspend fun newsSources(): List<NewsSourceDto> = get<NewsSourcesResponse>("/api/news/sources").sources
 
     private suspend inline fun <reified T> get(path: String): T =

@@ -32,6 +32,10 @@ data class NewsItem(
     val time: Instant,
     /** Сводка: сюжеты со ссылками на оригиналы; null — обычная новость. */
     val digest: NewsDigest? = null,
+    /** Полный текст абзацами — приходит, когда новость открыта для чтения; пусто — ещё не загружен или его нет. */
+    val content: List<String> = emptyList(),
+    /** Текст загружен с сервера: [content] — полный текст, а если пусто — у издания есть только анонс. */
+    val loaded: Boolean = false,
 )
 
 /** Сводка новостей за час или за сутки — её пишет сервер (`app:news:digest`). */
@@ -73,6 +77,7 @@ object NewsFeed {
         // OffsetDateTime, а не Instant.parse: старые Android не разбирают «+00:00» в Instant.
         time = OffsetDateTime.parse(dto.time).toInstant(),
         digest = dto.digest?.let(::digest),
+        content = if (dto.fullText) dto.content else emptyList(),
     )
 
     private fun digest(dto: NewsDigestDto) = NewsDigest(

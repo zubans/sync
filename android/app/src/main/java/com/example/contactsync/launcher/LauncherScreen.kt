@@ -181,8 +181,8 @@ fun LauncherScreen(
                 }
             }
         }
-        // Сводка на весь экран — поверх дашборда и раскрытого виджета.
-        DigestReader(state, vm)
+        // Новость или сводка на весь экран — поверх дашборда и раскрытого виджета.
+        NewsReader(state, vm)
       }
 
         if (drawerOpen) AppDrawer(state, vm, onDismiss = { drawerOpen = false })
@@ -678,8 +678,8 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
                         Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            // Сводку открываем на весь экран для чтения, обычную новость — в браузере.
-                            .clickable { if (item.digest != null) vm.read(item) else context.openUrl(item.link) }
+                            // Новость открывается на весь экран с сервера: полный текст хранит сервер.
+                            .clickable { vm.read(item) }
                             .padding(horizontal = 4.dp, vertical = 8.dp),
                     ) {
                         Text(item.title, color = TextMain, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)

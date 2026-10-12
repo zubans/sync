@@ -465,7 +465,7 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(20.dp))
                         .background(CardColor)
-                        .clickable { context.openUrl(item.link) }
+                        .clickable { vm.read(item) }
                         .padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {

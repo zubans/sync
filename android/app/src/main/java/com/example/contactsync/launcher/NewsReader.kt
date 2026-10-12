@@ -43,15 +43,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.contactsync.kb.openUrl
+import java.time.Instant
 import java.time.ZoneId
 
 /**
- * Сводка на весь экран — по нажатию на неё в карточке «Новости» или в списке сводок.
- * Формат — как выбран на вкладке «Сводка»: одна статья или список сюжетов; у старых сводок
- * без статьи — всегда сюжеты. Строка текста ограничена по ширине: так длинный текст читать легче.
+ * Новость на весь экран — по нажатию на неё в карточке «Новости» или в списке.
+ * Обычная новость — полный текст с сервера, сверху ссылка на оригинал на сайте издания.
+ * Сводка — в формате, выбранном на вкладке «Сводка»: одна статья или список сюжетов; у старых
+ * сводок без статьи — всегда сюжеты. Строка текста ограничена по ширине: так длинный текст читать легче.
  */
 @Composable
-internal fun DigestReader(state: LauncherState, vm: LauncherViewModel) {
+internal fun NewsReader(state: LauncherState, vm: LauncherViewModel) {
     // Последняя открытая сводка: пока экран уезжает, он должен показывать её, а не пустоту.
     var shown by remember { mutableStateOf<NewsItem?>(null) }
     state.reading?.let { shown = it }
@@ -61,8 +63,8 @@ internal fun DigestReader(state: LauncherState, vm: LauncherViewModel) {
         exit = fadeOut(tween(250)) + slideOutVertically(tween(250)) { it / 12 },
     ) {
         val item = shown ?: return@AnimatedVisibility
-        val digest = item.digest ?: return@AnimatedVisibility
         BackHandler { vm.read(null) }
+        val digest = item.digest
         Box(
             Modifier
                 .fillMaxSize()
@@ -76,12 +78,16 @@ internal fun DigestReader(state: LauncherState, vm: LauncherViewModel) {
             Column(Modifier.widthIn(max = 860.dp).fillMaxSize()) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "${NewsFeed.period(digest, ZoneId.systemDefault())} · новостей ${digest.newsCount}",
+                        if (digest != null) {
+                            "${NewsFeed.period(digest, ZoneId.systemDefault())} · новостей ${digest.newsCount}"
+                        } else {
+                            NewsFeed.caption(item, state.newsSources, Instant.now(), ZoneId.systemDefault())
+                        },
                         color = Accent,
                         fontSize = 16.sp,
                         modifier = Modifier.weight(1f),
                     )
-                    DigestFormatToggle(state, vm)
+                    if (digest != null) DigestFormatToggle(state, vm)
                     Spacer(Modifier.size(12.dp))
                     Box(
                         Modifier.size(52.dp).clip(CircleShape).background(CardRaised).clickable { vm.read(null) },
@@ -91,11 +97,60 @@ internal fun DigestReader(state: LauncherState, vm: LauncherViewModel) {
                     }
                 }
                 Spacer(Modifier.height(20.dp))
+                if (digest == null) {
+                    NewsText(item, state)
+                    return@Column
+                }
                 val article = digest.article
                 if (state.digestFormat == DigestFormat.ARTICLE && article != null) {
                     ArticleText(article, digest.sources, state)
                 } else {
                     StoriesText(item, digest, state, note = if (state.digestFormat == DigestFormat.ARTICLE) "У этой сводки нет статьи — показаны сюжеты" else null)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Обычная новость: ссылка на оригинал, заголовок и полный текст, сохранённый сервером.
+ * Полного текста нет (сайт издания закрыт) — анонс и пояснение.
+ */
+@Composable
+private fun NewsText(item: NewsItem, state: LauncherState) {
+    val context = LocalContext.current
+    val source = state.newsSources.firstOrNull { it.code == item.source }?.title ?: item.source
+    LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+        item {
+            Text(
+                "Оригинал на сайте: $source ↗",
+                color = Accent,
+                fontSize = 16.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CardRaised)
+                    .clickable { context.openUrl(item.link) }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            )
+        }
+        item {
+            Text(item.title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)
+        }
+        when {
+            item.content.isNotEmpty() -> items(item.content) { paragraph ->
+                Text(paragraph, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp)
+            }
+            !item.loaded -> item { Text("Загрузка…", color = TextMuted, fontSize = 18.sp) }
+            else -> {
+                if (item.summary.isNotEmpty()) {
+                    item { Text(item.summary, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp) }
+                }
+                item {
+                    Text(
+                        "Полного текста нет: издание не отдаёт статью. Её можно открыть на сайте — ссылка выше.",
+                        color = TextMuted,
+                        fontSize = 16.sp,
+                    )
                 }
             }
         }

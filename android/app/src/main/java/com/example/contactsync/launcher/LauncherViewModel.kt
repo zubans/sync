@@ -210,8 +210,24 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         _state.update { it.copy(digestFormat = format) }
     }
 
-    /** Сводка на весь экран — нажатие на неё в карточке или в списке. */
-    fun read(item: NewsItem?) = _state.update { it.copy(reading = item) }
+    /**
+     * Новость на весь экран — нажатие на неё в карточке или в списке. Полный текст берётся с сервера:
+     * он хранит статьи, скачанные со страниц изданий (`app:news:articles`).
+     */
+    fun read(item: NewsItem?) {
+        _state.update { it.copy(reading = item) }
+        if (item == null || item.digest != null) return
+        viewModelScope.launch {
+            val full = try {
+                NewsFeed.item(syncApi.newsItem(item.id)).copy(loaded = true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                item.copy(loaded = true)
+            }
+            _state.update { s -> if (s.reading?.id == item.id) s.copy(reading = full) else s }
+        }
+    }
 
     /** Следующая страница вкладки — когда подробный экран долистали до конца. */
     fun loadMoreNews() {

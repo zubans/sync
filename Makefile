@@ -8,7 +8,7 @@ HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news digest digest-preview agy-login test clean apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles digest digest-preview agy-login test clean apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -64,6 +64,9 @@ apk-cleanup: ## Удалить APK, которых нет ни на одном �
 
 news: ## Собрать новости сейчас, не дожидаясь контейнера news (он собирает раз в 5 минут)
 	$(APP) php bin/console app:news:collect
+
+articles: ## Скачать полные тексты новостей со страниц изданий сейчас (LIMIT=30 за проход)
+	$(COMPOSE) exec news php bin/console app:news:articles --limit=$(or $(LIMIT),30)
 
 digest: ## Написать сводки новостей за прошедший час и сутки, если их ещё нет (REBUILD=1 — переписать)
 	$(COMPOSE) exec news php bin/console app:news:digest $(if $(REBUILD),--rebuild)
