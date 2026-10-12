@@ -2,6 +2,7 @@
 
 namespace App\Tests\Api;
 
+use App\Entity\Calendar;
 use App\Entity\Family;
 use App\Entity\User;
 use App\Tests\DatabaseWebTestCase;
@@ -182,6 +183,45 @@ final class CalendarApiTest extends DatabaseWebTestCase
         $em->getRepository(User::class)->findOneBy(['email' => 'boris@example.com'])->setFamily(null);
         $em->flush();
         $this->api('GET', "/api/calendars/{$shared['id']}/events", token: $borisToken);
+        self::assertResponseStatusCodeSame(404);
+    }
+
+    public function testCalendarSharedWithChosenFamilyMemberOnly(): void
+    {
+        $family = (new Family())->setName('Зюбан');
+        $this->em->persist($family);
+        $this->userByEmail('anna@example.com')->setFamily($family);
+        $this->createUser('boris@example.com')->setFamily($family);
+        $this->createUser('vera@example.com')->setFamily($family);
+        $this->em->flush();
+        $work = $this->api('POST', '/api/calendars', ['name' => 'Сержик'], $this->token);
+        // После запросов к API ядро пересоздаётся — берём сущности заново из его EntityManager.
+        $em = static::getContainer()->get(EntityManagerInterface::class);
+        $em->getRepository(Calendar::class)->findOneBy(['uuid' => $work['id']])
+            ->addSharedWith($em->getRepository(User::class)->findOneBy(['email' => 'boris@example.com']));
+        $em->flush();
+
+        // Борису календарь открыт: видит, правит события, но не сам календарь.
+        $borisToken = $this->login('boris@example.com');
+        $borisCalendars = $this->api('GET', '/api/calendars', token: $borisToken)['calendars'];
+        self::assertSame(['shared'], array_column(array_filter($borisCalendars, static fn ($c) => $c['name'] === 'Сержик'), 'access'));
+        $this->api('POST', "/api/calendars/{$work['id']}/events",
+            ['title' => 'Секция', 'start' => '2026-10-14T15:00:00Z', 'end' => '2026-10-14T16:00:00Z'], $borisToken);
+        self::assertResponseStatusCodeSame(201);
+        $this->api('DELETE', "/api/calendars/{$work['id']}", token: $borisToken);
+        self::assertResponseStatusCodeSame(403);
+        $annaCalendars = $this->api('GET', '/api/calendars', token: $this->token)['calendars'];
+        self::assertSame(['own'], array_column(array_filter($annaCalendars, static fn ($c) => $c['name'] === 'Сержик'), 'access'));
+
+        // Вере, той же семьи, но не выбранной, — не виден.
+        $this->api('GET', "/api/calendars/{$work['id']}/events", token: $this->login('vera@example.com'));
+        self::assertResponseStatusCodeSame(404);
+
+        // Анна вышла из семьи — поделённый календарь Борису больше не виден.
+        $em->getRepository(User::class)->findOneBy(['email' => 'anna@example.com'])->setFamily(null);
+        $em->flush();
+        self::assertNotContains('Сержик', array_column($this->api('GET', '/api/calendars', token: $borisToken)['calendars'], 'name'));
+        $this->api('GET', "/api/calendars/{$work['id']}/events", token: $borisToken);
         self::assertResponseStatusCodeSame(404);
     }
 

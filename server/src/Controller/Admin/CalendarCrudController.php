@@ -3,6 +3,7 @@
 namespace App\Controller\Admin;
 
 use App\Entity\Calendar;
+use App\Entity\User;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
@@ -16,8 +17,8 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\IntegerField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
 
 /**
- * Календари создают пользователи (приложение, API); в админке — просмотр, переименование,
- * цвет и отметка «семья». Удаление календаря удаляет и его события.
+ * Календари: создание (например, семейный «Зюбан»), переименование, цвет, отметка «семья» и «Поделиться с» —
+ * открыть календарь выбранным членам семьи владельца. Удаление календаря удаляет и его события.
  *
  * @extends AbstractCrudController<Calendar>
  */
@@ -39,7 +40,16 @@ final class CalendarCrudController extends AbstractCrudController
 
     public function configureActions(Actions $actions): Actions
     {
-        return $actions->disable(Action::NEW)->add(Crud::PAGE_INDEX, Action::DETAIL);
+        return $actions->add(Crud::PAGE_INDEX, Action::DETAIL);
+    }
+
+    /** Владельца выбирают в форме; до этого — администратор, иначе календарь не создать. */
+    public function createEntity(string $entityFqcn): Calendar
+    {
+        $admin = $this->getUser();
+        \assert($admin instanceof User);
+
+        return new Calendar($admin, '');
     }
 
     public function configureFilters(Filters $filters): Filters
@@ -51,8 +61,13 @@ final class CalendarCrudController extends AbstractCrudController
     {
         yield TextField::new('name', 'Название');
         yield ColorField::new('color', 'Цвет');
-        yield AssociationField::new('owner', 'Владелец')->setFormTypeOption('disabled', true);
-        yield BooleanField::new('familyShared', 'Семья')->renderAsSwitch(false);
+        // Владельца выбирают при создании; у существующего календаря не меняется — события остались бы чужими.
+        yield AssociationField::new('owner', 'Владелец')->setFormTypeOption('disabled', $pageName === Crud::PAGE_EDIT);
+        yield BooleanField::new('familyShared', 'Семья')->renderAsSwitch(false)
+            ->setHelp('Видят и правят все члены семьи владельца');
+        yield AssociationField::new('sharedWith', 'Поделиться с')
+            ->setFormTypeOption('by_reference', false)
+            ->setHelp('Только члены семьи владельца: видят календарь на своих устройствах и правят события. Не нужно, если отмечено «Семья».');
         yield IntegerField::new('revision', 'Изменений')->hideOnForm();
         yield TextField::new('uuid', 'ID в API')->onlyOnDetail();
         yield DateTimeField::new('createdAt', 'Создан')->hideOnForm();

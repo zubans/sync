@@ -17,7 +17,7 @@ class CalendarRepository extends ServiceEntityRepository
         parent::__construct($registry, Calendar::class);
     }
 
-    /** @return list<Calendar> свои календари и семейные календари других членов семьи */
+    /** @return list<Calendar> свои календари, семейные календари других членов семьи и те, которыми с пользователем поделились */
     public function findVisibleTo(User $user): array
     {
         $qb = $this->createQueryBuilder('c')
@@ -26,7 +26,9 @@ class CalendarRepository extends ServiceEntityRepository
             ->setParameter('user', $user)
             ->orderBy('c.id', 'ASC');
         if ($user->getFamily() !== null) {
-            $qb->orWhere('c.familyShared = true AND o.family = :family')->setParameter('family', $user->getFamily());
+            // Поделиться можно только внутри семьи: вышел из семьи — доступ к календарю пропал, даже если он в списке.
+            $qb->orWhere('o.family = :family AND (c.familyShared = true OR :user MEMBER OF c.sharedWith)')
+                ->setParameter('family', $user->getFamily());
         }
 
         return $qb->getQuery()->getResult();

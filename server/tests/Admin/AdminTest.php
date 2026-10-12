@@ -140,6 +140,36 @@ final class AdminTest extends DatabaseWebTestCase
         );
     }
 
+    public function testAdminCreatesCalendarAndSharesItWithinFamilyOnly(): void
+    {
+        $family = (new Family())->setName('Зюбан');
+        $this->em->persist($family);
+        $sergey = $this->createUser('sergey@example.com');
+        $natasha = $this->createUser('natasha@example.com');
+        $outsider = $this->createUser('olga@example.com');
+        $family->addMember($sergey);
+        $family->addMember($natasha);
+        $this->em->flush();
+        $this->client->loginUser($this->createUser('admin@example.com', admin: true));
+
+        $crawler = $this->client->request('GET', '/admin/calendar/new');
+        $form = $crawler->filter('form[name="Calendar"]')->form();
+        $form['Calendar[name]'] = 'Сержик';
+        $form['Calendar[owner]']->select((string) $sergey->getId());
+        $form['Calendar[sharedWith]']->select([(string) $outsider->getId()]);
+        $this->client->submit($form);
+        self::assertResponseStatusCodeSame(422);
+        self::assertSelectorTextContains('body', 'olga@example.com не состоит в семье владельца');
+
+        $form['Calendar[sharedWith]']->select([(string) $natasha->getId()]);
+        $this->client->submit($form);
+        self::assertResponseRedirects();
+        $this->em->clear();
+        $calendar = $this->em->getRepository(Calendar::class)->findOneBy(['name' => 'Сержик']);
+        self::assertSame('sergey@example.com', $calendar->getOwner()->getEmail());
+        self::assertSame(['natasha@example.com'], $calendar->getSharedWith()->map(static fn (User $u) => $u->getEmail())->getValues());
+    }
+
     public function testAdminCreatesFamilyContact(): void
     {
         $family = (new Family())->setName('Ивановы');

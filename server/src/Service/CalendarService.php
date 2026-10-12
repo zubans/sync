@@ -15,8 +15,9 @@ use Symfony\Component\Uid\Uuid;
 /**
  * Календари и события.
  *
- * Доступ: свой календарь — всегда; семейный (familyShared) — всем членам семьи владельца,
- * они его видят и правят, но переименовать, перекрасить или удалить календарь может только владелец.
+ * Доступ: свой календарь — всегда; семейный (familyShared) — всем членам семьи владельца; календарь,
+ * которым поделились, — выбранным членам семьи владельца (Calendar::isVisibleTo). Они его видят и правят,
+ * но переименовать, перекрасить или удалить календарь может только владелец.
  *
  * Правки событий — с оптимистичной блокировкой: клиент присылает ревизию, от которой правил.
  * Если событие с тех пор изменили, правка не применяется — клиент получает конфликт и текущую
@@ -55,10 +56,7 @@ final class CalendarService
 
     public function canAccess(User $user, Calendar $calendar): bool
     {
-        $owner = $calendar->getOwner();
-
-        return $owner === $user
-            || ($calendar->isFamilyShared() && $owner->getFamily() !== null && $owner->getFamily() === $user->getFamily());
+        return $calendar->isVisibleTo($user);
     }
 
     /**
@@ -151,6 +149,12 @@ final class CalendarService
             'name' => $calendar->getName(),
             'color' => $calendar->getColor(),
             'familyShared' => $calendar->isFamilyShared(),
+            // own — свой, family — семейный календарь другого члена семьи, shared — им поделились с этим пользователем.
+            'access' => match (true) {
+                $calendar->getOwner() === $viewer => 'own',
+                $calendar->isFamilyShared() => 'family',
+                default => 'shared',
+            },
             'owner' => $calendar->getOwner()->getEmail(),
             'mine' => $calendar->getOwner() === $viewer,
             'revision' => $calendar->getRevision(),
