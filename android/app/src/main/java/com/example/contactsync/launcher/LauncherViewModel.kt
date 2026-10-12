@@ -164,6 +164,19 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         vpnJob?.cancel()
     }
 
+    /** Экран «Новости», открытый из виджета рабочего стола: только новости — без погоды, котировок, событий и VPN. */
+    fun onResumeNews() {
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            while (isActive) {
+                if (System.currentTimeMillis() - newsAt > NEWS_TTL_MS && newsJob?.isActive != true) {
+                    newsJob = launch { refreshNews() }
+                }
+                delay(TICK_MS)
+            }
+        }
+    }
+
     fun onCalendarPermission() {
         calendarSyncAt = 0
         requestCalendarSync()
@@ -234,6 +247,20 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 item.copy(loaded = true)
             }
             replacePage { page -> if (page is ReaderPage.News && page.item.id == item.id) ReaderPage.News(full) else page }
+        }
+    }
+
+    /** Новость на весь экран по id — нажатие на неё в виджете рабочего стола: о новости известен только id. */
+    fun read(id: Long) {
+        viewModelScope.launch {
+            val item = try {
+                NewsFeed.item(syncApi.newsItem(id)).copy(loaded = true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@launch
+            }
+            _state.update { it.copy(readingStack = it.readingStack + ReaderPage.News(item)) }
         }
     }
 

@@ -1,4 +1,6 @@
 <resources>
     <string name="app_name">Contact Sync</string>
     <string name="navbar_description">Кнопки «Назад», «Домой» и «Недавние» в тёмной панели главного экрана вместо панели задач системы. Служба не читает содержимое экранов: она только смотрит, открыта ли клавиатура или шторка, чтобы спрятать кнопки.</string>
+    <string name="widget_agenda_description">События календаря на две недели вперёд</string>
+    <string name="widget_news_description">Сводка и свежие новости с сервера sync</string>
 </resources>

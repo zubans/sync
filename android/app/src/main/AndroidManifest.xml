@@ -109,6 +109,46 @@
             </intent-filter>
         </activity>
 
+        <!-- Виджеты для обычного рабочего стола (устройства без лаунчера sync): «Ближайшее» и «Новости». -->
+        <receiver
+            android:name=".widget.AgendaWidgetReceiver"
+            android:exported="true"
+            android:label="Ближайшее">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/agenda_widget_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.NewsWidgetReceiver"
+            android:exported="true"
+            android:label="Новости">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/news_widget_info" />
+        </receiver>
+        <!-- Новости на весь экран — из виджета «Новости». -->
+        <activity
+            android:name=".widget.NewsActivity"
+            android:exported="false"
+            android:label="Новости"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.example.contactsync.news"
+            android:theme="@style/Theme.ContactSync.Launcher" />
+        <!-- Без экрана: открыть или создать событие из виджета «Ближайшее». -->
+        <activity
+            android:name=".widget.CalendarActionActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Отдельная иконка «База знаний»: проекты, задачи со стадиями, запись встречи. -->
         <activity
             android:name=".kb.KbActivity"

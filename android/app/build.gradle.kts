@@ -69,6 +69,7 @@ dependencies {
     implementation(libs.androidx.biometric)
     implementation(libs.bouncycastle)
     implementation(libs.androidx.fragment.ktx)
+    implementation(libs.androidx.glance.appwidget)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
 }
