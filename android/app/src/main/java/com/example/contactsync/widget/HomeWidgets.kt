@@ -37,6 +37,7 @@ import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import androidx.glance.unit.ColorProvider
 import com.example.contactsync.App
+import com.example.contactsync.calendar.CalendarAccount
 import com.example.contactsync.data.UnauthorizedException
 import com.example.contactsync.launcher.Agenda
 import com.example.contactsync.launcher.AgendaRow
@@ -46,6 +47,7 @@ import com.example.contactsync.launcher.NewsItem
 import com.example.contactsync.launcher.NewsSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
@@ -132,9 +134,21 @@ private fun AgendaWidgetRow(context: Context, row: AgendaRow) {
     }
 }
 
+/**
+ * Нажатие на заголовок «Ближайшее»: синхронизировать календари sync с сервером и перечитать события.
+ * На устройстве без лаунчера sync иначе синхронизация идёт раз в час (и после правок в календаре).
+ */
 class RefreshAgenda : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
+        CalendarAccount.requestSync(context)
         AgendaWidget().updateAll(context)
+        // Синхронизация идёт в фоне несколько секунд — перечитываем ещё раз, когда она, скорее всего, закончилась.
+        delay(SYNC_SETTLE_MS)
+        AgendaWidget().updateAll(context)
+    }
+
+    private companion object {
+        const val SYNC_SETTLE_MS = 8_000L
     }
 }
 
