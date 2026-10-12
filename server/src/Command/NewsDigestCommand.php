@@ -91,6 +91,12 @@ final class NewsDigestCommand extends Command
             $io->writeln($story['text']);
             $io->writeln('<comment>новости: '.implode(', ', $story['items']).'</comment>');
         }
+        if ($result['digest']['article'] !== null) {
+            $io->title('Статья: '.$result['digest']['article']['title']);
+            $io->writeln($result['digest']['article']['text']);
+        } else {
+            $io->warning('Статьи в ответе нет — сводка будет только списком сюжетов');
+        }
 
         return Command::SUCCESS;
     }

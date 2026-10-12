@@ -43,6 +43,13 @@ class NewsDigest
     #[ORM\Column(type: Types::JSON)]
     private array $stories = [];
 
+    /** Та же сводка одной связной статьёй: общий заголовок и абзацы через пустую строку; null — у старых сводок. */
+    #[ORM\Column(length: 300, nullable: true)]
+    private ?string $articleTitle = null;
+
+    #[ORM\Column(type: Types::TEXT, nullable: true)]
+    private ?string $articleText = null;
+
     /** Сколько новостей ушло модели. */
     #[ORM\Column]
     private int $newsCount = 0;
@@ -63,10 +70,15 @@ class NewsDigest
         $this->createdAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
     }
 
-    /** @param list<array{title: string, text: string, items: list<int>}> $stories */
-    public function update(array $stories, int $newsCount, ?string $model): void
+    /**
+     * @param list<array{title: string, text: string, items: list<int>}> $stories
+     * @param array{title: string, text: string}|null                     $article
+     */
+    public function update(array $stories, int $newsCount, ?string $model, ?array $article = null): void
     {
         $this->stories = $stories;
+        $this->articleTitle = $article !== null ? mb_substr($article['title'], 0, 300) : null;
+        $this->articleText = $article['text'] ?? null;
         $this->newsCount = $newsCount;
         $this->model = $model;
     }
@@ -100,6 +112,14 @@ class NewsDigest
     public function getStories(): array
     {
         return $this->stories;
+    }
+
+    /** @return array{title: string, text: string}|null */
+    public function getArticle(): ?array
+    {
+        return $this->articleTitle !== null && $this->articleText !== null
+            ? ['title' => $this->articleTitle, 'text' => $this->articleText]
+            : null;
     }
 
     public function getNewsCount(): int

@@ -1,5 +1,6 @@
 package com.example.contactsync.launcher
 
+import com.example.contactsync.data.NewsArticleDto
 import com.example.contactsync.data.NewsDigestDto
 import com.example.contactsync.data.NewsItemDto
 import com.example.contactsync.data.NewsSourceDto
@@ -53,6 +54,26 @@ class NewsTest {
             "За сутки · 11 окт., 07:00 – 12 окт., 07:00",
             NewsFeed.period(digest.copy(daily = true, start = Instant.parse("2026-10-11T04:00:00Z"), end = Instant.parse("2026-10-12T04:00:00Z")), zone),
         )
+    }
+
+    @Test
+    fun `digest article splits into paragraphs and sources are listed once`() {
+        val source = NewsStorySourceDto("rbc", "Новость", "https://rbc/1")
+        val dto = dto(10, "digest", "2026-10-11T14:00:00+00:00").copy(
+            digest = NewsDigestDto(
+                period = "day",
+                start = "2026-10-10T04:00:00+00:00",
+                end = "2026-10-11T04:00:00+00:00",
+                stories = listOf(NewsStoryDto("А", "", listOf(source)), NewsStoryDto("Б", "", listOf(source))),
+                article = NewsArticleDto("Главное за сутки", "Первый абзац.\n\n  \nВторой абзац.\n\n"),
+            ),
+        )
+
+        val digest = NewsFeed.item(dto).digest!!
+
+        assertEquals(NewsArticle("Главное за сутки", listOf("Первый абзац.", "Второй абзац.")), digest.article)
+        assertEquals(listOf("https://rbc/1"), digest.sources.map { it.link })
+        assertEquals(null, NewsFeed.item(dto.copy(digest = dto.digest!!.copy(article = null))).digest!!.article)
     }
 
     @Test

@@ -42,7 +42,17 @@ data class NewsDigest(
     /** Сколько новостей ушло в сводку. */
     val newsCount: Int,
     val stories: List<NewsStory>,
-)
+    /** Та же сводка одной статьёй с общим заголовком; null — у старых сводок, только сюжеты. */
+    val article: NewsArticle? = null,
+) {
+    /** Все исходные новости сводки без повторов — список «Источники» под статьёй. */
+    val sources: List<NewsStorySource> get() = stories.flatMap { it.sources }.distinctBy { it.link }
+}
+
+data class NewsArticle(val title: String, val paragraphs: List<String>)
+
+/** Как показывать сводку: списком сюжетов или одной статьёй. */
+enum class DigestFormat { STORIES, ARTICLE }
 
 data class NewsStory(val title: String, val text: String, val sources: List<NewsStorySource>)
 
@@ -72,6 +82,9 @@ object NewsFeed {
         newsCount = dto.newsCount,
         stories = dto.stories.map { story ->
             NewsStory(story.title, story.text, story.sources.map { NewsStorySource(it.source, it.title, it.link) })
+        },
+        article = dto.article?.let { article ->
+            NewsArticle(article.title, article.text.split(Regex("\\n\\s*\\n")).map { it.trim() }.filter { it.isNotEmpty() })
         },
     )
 

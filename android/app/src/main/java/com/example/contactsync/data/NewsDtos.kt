@@ -27,7 +27,12 @@ data class NewsDigestDto(
     val end: String,
     val newsCount: Int = 0,
     val stories: List<NewsStoryDto> = emptyList(),
+    /** Та же сводка одной статьёй; null — у сводок, написанных до этого формата. */
+    val article: NewsArticleDto? = null,
 )
+
+@Serializable
+data class NewsArticleDto(val title: String, val text: String)
 
 @Serializable
 data class NewsStoryDto(val title: String, val text: String = "", val sources: List<NewsStorySourceDto> = emptyList())

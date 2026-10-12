@@ -77,7 +77,7 @@ final class NewsDigestTest extends DatabaseWebTestCase
         return 'Вот сводка: '.json_encode(['headline' => $headline, 'stories' => [
             ['title' => 'Сюжет', 'text' => 'Суть.', 'items' => [...$ids, 999999]],
             ['title' => '', 'text' => 'без заголовка'],
-        ]], \JSON_UNESCAPED_UNICODE);
+        ], 'article' => ['title' => "Статья: $headline", 'text' => "Первый абзац.\r\n\n\n\nВторой абзац."]], \JSON_UNESCAPED_UNICODE);
     }
 
     public function testDuePeriodsAreLastFullHourAndDayTo0700Moscow(): void
@@ -105,6 +105,7 @@ final class NewsDigestTest extends DatabaseWebTestCase
         self::assertSame('готово: новостей 3, сюжетов 1', $report['day:2026-10-12T04:00Z']);
         self::assertStringContainsString('за час (12.10 16:00–12.10 17:00, время московское)', $prompts[0]);
         self::assertStringContainsString('] РБК, 12.10 16:20 — Новость 0. Анонс 0', $prompts[0]);
+        self::assertStringContainsString('одну связную статью — обзор за час', $prompts[0]);
 
         $item = $this->em->getRepository(NewsItem::class)->findOneBy(['externalKey' => sha1('hour:2026-10-12T14:00Z')]);
         self::assertSame('За час: Главное за час', $item->getTitle());
@@ -112,6 +113,8 @@ final class NewsDigestTest extends DatabaseWebTestCase
         $details = $this->em->getRepository(NewsDigest::class)->findOneBy(['item' => $item]);
         self::assertCount(1, $details->getStories(), 'сюжет без заголовка выброшен');
         self::assertCount(6, $details->getStories()[0]['items'], 'чужой id из ответа выброшен');
+        self::assertSame(['title' => 'Статья: Главное за час', 'text' => "Первый абзац.\n\nВторой абзац."], $details->getArticle());
+        self::assertSame("Первый абзац.\n\nВторой абзац.", $item->getContent(), 'полный текст сводки — статья');
         self::assertNull($this->digest->getLastError());
 
         self::assertSame([], $service->run(new \DateTimeImmutable(self::NOW)), 'повторный запуск ничего не пишет');
@@ -187,6 +190,7 @@ final class NewsDigestTest extends DatabaseWebTestCase
 
         self::assertSame('Сюжет', $parsed['headline'], 'без заголовка сводки — заголовок первого сюжета');
         self::assertSame([1, 2], $parsed['stories'][0]['items']);
+        self::assertNull($parsed['article'], 'без статьи сводка остаётся списком сюжетов');
     }
 
     public function testAgyOutputGivesAnswerConversationAndTrace(): void

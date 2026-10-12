@@ -69,7 +69,7 @@ final class NewsApiTest extends DatabaseWebTestCase
         $this->em->flush();
         $digest = new NewsDigest($digestItem, NewsDigest::PERIOD_HOUR,
             new \DateTimeImmutable('2026-10-11 13:00:00'), new \DateTimeImmutable('2026-10-11 14:00:00'));
-        $digest->update([['title' => 'Сюжет', 'text' => 'Суть.', 'items' => [(int) $news->getId()]]], 1, null);
+        $digest->update([['title' => 'Сюжет', 'text' => 'Суть.', 'items' => [(int) $news->getId()]]], 1, null, ['title' => 'Статья', 'text' => "А.\n\nБ."]);
         $this->em->persist($digest);
         $this->em->flush();
 
@@ -80,6 +80,7 @@ final class NewsApiTest extends DatabaseWebTestCase
         $digests = $this->api('GET', '/api/news?source=digest', token: $token)['items'];
         self::assertSame('hour', $digests[0]['digest']['period']);
         self::assertSame('2026-10-11T13:00:00+00:00', $digests[0]['digest']['start']);
+        self::assertSame(['title' => 'Статья', 'text' => "А.\n\nБ."], $digests[0]['digest']['article']);
         self::assertSame(
             [['source' => 'rbc', 'title' => 'Новость a', 'link' => 'https://example.com/a']],
             $digests[0]['digest']['stories'][0]['sources'],

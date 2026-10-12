@@ -61,7 +61,7 @@ final class NewsDigestService
     /**
      * Сводка за произвольный период без сохранения — проверить модель и промпт, не дожидаясь смены часа.
      *
-     * @return array{news: int, digest: ?array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>}}
+     * @return array{news: int, digest: ?array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>, article: ?array{title: string, text: string}}}
      */
     public function preview(NewsDigestPeriod $period, ?string $model = null): array
     {
@@ -111,7 +111,7 @@ final class NewsDigestService
      *
      * @param list<NewsItem> $news
      *
-     * @return array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>}
+     * @return array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>, article: ?array{title: string, text: string}}
      */
     private function summarize(NewsDigestPeriod $period, array $news, ?string $model): array
     {
@@ -130,13 +130,15 @@ final class NewsDigestService
         }
     }
 
-    /** @param array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>} $digest */
+    /** @param array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>, article: ?array{title: string, text: string}} $digest */
     private function save(NewsSource $source, NewsDigestPeriod $period, ?NewsItem $item, array $digest, int $newsCount, ?string $model, \DateTimeImmutable $now): void
     {
         $isNew = $item === null;
         $item ??= new NewsItem($source, sha1($period->key()), $now);
         $label = $period->period === NewsDigest::PERIOD_HOUR ? 'За час' : 'За сутки';
-        $content = implode("\n\n", array_map(static fn (array $s) => $s['title']."\n".$s['text'], $digest['stories']));
+        // Полный текст новости-сводки — статья, а у сводки без статьи — сюжеты подряд.
+        $content = $digest['article']['text']
+            ?? implode("\n\n", array_map(static fn (array $s) => $s['title']."\n".$s['text'], $digest['stories']));
         // Время сводки — конец периода: по нему она встаёт в ленту и подписывается в виджете.
         $item->apply('', "$label: {$digest['headline']}", implode(' · ', array_column($digest['stories'], 'title')), $content, $period->end, $now);
         if ($isNew) {
@@ -148,6 +150,6 @@ final class NewsDigestService
                 ?? new NewsDigest($item, $period->period, $period->start, $period->end);
             $this->em->persist($details);
         }
-        $details->update($digest['stories'], $newsCount, $model);
+        $details->update($digest['stories'], $newsCount, $model, $digest['article']);
     }
 }

@@ -122,6 +122,7 @@ final class NewsController extends AbstractController
                 'start' => self::time($digest->getPeriodStart()),
                 'end' => self::time($digest->getPeriodEnd()),
                 'newsCount' => $digest->getNewsCount(),
+                'article' => $digest->getArticle(),
                 'stories' => array_map(static fn (array $story) => [
                     'title' => $story['title'],
                     'text' => $story['text'],

@@ -42,8 +42,13 @@ final class NewsDigestPrompt
                         'required' => ['title', 'text', 'items'],
                     ],
                 ],
+                'article' => [
+                    'type' => 'object',
+                    'properties' => ['title' => ['type' => 'string'], 'text' => ['type' => 'string']],
+                    'required' => ['title', 'text'],
+                ],
             ],
-            'required' => ['headline', 'stories'],
+            'required' => ['headline', 'stories', 'article'],
         ];
     }
 
@@ -66,6 +71,7 @@ final class NewsDigestPrompt
         $range = $period->start->setTimezone($tz)->format('d.m H:i').'–'.$period->end->setTimezone($tz)->format('d.m H:i');
         $span = $period->period === NewsDigest::PERIOD_HOUR ? 'час' : 'сутки';
         $max = self::STORIES[$period->period];
+        $paragraphs = $period->period === NewsDigest::PERIOD_HOUR ? '3–5' : '5–10';
         $news = implode("\n", $lines);
 
         return <<<PROMPT
@@ -80,10 +86,16 @@ final class NewsDigestPrompt
             - у сюжета перечисли id всех новостей, на которых он основан;
             - не добавляй фактов, которых нет в новостях.
 
+            Кроме сюжетов, напиши по тем же новостям одну связную статью — обзор за $span:
+            - общий заголовок до 100 символов;
+            - $paragraphs абзацев, самое важное первым, с переходами между темами, без списков и без markdown;
+            - абзацы раздели пустой строкой;
+            - те же правила: только факты из новостей, без оценок, английское переведи.
+
             Всё нужное — в этом сообщении: не ищи в интернете, не открывай ссылки и не вызывай инструменты, сразу дай ответ.
 
             Ответ — только JSON, без пояснений и без markdown:
-            {"headline": "главное за период одной фразой", "stories": [{"title": "…", "text": "…", "items": [12, 15]}]}
+            {"headline": "главное за период одной фразой", "stories": [{"title": "…", "text": "…", "items": [12, 15]}], "article": {"title": "…", "text": "абзац\n\nабзац"}}
 
             Новости:
             $news
@@ -93,7 +105,7 @@ final class NewsDigestPrompt
     /**
      * @param list<int> $knownIds id новостей, которые были в промпте
      *
-     * @return array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>}
+     * @return array{headline: string, stories: list<array{title: string, text: string, items: list<int>}>, article: ?array{title: string, text: string}}
      *
      * @throws \UnexpectedValueException ответ не разбирается
      */
@@ -123,7 +135,16 @@ final class NewsDigestPrompt
             throw new \UnexpectedValueException('В ответе модели нет сюжетов: «'.self::snippet($answer).'»');
         }
 
-        return ['headline' => $headline !== '' ? $headline : $stories[0]['title'], 'stories' => $stories];
+        // Статья — второй формат той же сводки; без неё сводка остаётся списком сюжетов.
+        $article = \is_array($data['article'] ?? null) ? $data['article'] : [];
+        $articleTitle = trim((string) ($article['title'] ?? ''));
+        $articleText = trim((string) preg_replace("/\n{3,}/", "\n\n", str_replace("\r", '', (string) ($article['text'] ?? ''))));
+
+        return [
+            'headline' => $headline !== '' ? $headline : $stories[0]['title'],
+            'stories' => $stories,
+            'article' => $articleTitle !== '' && $articleText !== '' ? ['title' => $articleTitle, 'text' => $articleText] : null,
+        ];
     }
 
     /** Начало ответа для ошибки — по нему видно, что модель написала вместо JSON. */

@@ -480,12 +480,16 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
     }
 }
 
-/** Сводки: каждая — период и сюжеты, под сюжетом — издания, нажатие открывает исходную статью. */
+/**
+ * Сводки списком: в формате «Статья» — заголовок и начало статьи, в формате «Сюжеты» — заголовки сюжетов.
+ * Нажатие открывает сводку на весь экран ([DigestReader]).
+ */
 @Composable
 private fun DigestList(state: LauncherState, vm: LauncherViewModel) {
-    val context = LocalContext.current
     val zone = ZoneId.systemDefault()
     val items = state.news.items
+    DigestFormatToggle(state, vm)
+    Spacer(Modifier.height(14.dp))
     if (items.isEmpty()) {
         Text(
             state.newsError ?: "Сводок пока нет: первая появится в начале следующего часа",
@@ -498,38 +502,29 @@ private fun DigestList(state: LauncherState, vm: LauncherViewModel) {
         itemsIndexed(items, key = { _, item -> item.id }) { index, item ->
             if (index == items.lastIndex) LaunchedEffect(item.id) { vm.loadMoreNews() }
             val digest = item.digest ?: return@itemsIndexed
+            val article = digest.article?.takeIf { state.digestFormat == DigestFormat.ARTICLE }
             Column(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(CardColor).padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(CardColor)
+                    .clickable { vm.read(item) }
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text("${NewsFeed.period(digest, zone)} · новостей ${digest.newsCount}", color = Accent, fontSize = 14.sp)
-                Text(item.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Medium)
-                digest.stories.forEach { story ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(story.title, color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                        if (story.text.isNotEmpty()) Text(story.text, color = TextMuted, fontSize = 15.sp)
-                        if (story.sources.isNotEmpty()) {
-                            Row(
-                                Modifier.horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                story.sources.forEach { source ->
-                                    val title = state.newsSources.firstOrNull { it.code == source.source }?.title ?: source.source
-                                    Text(
-                                        title,
-                                        color = Accent,
-                                        fontSize = 13.sp,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(CardRaised)
-                                            .clickable { context.openUrl(source.link) }
-                                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                                    )
-                                }
-                            }
-                        }
+                if (article != null) {
+                    Text(article.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                    article.paragraphs.firstOrNull()?.let {
+                        Text(it, color = TextMuted, fontSize = 16.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                    }
+                } else {
+                    Text(item.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                    digest.stories.forEach { story ->
+                        Text("• ${story.title}", color = TextMuted, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
+                Text("Читать целиком →", color = Accent, fontSize = 15.sp)
             }
         }
     }

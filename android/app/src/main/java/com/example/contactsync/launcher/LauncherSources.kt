@@ -175,12 +175,19 @@ class LauncherSettings(context: Context) {
      * Код выбранного в виджете издания; null — все вместе. Раньше здесь хранилось имя элемента
      * перечисления (RBC, NYPOST) — в нижнем регистре оно совпадает с кодом издания на сервере.
      */
+    /** Формат сводки новостей: сюжеты или одна статья. */
+    var digestFormat: DigestFormat
+        get() = prefs.getString(KEY_DIGEST_FORMAT, null)?.let { name -> DigestFormat.entries.firstOrNull { it.name == name } }
+            ?: DigestFormat.STORIES
+        set(value) = prefs.edit().putString(KEY_DIGEST_FORMAT, value.name).apply()
+
     var newsSource: String?
         get() = prefs.getString(KEY_NEWS, null)?.lowercase()
         set(value) = prefs.edit().putString(KEY_NEWS, value).apply()
 
     private companion object {
         const val KEY_NEWS = "news_source"
+        const val KEY_DIGEST_FORMAT = "digest_format"
         const val KEY_CITY = "city"
         const val KEY_INSTRUMENTS = "instruments"
         const val KEY_DOCK = "dock"

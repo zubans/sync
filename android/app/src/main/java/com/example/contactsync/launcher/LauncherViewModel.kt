@@ -49,6 +49,10 @@ data class LauncherState(
     val newsSources: List<NewsSource> = emptyList(),
     /** Код выбранного издания; null — все вместе. */
     val newsSource: String? = null,
+    /** Формат сводки: сюжеты или одна статья. */
+    val digestFormat: DigestFormat = DigestFormat.STORIES,
+    /** Сводка, открытая для чтения на весь экран; null — не открыта. */
+    val reading: NewsItem? = null,
     /** Почему новостей нет: не вошли в sync или сервер не ответил; null — всё в порядке. */
     val newsError: String? = null,
     val calendarAllowed: Boolean = false,
@@ -81,7 +85,9 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private val calendar = CalendarSource(application)
     private val vpnControl = VpnControl(application.filesDir)
 
-    private val _state = MutableStateFlow(LauncherState(city = settings.city, newsSource = settings.newsSource))
+    private val _state = MutableStateFlow(
+        LauncherState(city = settings.city, newsSource = settings.newsSource, digestFormat = settings.digestFormat),
+    )
     val state: StateFlow<LauncherState> = _state.asStateFlow()
 
     private var refreshJob: Job? = null
@@ -198,6 +204,14 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         newsJob?.cancel()
         newsJob = viewModelScope.launch { refreshNews() }
     }
+
+    fun setDigestFormat(format: DigestFormat) {
+        settings.digestFormat = format
+        _state.update { it.copy(digestFormat = format) }
+    }
+
+    /** Сводка на весь экран — нажатие на неё в карточке или в списке. */
+    fun read(item: NewsItem?) = _state.update { it.copy(reading = item) }
 
     /** Следующая страница вкладки — когда подробный экран долистали до конца. */
     fun loadMoreNews() {
