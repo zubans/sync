@@ -63,6 +63,8 @@ final class NewsSourceCrudController extends AbstractCrudController
             'Японский' => NewsSource::LANGUAGE_JA,
             'Китайский' => NewsSource::LANGUAGE_ZH,
             'Португальский' => NewsSource::LANGUAGE_PT,
+            'Персидский' => NewsSource::LANGUAGE_FA,
+            'Арабский' => NewsSource::LANGUAGE_AR,
         ])->setHelp('Не русский — заголовки, анонсы и тексты новостей переводятся на русский');
         yield BooleanField::new('enabled', 'Собирать')->renderAsSwitch(false);
         yield BooleanField::new('showInWidget', 'В виджете')->renderAsSwitch(false)
