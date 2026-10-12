@@ -63,17 +63,29 @@ private val Main = ColorProvider(Color(0xFFECEEF2))
 private val Muted = ColorProvider(Color(0xFF8B93A1))
 private val AccentColor = ColorProvider(Color(0xFF8AB4F8))
 
+/**
+ * Рамка виджета: нажатие на заголовок и на свободное место — [onOpen] (календарь на месяц, экран новостей),
+ * «↻» — [onRefresh], [action] справа — своё действие.
+ */
 @Composable
-private fun WidgetFrame(title: String, action: String?, onTitle: androidx.glance.action.Action, onAction: androidx.glance.action.Action?, content: @Composable () -> Unit) {
-    Column(GlanceModifier.fillMaxSize().background(WidgetBackground).cornerRadius(20.dp).padding(14.dp)) {
+private fun WidgetFrame(
+    title: String,
+    action: String?,
+    onOpen: androidx.glance.action.Action,
+    onRefresh: androidx.glance.action.Action,
+    onAction: androidx.glance.action.Action?,
+    content: @Composable () -> Unit,
+) {
+    Column(GlanceModifier.fillMaxSize().background(WidgetBackground).cornerRadius(20.dp).padding(14.dp).clickable(onOpen)) {
         Row(GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 title,
                 style = TextStyle(color = Main, fontSize = 18.sp, fontWeight = FontWeight.Medium),
-                modifier = GlanceModifier.defaultWeight().clickable(onTitle),
+                modifier = GlanceModifier.defaultWeight().clickable(onOpen),
             )
+            Text("↻", style = TextStyle(color = Muted, fontSize = 18.sp), modifier = GlanceModifier.clickable(onRefresh).padding(horizontal = 8.dp))
             if (action != null && onAction != null) {
-                Text(action, style = TextStyle(color = AccentColor, fontSize = 15.sp), modifier = GlanceModifier.clickable(onAction).padding(start = 8.dp))
+                Text(action, style = TextStyle(color = AccentColor, fontSize = 15.sp), modifier = GlanceModifier.clickable(onAction).padding(start = 4.dp))
             }
         }
         Spacer(GlanceModifier.height(8.dp))
@@ -103,7 +115,8 @@ class AgendaWidget : GlanceAppWidget() {
             WidgetFrame(
                 title = "Ближайшее",
                 action = "+ Событие",
-                onTitle = actionRunCallback<RefreshAgenda>(),
+                onOpen = actionStartActivity(CalendarActionActivity.openCalendar(context)),
+                onRefresh = actionRunCallback<RefreshAgenda>(),
                 onAction = actionStartActivity(CalendarActionActivity.newEvent(context)),
             ) {
                 when {
@@ -135,7 +148,7 @@ private fun AgendaWidgetRow(context: Context, row: AgendaRow) {
 }
 
 /**
- * Нажатие на заголовок «Ближайшее»: синхронизировать календари sync с сервером и перечитать события.
+ * «↻» в «Ближайшем»: синхронизировать календари sync с сервером и перечитать события.
  * На устройстве без лаунчера sync иначе синхронизация идёт раз в час (и после правок в календаре).
  */
 class RefreshAgenda : ActionCallback {
@@ -175,9 +188,10 @@ class NewsWidget : GlanceAppWidget() {
         provideContent {
             WidgetFrame(
                 title = "Новости",
-                action = "Все →",
-                onTitle = actionRunCallback<RefreshNews>(),
-                onAction = actionStartActivity(NewsActivity.intent(context, source = "")),
+                action = null,
+                onOpen = actionStartActivity(NewsActivity.intent(context, source = "")),
+                onRefresh = actionRunCallback<RefreshNews>(),
+                onAction = null,
             ) {
                 if (data.error != null) {
                     Message(data.error)
@@ -218,7 +232,7 @@ class NewsWidget : GlanceAppWidget() {
         } catch (e: UnauthorizedException) {
             NewsWidgetData(error = "Войдите в sync, чтобы видеть новости")
         } catch (e: Exception) {
-            NewsWidgetData(error = "Сервер новостей не ответил — нажмите «Новости», чтобы повторить")
+            NewsWidgetData(error = "Сервер новостей не ответил — нажмите ↻, чтобы повторить")
         }
     }
 
