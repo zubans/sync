@@ -32,6 +32,7 @@ import androidx.glance.layout.fillMaxWidth
 import androidx.glance.layout.height
 import androidx.glance.layout.padding
 import androidx.glance.layout.width
+import androidx.glance.text.FontFamily
 import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
@@ -244,7 +245,8 @@ class NewsWidget : GlanceAppWidget() {
 @Composable
 private fun NewsWidgetRow(title: String, caption: String, accent: Boolean, onClick: androidx.glance.action.Action) {
     Column(GlanceModifier.fillMaxWidth().padding(vertical = 6.dp).clickable(onClick)) {
-        Text(title, style = TextStyle(color = if (accent) AccentColor else Main, fontSize = 15.sp), maxLines = 3)
+        // Заголовки новостей — шрифтом с засечками, как статьи на экране чтения.
+        Text(title, style = TextStyle(color = if (accent) AccentColor else Main, fontSize = 16.sp, fontFamily = FontFamily.Serif), maxLines = 3)
         Text(caption, style = TextStyle(color = Muted, fontSize = 12.sp), maxLines = 1)
     }
 }
