@@ -34,6 +34,8 @@
 | `thenational` | The National (ОАЭ) | `https://www.thenationalnews.com/arc/outboundfeeds/rss/?outputType=xml` | RSS, с полным текстом, **только в сводку** |
 | `gulfnews` | Gulf News (ОАЭ) | `https://gulfnews.com/feed` | RSS, с полным текстом, **только в сводку** |
 | `albayan` | Аль-Баян (ОАЭ) | `https://www.albayan.ae/news-sitemap.xml` | новостная карта сайта, по-арабски, без полного текста, **только в сводку** |
+| `habr` | Хабр | `https://habr.com/ru/rss/articles/?fl=ru` и `https://habr.com/ru/rss/news/?fl=ru` | RSS, статьи и новости, полный текст со страниц |
+| `meduza` | Медуза | `https://meduza.io/rss/all` | RSS, с полным текстом |
 | `digest` | Сводка | — | пишет модель по новостям остальных изданий, см. «Сводки» |
 
 Стартовые издания заводит миграция `Version20261011120000`. Дальше — «Новости → Издания» в админке: включить, выключить, добавить новое RSS-издание. Выключенное издание не собирается и пропадает из вкладок, его новости остаются в базе.
