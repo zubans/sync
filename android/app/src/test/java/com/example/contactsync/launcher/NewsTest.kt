@@ -1,5 +1,6 @@
 package com.example.contactsync.launcher
 
+import com.example.contactsync.data.MarketImpactDto
 import com.example.contactsync.data.NewsArticleDto
 import com.example.contactsync.data.NewsDigestDto
 import com.example.contactsync.data.NewsItemDto
@@ -165,5 +166,33 @@ class NewsTest {
 
         assertEquals(listOf(1L, 2L, 3L), page.items.map { it.id })
         assertEquals(null, page.nextCursor)
+    }
+
+    @Test
+    fun `market impacts map forecast and show fact once trades happened`() {
+        val dto = NewsItemDto(
+            id = 1, source = "rbc", title = "Сбербанк объявил дивиденды", link = "https://rbc.ru/1", time = "2026-10-13T07:05:00+00:00",
+            market = listOf(
+                MarketImpactDto("SBER", "Сбербанк", "up", "Дивиденды выше ожиданий.", hourChange = 2.0, hourFinal = true, dayChange = -0.35, final = true),
+                MarketImpactDto("MOEXFN", "Индекс финансов", "mixed", "Влияние на сектор неясно.", hourChange = 0.4),
+                MarketImpactDto("IMOEX", "Индекс МосБиржи", "down", "Рынок может снизиться."),
+            ),
+        )
+
+        val market = NewsFeed.item(dto).market
+
+        assertEquals(listOf(MarketForecast.UP, MarketForecast.MIXED, MarketForecast.DOWN), market.map { it.forecast })
+        assertEquals(listOf("SBER +2,0%", "MOEXFN +0,40%", "IMOEX ↓"), market.map(NewsFeed::marketBrief))
+        assertEquals("+2,0% за час торгов · −0,35% на закрытие дня", NewsFeed.marketFact(market[0]))
+        assertEquals("+0,40% с момента новости, час ещё не прошёл", NewsFeed.marketFact(market[1]))
+        assertEquals("Торгов после новости ещё не было", NewsFeed.marketFact(market[2]))
+        assertEquals("+0,40% за час торгов · +1,2% сейчас", NewsFeed.marketFact(market[1].copy(hourFinal = true, dayChange = 1.2)))
+    }
+
+    @Test
+    fun `old server without market field gives no impacts`() {
+        val dto = NewsItemDto(id = 1, source = "rbc", title = "Новость", link = "https://rbc.ru/1", time = "2026-10-13T07:05:00+00:00")
+
+        assertEquals(emptyList<MarketImpact>(), NewsFeed.item(dto).market)
     }
 }

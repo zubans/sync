@@ -725,6 +725,7 @@ private fun NewsCard(state: LauncherState, vm: LauncherViewModel, modifier: Modi
                             color = TextMuted,
                             fontSize = 13.sp,
                         )
+                        if (item.market.isNotEmpty()) Text(marketLine(item.market), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }

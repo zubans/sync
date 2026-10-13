@@ -33,6 +33,25 @@ data class NewsItemDto(
     val original: NewsOriginalDto? = null,
     /** Только в `GET /api/news/{id}` у переведённых статей: полный текст на языке издания, [content] — перевод. */
     val originalContent: List<String> = emptyList(),
+    /** Последствия для инструментов Мосбиржи; у старого сервера поля нет. */
+    val market: List<MarketImpactDto> = emptyList(),
+)
+
+/** Последствие новости для инструмента Мосбиржи: прогноз модели и изменение цены после новости. */
+@Serializable
+data class MarketImpactDto(
+    val secid: String,
+    val name: String,
+    /** up, down или mixed. */
+    val forecast: String,
+    val reason: String,
+    /** Изменение к последней сделке до новости через час торгов, %; null — торгов после новости ещё не было. */
+    val hourChange: Double? = null,
+    val hourFinal: Boolean = false,
+    /** Изменение на закрытие торгового дня, %; пока день идёт — текущее. */
+    val dayChange: Double? = null,
+    /** Замер окончательный: час торгов набрался и день закрылся. */
+    val final: Boolean = false,
 )
 
 @Serializable

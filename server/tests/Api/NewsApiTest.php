@@ -4,6 +4,7 @@ namespace App\Tests\Api;
 
 use App\Entity\NewsDigest;
 use App\Entity\NewsItem;
+use App\Entity\NewsMarketImpact;
 use App\Entity\NewsSource;
 use App\Tests\DatabaseWebTestCase;
 
@@ -226,6 +227,35 @@ final class NewsApiTest extends DatabaseWebTestCase
         $digests = $this->api('GET', '/api/news?source=digest', token: $token)['items'];
 
         self::assertSame('Забастовка во Франции', $digests[0]['digest']['stories'][0]['sources'][0]['title']);
+    }
+
+    public function testMarketImpactsInFeedItemAndStoryline(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $rbc = new NewsSource('rbc', 'РБК', 'https://rbc.example/feed');
+        $this->em->persist($rbc);
+        $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $line = new \App\Entity\NewsStoryline([1.0, 0.0], $now->modify('-1 hour'));
+        $line->name('Дивиденды Сбербанка', 'Набсовет рекомендовал дивиденды.');
+        $this->em->persist($line);
+        $news = $this->item($rbc, 'a', $now->modify('-1 hour')->format('Y-m-d H:i:s'));
+        $news->setStoryline($line);
+        $quiet = $this->item($rbc, 'b', $now->modify('-2 hours')->format('Y-m-d H:i:s'));
+        $impact = new NewsMarketImpact($news, 'SBER', 'Сбербанк', 'stock', 'shares', NewsMarketImpact::UP, 'Дивиденды выше ожиданий — акции могут вырасти.', $now);
+        $impact->measure(300.0, 306.0, true, 303.0, false);
+        $this->em->persist($impact);
+        $this->em->flush();
+
+        $expected = [[
+            'secid' => 'SBER', 'name' => 'Сбербанк', 'forecast' => 'up', 'reason' => 'Дивиденды выше ожиданий — акции могут вырасти.',
+            'hourChange' => 2, 'hourFinal' => true, 'dayChange' => 1, 'final' => false,
+        ]];
+        $feed = $this->api('GET', '/api/news', token: $token)['items'];
+        self::assertSame($expected, $feed[0]['market']);
+        self::assertSame([], $feed[1]['market'], 'у новости без последствий — пустой список');
+        self::assertSame($expected, $this->api('GET', '/api/news/'.$news->getId(), token: $token)['market']);
+        self::assertSame($expected, $this->api('GET', '/api/news/storylines/'.$line->getId(), token: $token)['items'][0]['market']);
+        self::assertSame([], $this->api('GET', '/api/news/'.$quiet->getId(), token: $token)['market']);
     }
 
     public function testUnknownSourceAndBadCursorAreRejected(): void

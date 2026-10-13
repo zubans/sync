@@ -497,6 +497,7 @@ internal fun NewsDetail(state: LauncherState, vm: LauncherViewModel, onClose: ()
                 ) {
                     Text(NewsFeed.caption(item, state.newsSources, now, zone), color = Accent, fontSize = 14.sp)
                     Text(item.title, color = TextMain, fontSize = 19.sp, fontWeight = FontWeight.Medium, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                    if (item.market.isNotEmpty()) Text(marketLine(item.market), fontSize = 15.sp)
                     if (item.summary.isNotEmpty()) {
                         Text(item.summary, color = TextMuted, fontSize = 15.sp, maxLines = 6, overflow = TextOverflow.Ellipsis)
                     }

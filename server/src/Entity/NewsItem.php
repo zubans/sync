@@ -91,6 +91,13 @@ class NewsItem
     #[ORM\Column(options: ['default' => 0])]
     private int $contentTranslationAttempts = 0;
 
+    /**
+     * Когда модель решила, влияет ли новость на инструменты Мосбиржи ([NewsMarketService]); null — ещё нет.
+     * Последствия, если они есть, — в [NewsMarketImpact].
+     */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $marketCheckedAt = null;
+
     #[ORM\Column(nullable: true)]
     private ?\DateTimeImmutable $publishedAt = null;
 
@@ -263,6 +270,16 @@ class NewsItem
     public function setStoryline(?NewsStoryline $storyline): void
     {
         $this->storyline = $storyline;
+    }
+
+    public function markMarketChecked(\DateTimeImmutable $at): void
+    {
+        $this->marketCheckedAt = $at;
+    }
+
+    public function getMarketCheckedAt(): ?\DateTimeImmutable
+    {
+        return $this->marketCheckedAt;
     }
 
     public function getContentFetchedAt(): ?\DateTimeImmutable

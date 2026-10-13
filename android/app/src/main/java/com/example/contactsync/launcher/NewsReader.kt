@@ -40,6 +40,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -166,7 +170,14 @@ private fun StoryTimeline(page: ReaderPage.Story, state: LauncherState, vm: Laun
                 ) {
                     Text(news.time.atZone(zone).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")), color = TextMuted, fontSize = 15.sp, modifier = Modifier.widthIn(min = 56.dp))
                     Text(news.sourceTitle ?: news.source, color = Accent, fontSize = 15.sp, modifier = Modifier.widthIn(min = 110.dp).padding(end = 8.dp))
-                    Text(news.title, color = TextMain, fontSize = 17.sp, lineHeight = 24.sp, fontFamily = Reading)
+                    // Последствия для Мосбиржи — в скобках после заголовка: «(SBER +2,1%, IMOEX −0,3%)».
+                    val title = if (news.market.isEmpty()) AnnotatedString(news.title) else buildAnnotatedString {
+                        append(news.title)
+                        append(" (")
+                        append(marketLine(news.market, separator = ", "))
+                        append(")")
+                    }
+                    Text(title, color = TextMain, fontSize = 17.sp, lineHeight = 24.sp, fontFamily = Reading)
                 }
             }
         }
@@ -232,6 +243,9 @@ private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel
                 )
             }
         }
+        if (item.market.isNotEmpty()) {
+            item { MarketPanel(item.market) }
+        }
         item {
             Text(title, color = TextMain, fontSize = readingType.title, fontWeight = FontWeight.SemiBold, lineHeight = readingType.titleLine, fontFamily = Reading)
         }
@@ -254,6 +268,60 @@ private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel
             }
         }
     }
+}
+
+/**
+ * Плашка «Мосбиржа»: по каждому инструменту — прогноз модели с объяснением и факт, как цена пошла после новости.
+ * Цвет факта — по знаку изменения; пока торгов после новости не было — по прогнозу.
+ */
+@Composable
+private fun MarketPanel(impacts: List<MarketImpact>) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(CardRaised)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Мосбиржа · последствия новости", color = TextMuted, fontSize = 14.sp)
+        impacts.forEach { impact ->
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${impact.secid} · ${impact.name}", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "  ${NewsFeed.arrow(impact.forecast)} ${NewsFeed.forecastText(impact.forecast)}",
+                        color = forecastColor(impact.forecast),
+                        fontSize = 15.sp,
+                    )
+                }
+                Text(impact.reason, color = TextMain, fontSize = 15.sp, lineHeight = 21.sp)
+                Text(NewsFeed.marketFact(impact), color = impact.hourChange?.let(::changeColor) ?: TextMuted, fontSize = 15.sp)
+            }
+        }
+    }
+}
+
+/** Краткая строка последствий для ленты и хроники: «SBER +2,1% · IMOEX ↓», каждый инструмент своим цветом. */
+internal fun marketLine(impacts: List<MarketImpact>, separator: String = " · "): AnnotatedString = buildAnnotatedString {
+    impacts.forEachIndexed { index, impact ->
+        if (index > 0) append(separator)
+        withStyle(SpanStyle(color = impact.hourChange?.let(::changeColor) ?: forecastColor(impact.forecast))) {
+            append(NewsFeed.marketBrief(impact))
+        }
+    }
+}
+
+private fun changeColor(change: Double) = when {
+    change > 0 -> Up
+    change < 0 -> Down
+    else -> TextMuted
+}
+
+private fun forecastColor(forecast: MarketForecast) = when (forecast) {
+    MarketForecast.UP -> Up
+    MarketForecast.DOWN -> Down
+    MarketForecast.MIXED -> Amber
 }
 
 /** Переключатель формата сводки: «Сюжеты» или «Статья». Выбор запоминается. */
