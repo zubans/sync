@@ -112,7 +112,7 @@ code-server отдаётся по HTTP, поэтому VS Code предупре�
   | **GPU от 698 МГц + планировщик** (выбрано) | **15 мс** | **32 мс** | 6,4 + 3,1 мс |
 
   Цена — немного больше нагрев и расход батареи; планшет стоит на зарядке.
-- **Сборка.** Release подписывается debug-ключом этой машины и ставится поверх debug без потери данных: `./gradlew assembleRelease -PserverUrl=http://94.103.9.172:8001`, затем `adb shell cmd package compile -m speed -f com.example.contactsync` (полная AOT-компиляция).
+- **Сборка.** Release подписывается debug-ключом этой машины и ставится поверх debug без потери данных: `./gradlew assembleRelease`, затем `adb shell cmd package compile -m speed -f com.example.contactsync` (полная AOT-компиляция).
 
 ## Поиск Яндекса
 
@@ -219,7 +219,7 @@ adb shell cmd package set-home-activity com.example.contactsync/.launcher.Launch
 adb shell cmd package set-home-activity com.android.launcher3/.uioverrides.QuickstepLauncher
 ```
 
-Переустановка APK может сбросить выбор главного экрана — после `adb install` повторить команду выше. APK для планшета собирается с адресом сервера на VPS: `./gradlew assembleDebug -PserverUrl=http://94.103.9.172:8001`.
+Переустановка APK может сбросить выбор главного экрана — после `adb install` повторить команду выше. Адрес сервера на VPS зашит в APK по умолчанию: `make install-apk`.
 
 Своя панель навигации:
 1. «Настройки → System → Gestures → System navigation → Gesture navigation».

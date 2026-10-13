@@ -99,11 +99,10 @@ android/local.properties:
 	@test -d "$(ANDROID_SDK)" || { echo "Android SDK не найден в $(ANDROID_SDK) — укажите ANDROID_SDK=/путь/к/sdk"; exit 1; }
 	echo "sdk.dir=$(ANDROID_SDK)" > $@
 
-apk: android/local.properties ## Собрать debug APK; адрес сервера по умолчанию: make apk SERVER_URL=http://host:port
+apk: android/local.properties ## Собрать debug APK (сервер по умолчанию — VPS); другой: make apk SERVER_URL=http://host:port
 	cd android && ./gradlew assembleDebug $(if $(SERVER_URL),-PserverUrl=$(SERVER_URL))
 
-install-apk: apk ## Поставить APK на подключённое устройство (без SERVER_URL — ещё и проброс порта)
-	$(if $(SERVER_URL),,$(MAKE) reverse)
+install-apk: apk ## Поставить APK на подключённое устройство
 	adb install -r $(APK)
 
 reverse: ## Пробросить порт сервера на устройство: в приложении адрес http://127.0.0.1:<порт>
