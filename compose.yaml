@@ -79,6 +79,29 @@ services:
         done
     restart: unless-stopped
 
+  # Резервные копии на Яндекс.Диск и шару в локальной сети (схема — как у бекапа KB): не работает постоянно, запускается make backup
+  # и make backup-db из cron хоста. Папка проекта, хранилище и rclone.conf пользователя хоста (remote yandex, общий
+  # с бекапами KB и trash) — только на чтение; хранилище на запись открывает только make restore-files
+  backup:
+    build: ./docker/backup
+    image: sync-backup
+    profiles: [backup]
+    env_file: .env
+    environment:
+      # слоты daily/<день>, hours/<час> — по московскому времени, как у бекапа KB
+      TZ: ${BACKUP_TZ:-Europe/Moscow}
+    volumes:
+      - ${BACKUP_DIR:-~/backups/sync}:/backup
+      - ${BACKUP_RCLONE_DIR:-~/.config/rclone}:/rclone:ro
+      - .:/src:ro
+      - apk_storage:/storage:${BACKUP_STORAGE_MODE:-ro}
+      - agy_data:/agy:ro
+      # шара D: компьютера 192.168.1.133 (вторая копия): тот же путь, что на хосте; rslave — чтобы automount
+      # хоста, сработавший уже после старта контейнера, был виден и в нём
+      - ${BACKUP_LAN_MOUNT:-/media/share}:${BACKUP_LAN_MOUNT:-/media/share}:rslave
+    depends_on:
+      - database
+
 volumes:
   agy_data:
   database_data:

@@ -161,9 +161,45 @@ make admin EMAIL=admin@example.com
 
 Настройки — в `.env` в корне проекта: `HTTP_PORT` (по умолчанию 8001). После правки `.env` выполните `make restart`.
 
-Данные лежат в томах Docker: `database_data` — PostgreSQL, `apk_storage` — сохранённые APK. Миграции применяются автоматически при каждом старте контейнера.
+Данные лежат в томах Docker: `database_data` — PostgreSQL, `apk_storage` — сохранённые APK и фото контактов. Миграции применяются автоматически при каждом старте контейнера.
 
 Для продакшена сервер нужно поставить за обратный прокси с HTTPS: release-сборка клиента ходит только по HTTPS.
+
+### Резервные копии
+
+Бекап в две копии с одинаковой раскладкой — Яндекс.Диск `backup/sync` и шара `D:` компьютера 192.168.1.133 (`D:\backup\sync`, на хосте смонтирована в `/media/share`) — по той же схеме, что у KB: контейнер `backup` (`docker/backup/backup.sh`, rclone и `pg_dump`), слоты по кругу. Дамп снимается один раз и заливается в обе копии; недоступная копия (компьютер выключен, токен Яндекса истёк) пропускается, другая пишется, а запуск завершается с ошибкой. Remote `yandex` берётся из `rclone.conf` пользователя хоста — тот же, что у бекапов KB и trash.
+
+| Что | Как часто и где |
+|---|---|
+| секреты: `.env` и вход agy, шифруются `BACKUP_PASSPHRASE` | `daily/<Mon..Sun>`, `weekly/w1..w4`, `monthly/01..12` |
+| база PostgreSQL | каждые 6 ч в `hours/<00\|06\|12\|18>`, плюс daily, weekly, monthly |
+| фото контактов | зеркало `photos/current`; удалённое и перезаписанное — в daily; полные копии в weekly и monthly |
+| APK (десятки ГБ) | зеркало `apk/current`; удалённое — в daily. Срезов нет: пока приложение стоит на телефоне, APK загрузится снова |
+
+Включение:
+
+```bash
+make backup-env                      # BACKUP_PASSPHRASE в .env — сохраните его в менеджере паролей
+echo BACKUP_ENABLED=1 >> .env
+make backup && make backup-status    # первый запуск: зальёт все APK, это долго
+```
+
+Расписание — cron хоста (`crontab -e`):
+
+```
+55 3 * * *    make -C ~/.openclaw/workspace/worktrees/sync backup    >> ~/backups/sync-backup.log 2>&1
+25 */6 * * *  make -C ~/.openclaw/workspace/worktrees/sync backup-db >> ~/backups/sync-backup.log 2>&1
+```
+
+Переменные `.env` (все необязательные, кроме пароля): `BACKUP_REMOTES` — копии через пробел (`yandex:backup/sync /media/share/backup/sync`), `BACKUP_LAN_MOUNT` — точка монтирования шары, пробрасывается в контейнер (`/media/share`), `BACKUP_DIR` — локальный стейдж (`~/backups/sync`), `BACKUP_RCLONE_DIR` (`~/.config/rclone`), `BACKUP_TZ` (`Europe/Moscow`).
+
+Восстановление — из Яндекса; из шары — с `FROM=/media/share/backup/sync`:
+
+| Команда | Что делает |
+|---|---|
+| `make restore-db SLOT=daily/Mon` | заменяет базу дампом слота (`hours/06`, `weekly/w2`, `monthly/10`…); app и news на это время останавливаются |
+| `make restore-files [WHAT=apk] [SLOT=…]` | возвращает фото (по умолчанию) или APK; без `SLOT` — из зеркала `current`, `daily/…` — старые версии того дня |
+| `make decrypt-secrets SLOT=daily/Mon` | расшифровывает секреты в `~/backups/sync/restore/`; `.env` и файлы agy раскладываются вручную |
 
 ### Без Docker
 

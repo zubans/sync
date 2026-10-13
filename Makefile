@@ -8,7 +8,7 @@ HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate analyze digest digest-preview agy-login test clean apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate analyze digest digest-preview agy-login test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -22,7 +22,7 @@ init: ## Создать .env со случайными секретами (од�
 		echo "Создан .env (секреты сгенерированы)"; fi
 
 build: init ## Собрать образ сервера
-	$(COMPOSE) build
+	$(COMPOSE) --profile backup build
 
 up: init ## Запустить сервер и базу (миграции применяются при старте)
 	$(COMPOSE) up -d --build
@@ -90,6 +90,37 @@ test: ## Тесты сервера в контейнере
 clean: ## Удалить контейнеры и ВСЕ данные (база, APK): make clean CONFIRM=yes
 	@test "$(CONFIRM)" = "yes" || { echo "Удалит базу и сохранённые APK. Запустите: make clean CONFIRM=yes"; exit 1; }
 	$(COMPOSE) down -v
+
+# --- Резервные копии на Яндекс.Диск и шару D: компьютера 192.168.1.133 (схема — как у KB). Расписание — cron хоста, пример — README, «Резервные копии».
+# Пока BACKUP_ENABLED не 1, бекап ничего не делает; восстановление работает всегда.
+
+# Восстановление — из первой копии (Яндекс) или из FROM=/media/share/backup/sync
+BACKUP = $(COMPOSE) --profile backup run --rm -T $(if $(FROM),-e BACKUP_FROM=$(FROM)) backup
+
+backup-env: ## Пароль архива секретов в .env, если его ещё нет: сохраните его и в менеджере паролей
+	@grep -q '^BACKUP_PASSPHRASE=.' .env || { pass=$$(openssl rand -base64 33 | tr -d '/+='); \
+	  grep -q '^BACKUP_PASSPHRASE=' .env && sed -i.bak "s|^BACKUP_PASSPHRASE=.*|BACKUP_PASSPHRASE=$$pass|" .env || echo "BACKUP_PASSPHRASE=$$pass" >> .env; \
+	  rm -f .env.bak; echo "BACKUP_PASSPHRASE задан в .env — сохраните его в менеджере паролей"; }
+
+backup: ## Дневной бекап: секреты, БД, зеркала фото и APK; по воскресеньям и 1-го — срезы
+	$(BACKUP) daily
+
+backup-db: ## Дамп БД между дневными запусками (слот hours/<00|06|12|18>)
+	$(BACKUP) db
+
+backup-status: ## Последние запуски бекапа и слоты на Диске
+	@$(BACKUP) status
+
+restore-db: ## БД из слота: make restore-db SLOT=daily/Mon (weekly/w1..w4, monthly/01..12, hours/00..18). Заменяет текущие данные
+	$(COMPOSE) stop app news
+	$(BACKUP) restore-db $(SLOT)
+	$(COMPOSE) start app news
+
+restore-files: ## WHAT=photos (по умолчанию) или apk; без SLOT — зеркало current. Файлы, появившиеся после бекапа, остаются
+	BACKUP_STORAGE_MODE=rw $(BACKUP) restore-files $(or $(WHAT),photos) $(or $(SLOT),current)
+
+decrypt-secrets: ## Секреты слота SLOT — в BACKUP_DIR/restore/; файлы раскладываются по местам вручную
+	$(BACKUP) decrypt-secrets $(SLOT)
 
 # --- Android-клиент (нужны Android SDK и подключённое устройство) ---
 
