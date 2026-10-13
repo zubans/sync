@@ -127,6 +127,27 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
+     * Свежие новости (без сводок), которые модель ещё не проверяла на влияние на Мосбиржу, — свежие первыми.
+     * Архив не догоняется: последствие интересно, пока новость свежая, а квота agy ограничена.
+     *
+     * @return list<NewsItem>
+     */
+    public function findNeedingMarketCheck(\DateTimeImmutable $since, int $limit): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->addSelect('s')
+            ->where('n.marketCheckedAt IS NULL AND n.firstSeenAt >= :since AND s.format <> :digest')
+            ->setParameter('since', $since)
+            ->setParameter('digest', NewsSource::FORMAT_DIGEST)
+            ->orderBy('n.sortAt', 'DESC')
+            ->addOrderBy('n.id', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Новости с вектором, ещё не привязанные к сюжетной линии, — по порядку времени:
      * линия растёт так же, как шли события.
      *

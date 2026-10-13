@@ -1,5 +1,6 @@
 package com.example.contactsync.launcher
 
+import com.example.contactsync.data.MarketImpactDto
 import com.example.contactsync.data.NewsDigestDto
 import com.example.contactsync.data.NewsItemDto
 import com.example.contactsync.data.NewsSourceDto
@@ -44,7 +45,31 @@ data class NewsItem(
     val language: String = "ru",
     /** Новость на языке издания — у переведённых сервером; [title], [summary] и [content] тогда перевод. */
     val original: NewsOriginal? = null,
+    /** Инструменты Мосбиржи, которые новость может сдвинуть; пусто — последствий нет или новость ещё не разобрана. */
+    val market: List<MarketImpact> = emptyList(),
 )
+
+/**
+ * Последствие новости для инструмента Мосбиржи. Прогноз с объяснением даёт модель на сервере, факт сервер
+ * считает по свечам ISS: изменение к последней сделке до новости через час торгов и на закрытие дня.
+ */
+data class MarketImpact(
+    val secid: String,
+    val name: String,
+    val forecast: MarketForecast,
+    /** Почему и куда может пойти цена — объяснение модели. */
+    val reason: String,
+    /** Через час торгов после новости, %; null — торгов после неё ещё не было. */
+    val hourChange: Double?,
+    /** Час торгов набрался; иначе [hourChange] — с момента новости до последней сделки. */
+    val hourFinal: Boolean,
+    /** На закрытие дня, %; пока день идёт — текущее изменение. */
+    val dayChange: Double?,
+    /** День закрылся — цифры больше не изменятся. */
+    val final: Boolean,
+)
+
+enum class MarketForecast { UP, DOWN, MIXED }
 
 /** Оригинал переведённой новости: заголовок, анонс и абзацы полного текста (пусто — текст не переведён или не загружен). */
 data class NewsOriginal(val title: String, val summary: String, val paragraphs: List<String> = emptyList())
@@ -127,7 +152,57 @@ object NewsFeed {
         original = dto.original?.takeIf { dto.translated }?.let {
             NewsOriginal(it.title, it.summary.orEmpty(), if (dto.fullText) dto.originalContent else emptyList())
         },
+        market = dto.market.map(::marketImpact),
     )
+
+    private fun marketImpact(dto: MarketImpactDto) = MarketImpact(
+        secid = dto.secid,
+        name = dto.name,
+        forecast = when (dto.forecast) {
+            "up" -> MarketForecast.UP
+            "down" -> MarketForecast.DOWN
+            else -> MarketForecast.MIXED
+        },
+        reason = dto.reason,
+        hourChange = dto.hourChange,
+        hourFinal = dto.hourFinal,
+        dayChange = dto.dayChange,
+        final = dto.final,
+    )
+
+    /** Изменение цены: «+2,1%», «−0,35%» — меньше процента с двумя знаками, иначе с одним; минус типографский. */
+    fun percent(value: Double): String {
+        val text = String.format(java.util.Locale.forLanguageTag("ru"), if (kotlin.math.abs(value) < 1) "%.2f" else "%.1f", kotlin.math.abs(value))
+        return (if (value < 0) "−" else "+") + text + "%"
+    }
+
+    /** Стрелка прогноза: ↑ рост, ↓ падение, ↕ направление неясно. */
+    fun arrow(forecast: MarketForecast): String = when (forecast) {
+        MarketForecast.UP -> "↑"
+        MarketForecast.DOWN -> "↓"
+        MarketForecast.MIXED -> "↕"
+    }
+
+    fun forecastText(forecast: MarketForecast): String = when (forecast) {
+        MarketForecast.UP -> "может вырасти"
+        MarketForecast.DOWN -> "может снизиться"
+        MarketForecast.MIXED -> "направление неясно"
+    }
+
+    /** Кратко для ленты и хроники: «SBER +2,1%» — факт за час торгов (пока час не набрался — с момента новости), а пока торгов после новости не было — «SBER ↑» (прогноз). */
+    fun marketBrief(impact: MarketImpact): String =
+        impact.secid + " " + (impact.hourChange?.let(::percent) ?: arrow(impact.forecast))
+
+    /**
+     * Факт для экрана новости: «+2,1% за час торгов · −0,4% на закрытие дня». Пока час не набрался — изменение
+     * с момента новости, пока день идёт — «сейчас».
+     */
+    fun marketFact(impact: MarketImpact): String {
+        val hour = impact.hourChange ?: return "Торгов после новости ещё не было"
+        val parts = mutableListOf(percent(hour) + if (impact.hourFinal) " за час торгов" else " с момента новости, час ещё не прошёл")
+        if (impact.hourFinal) impact.dayChange?.let { parts += percent(it) + if (impact.final) " на закрытие дня" else " сейчас" }
+        return parts.joinToString(" · ")
+    }
 
     /** Подпись перевода: «с английского»; null — язык неизвестен клиенту. */
     fun languageName(code: String): String? = when (code) {

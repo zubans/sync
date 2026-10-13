@@ -151,7 +151,15 @@ adb shell "su -c 'cp /data/local/tmp/vpnctl.sh /data/local/oc/ && chmod 755 /dat
 
 ## Звуки
 
-Звуки iPhone защищены авторским правом Apple, поэтому стоят свободные аналоги. Это настройка планшета, в репозитории их нет.
+Звуки iPhone защищены авторским правом Apple, поэтому для звонка, уведомлений и будильника стоят свободные аналоги. Это настройка планшета, в репозитории их нет.
+
+Щелчки клавиатуры и звуки блокировки — с Pixel 7 Pro (Android 14). Полный набор звуков Pixel лежит в [tablet/sounds/pixel](../tablet/sounds/pixel) (звуки принадлежат Google):
+
+- `01_lock_unlock_keyboard` — блокировка, разблокировка, клавиши;
+- `02_system` — системные звуки из `/product/media/audio` (будильники, уведомления, рингтоны, интерфейс);
+- `03_apps` — звуки из APK приложений Google (Gboard, Часы, Телефон, Камера, Ассистент, Play Services и др.); имена восстановлены из ресурсов (`apkanalyzer resources`).
+
+На планшете набор лежит в `/sdcard/Pixel7Pro_Sounds`, звонки, уведомления и будильники Pixel скопированы ещё и в `Ringtones`, `Notifications`, `Alarms`, чтобы их можно было выбрать в настройках.
 
 Тема — «тёплая, ламповая»: живые инструменты и механика вместо цифровых сигналов.
 
@@ -160,10 +168,12 @@ adb shell "su -c 'cp /data/local/tmp/vpnctl.sh /data/local/oc/ && chmod 755 /dat
 | Звонок | `Ringtones/Kalimba.m4a` (запасной — `Ringtones/Vibes.m4a`) | «Kalimba de coco», Luis Alvaz, Wikimedia Commons, CC BY-SA 4.0; «Vibes Cm7», Serolillo, CC BY 2.5 |
 | Уведомления | `Notifications/Kalimba.m4a` (запасной — `Notifications/Soft ding.m4a`) | «Kalimba – two notes», railkill, OpenGameArt, CC0; «Dings», Wandering Door Games, CC BY-SA 4.0 |
 | Будильник | `Alarms/Music box.m4a` | заводная музыкальная шкатулка «Guten Abend, gut' Nacht», stephan, Wikimedia Commons, общественное достояние |
-| Клавиатура | `/data/local/tmp/sounds/ui/Keypress*.ogg`, `Effect_Tick.ogg` | клавиатура Cherry KC 1000, unicaegames, OpenGameArt, CC0 |
-| Блокировка | `/data/local/tmp/sounds/ui/Lock.ogg`, `Unlock.ogg` | «10 Clicks and Switches», StarNinjas, OpenGameArt, CC0 |
+| Клавиатура | `/data/local/tmp/sounds/ui/Keypress*.ogg`, `Effect_Tick.ogg` | Pixel 7 Pro, `02_system/ui` |
+| Блокировка | `/data/local/tmp/sounds/ui/Lock.ogg`, `Unlock.ogg` | Pixel 7 Pro, `02_system/ui` |
 
-Обработка: длинным звукам выровнена громкость и добавлено затухание (AAC); клавишам и щелчкам срезаны верхние частоты, уменьшена громкость, длительность — до 0,2 с (Opus в OGG).
+Прежние щелчки — клавиатура Cherry KC 1000 (unicaegames, CC0) и «10 Clicks and Switches» (StarNinjas, CC0) с OpenGameArt — сохранены на планшете в `/data/local/tmp/sounds/ui_kenney`; чтобы вернуть, скопировать их в `ui/` и выполнить `boot.sh`.
+
+Обработка свободных звуков: длинным звукам выровнена громкость и добавлено затухание (AAC); клавишам и щелчкам срезаны верхние частоты, уменьшена громкость, длительность — до 0,2 с (Opus в OGG).
 
 - **Звонок, уведомления и будильник** выбираются в «Настройки → Sound» или командой `settings put system ringtone|notification_sound|alarm_alert content://media/external/audio/media/<id>`.
 - **Щелчки интерфейса** названы как системные (`KeypressStandard`, `Lock`, `Unlock`, …). Скрипт автозапуска при загрузке подменяет ими системные через `mount -o bind`: раздел `/product` не меняется, а без скрипта после перезагрузки возвращаются стандартные звуки.

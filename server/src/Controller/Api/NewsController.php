@@ -4,9 +4,11 @@ namespace App\Controller\Api;
 
 use App\Entity\NewsDigest;
 use App\Entity\NewsItem;
+use App\Entity\NewsMarketImpact;
 use App\Entity\NewsSource;
 use App\Entity\NewsStoryline;
 use App\Repository\NewsItemRepository;
+use App\Repository\NewsMarketImpactRepository;
 use App\Repository\NewsSourceRepository;
 use App\Repository\NewsStorylineRepository;
 use App\Service\EventTime;
@@ -35,6 +37,7 @@ final class NewsController extends AbstractController
         private readonly NewsSourceRepository $sources,
         private readonly EntityManagerInterface $em,
         private readonly NewsStorylineRepository $storylines,
+        private readonly NewsMarketImpactRepository $marketImpacts,
     ) {
     }
 
@@ -64,9 +67,11 @@ final class NewsController extends AbstractController
         $items = $this->items->findFeed($selected, $limit, $beforeAt, $beforeId);
         $last = end($items) ?: null;
         $digests = $this->digestViews($items);
+        $market = $this->marketImpacts->findByItems($items);
 
         return $this->json([
-            'items' => array_map(static fn (NewsItem $i) => self::itemView($i) + (isset($digests[$i->getId()]) ? ['digest' => $digests[$i->getId()]] : []), $items),
+            'items' => array_map(static fn (NewsItem $i) => self::itemView($i, $market[$i->getId()] ?? [])
+                + (isset($digests[$i->getId()]) ? ['digest' => $digests[$i->getId()]] : []), $items),
             'nextCursor' => \count($items) === $limit && $last !== null
                 ? EventTime::fromDb($last->getSortAt())->getTimestamp().'.'.$last->getId()
                 : null,
@@ -89,7 +94,7 @@ final class NewsController extends AbstractController
         $translated = NewsItem::paragraphs($item->getTranslatedContent());
         $digest = $this->digestViews([$item]);
 
-        return $this->json(self::itemView($item) + [
+        return $this->json(self::itemView($item, $this->marketImpacts->findByItems([$item])[$id] ?? []) + [
             // Есть перевод — текст по-русски, оригинал отдельно: на планшете его можно показать вместо перевода.
             'content' => $translated !== [] ? $translated : $paragraphs,
             // Полный текст — скачанный со страницы или достаточно длинный из ленты (РБК), а не анонс.
@@ -126,9 +131,11 @@ final class NewsController extends AbstractController
         }
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $stats = $this->storylineStats([$line], $now->modify('-24 hours'));
+        $items = $this->items->findByStoryline($line);
+        $market = $this->marketImpacts->findByItems($items);
 
         return $this->json($this->storylineView($line, $stats[$id] ?? ['sources' => [], 'recent' => 0]) + [
-            'items' => array_map(self::itemView(...), $this->items->findByStoryline($line)),
+            'items' => array_map(static fn (NewsItem $i) => self::itemView($i, $market[$i->getId()] ?? []), $items),
         ]);
     }
 
@@ -209,9 +216,11 @@ final class NewsController extends AbstractController
      * оригинал — в `original`. Переведённой считается новость с переводом заголовка или текста: шаги перевода
      * независимы, и при русском `content` в `item()` клиенту нужен оригинал, чтобы переключиться на него.
      *
+     * @param list<NewsMarketImpact> $market последствия новости для инструментов Мосбиржи
+     *
      * @return array<string, mixed>
      */
-    private static function itemView(NewsItem $item): array
+    private static function itemView(NewsItem $item, array $market = []): array
     {
         $translated = $item->isTranslated();
         $headline = $item->getTranslatedTitle() !== null;
@@ -234,6 +243,27 @@ final class NewsController extends AbstractController
             'storyline' => $item->getStoryline()?->getTitle() !== null
                 ? ['id' => $item->getStoryline()->getId(), 'title' => $item->getStoryline()->getTitle(), 'newsCount' => $item->getStoryline()->getNewsCount()]
                 : null,
+            'market' => array_map(self::marketView(...), $market),
+        ];
+    }
+
+    /**
+     * Последствие для инструмента: прогноз модели с объяснением и факт — изменение цены к последней сделке
+     * до новости через час торгов и на закрытие дня. `final: false` — замер ещё идёт, цифры промежуточные.
+     *
+     * @return array<string, mixed>
+     */
+    private static function marketView(NewsMarketImpact $impact): array
+    {
+        return [
+            'secid' => $impact->getSecid(),
+            'name' => $impact->getName(),
+            'forecast' => $impact->getForecast(),
+            'reason' => $impact->getReason(),
+            'hourChange' => NewsMarketImpact::change($impact->getBasePrice(), $impact->getHourPrice()),
+            'hourFinal' => $impact->isHourFinal(),
+            'dayChange' => NewsMarketImpact::change($impact->getBasePrice(), $impact->getDayPrice()),
+            'final' => $impact->isSettled(),
         ];
     }
 

@@ -39,8 +39,9 @@ services:
     restart: unless-stopped
 
   # Сбор новостей раз в 5 минут (app:news:collect), полные тексты статей (app:news:articles), перевод новостей
-  # изданий на других языках (app:news:translate), сюжетные линии (app:news:analyze) и сводки за час и за сутки
-  # (app:news:digest; перевод и сводки — Antigravity CLI, вход один раз: make agy-login). Тот же образ, что у сервера; миграции
+  # изданий на других языках (app:news:translate), сюжетные линии (app:news:analyze), последствия для Мосбиржи
+  # (app:news:market) и сводки за час и за сутки (app:news:digest; перевод, последствия и сводки — Antigravity CLI,
+  # вход один раз: make agy-login). Тот же образ, что у сервера; миграции
   # применяет контейнер app — пока они не применены, проход пропускается без ошибок в журнале.
   news:
     build:
@@ -71,6 +72,7 @@ services:
             php bin/console app:news:articles --no-interaction
             php bin/console app:news:translate --no-interaction
             php bin/console app:news:analyze --no-interaction
+            php bin/console app:news:market --no-interaction
             php bin/console app:news:digest --no-interaction
           else
             echo "Миграции ещё не применены — сбор пропущен"

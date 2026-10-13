@@ -38,10 +38,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
+import com.example.contactsync.R
 import com.example.contactsync.kb.openUrl
 import java.time.Instant
 import java.time.ZoneId
@@ -129,8 +140,8 @@ private fun StoryTimeline(page: ReaderPage.Story, state: LauncherState, vm: Laun
     LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(page.line.title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)
-                if (page.line.summary.isNotEmpty()) Text(page.line.summary, color = TextMain, fontSize = 19.sp, lineHeight = 28.sp)
+                Text(page.line.title, color = TextMain, fontSize = readingType.title, fontWeight = FontWeight.SemiBold, lineHeight = readingType.titleLine, fontFamily = Reading)
+                if (page.line.summary.isNotEmpty()) Text(page.line.summary, color = TextMain, fontSize = readingType.body, lineHeight = readingType.bodyLine, fontFamily = Reading)
                 val sources = page.items.groupingBy { it.sourceTitle ?: it.source }.eachCount().entries.sortedByDescending { it.value }
                 if (sources.isNotEmpty()) {
                     Text(sources.joinToString(" · ") { "${it.key} ${it.value}" }, color = TextMuted, fontSize = 15.sp)
@@ -159,7 +170,14 @@ private fun StoryTimeline(page: ReaderPage.Story, state: LauncherState, vm: Laun
                 ) {
                     Text(news.time.atZone(zone).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")), color = TextMuted, fontSize = 15.sp, modifier = Modifier.widthIn(min = 56.dp))
                     Text(news.sourceTitle ?: news.source, color = Accent, fontSize = 15.sp, modifier = Modifier.widthIn(min = 110.dp).padding(end = 8.dp))
-                    Text(news.title, color = TextMain, fontSize = 17.sp, lineHeight = 24.sp)
+                    // Последствия для Мосбиржи — в скобках после заголовка: «(SBER +2,1%, IMOEX −0,3%)».
+                    val title = if (news.market.isEmpty()) AnnotatedString(news.title) else buildAnnotatedString {
+                        append(news.title)
+                        append(" (")
+                        append(marketLine(news.market, separator = ", "))
+                        append(")")
+                    }
+                    Text(title, color = TextMain, fontSize = 17.sp, lineHeight = 24.sp, fontFamily = Reading)
                 }
             }
         }
@@ -225,17 +243,20 @@ private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel
                 )
             }
         }
+        if (item.market.isNotEmpty()) {
+            item { MarketPanel(item.market) }
+        }
         item {
-            Text(title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)
+            Text(title, color = TextMain, fontSize = readingType.title, fontWeight = FontWeight.SemiBold, lineHeight = readingType.titleLine, fontFamily = Reading)
         }
         when {
             paragraphs.isNotEmpty() -> items(paragraphs) { paragraph ->
-                Text(paragraph, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp)
+                Text(paragraph, color = TextMain, fontSize = readingType.body, lineHeight = readingType.bodyLine, fontFamily = Reading)
             }
             !item.loaded -> item { Text("Загрузка…", color = TextMuted, fontSize = 18.sp) }
             else -> {
                 if (summary.isNotEmpty()) {
-                    item { Text(summary, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp) }
+                    item { Text(summary, color = TextMain, fontSize = readingType.body, lineHeight = readingType.bodyLine, fontFamily = Reading) }
                 }
                 item {
                     Text(
@@ -247,6 +268,60 @@ private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel
             }
         }
     }
+}
+
+/**
+ * Плашка «Мосбиржа»: по каждому инструменту — прогноз модели с объяснением и факт, как цена пошла после новости.
+ * Цвет факта — по знаку изменения; пока торгов после новости не было — по прогнозу.
+ */
+@Composable
+private fun MarketPanel(impacts: List<MarketImpact>) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(CardRaised)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Мосбиржа · последствия новости", color = TextMuted, fontSize = 14.sp)
+        impacts.forEach { impact ->
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${impact.secid} · ${impact.name}", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "  ${NewsFeed.arrow(impact.forecast)} ${NewsFeed.forecastText(impact.forecast)}",
+                        color = forecastColor(impact.forecast),
+                        fontSize = 15.sp,
+                    )
+                }
+                Text(impact.reason, color = TextMain, fontSize = 15.sp, lineHeight = 21.sp)
+                Text(NewsFeed.marketFact(impact), color = impact.hourChange?.let(::changeColor) ?: TextMuted, fontSize = 15.sp)
+            }
+        }
+    }
+}
+
+/** Краткая строка последствий для ленты и хроники: «SBER +2,1% · IMOEX ↓», каждый инструмент своим цветом. */
+internal fun marketLine(impacts: List<MarketImpact>, separator: String = " · "): AnnotatedString = buildAnnotatedString {
+    impacts.forEachIndexed { index, impact ->
+        if (index > 0) append(separator)
+        withStyle(SpanStyle(color = impact.hourChange?.let(::changeColor) ?: forecastColor(impact.forecast))) {
+            append(NewsFeed.marketBrief(impact))
+        }
+    }
+}
+
+private fun changeColor(change: Double) = when {
+    change > 0 -> Up
+    change < 0 -> Down
+    else -> TextMuted
+}
+
+private fun forecastColor(forecast: MarketForecast) = when (forecast) {
+    MarketForecast.UP -> Up
+    MarketForecast.DOWN -> Down
+    MarketForecast.MIXED -> Amber
 }
 
 /** Переключатель формата сводки: «Сюжеты» или «Статья». Выбор запоминается. */
@@ -263,10 +338,10 @@ private fun ArticleText(article: NewsArticle, sources: List<NewsStorySource>, st
     val context = LocalContext.current
     LazyColumn(verticalArrangement = Arrangement.spacedBy(18.dp)) {
         item {
-            Text(article.title, color = TextMain, fontSize = 34.sp, fontWeight = FontWeight.Medium, lineHeight = 42.sp)
+            Text(article.title, color = TextMain, fontSize = readingType.title, fontWeight = FontWeight.SemiBold, lineHeight = readingType.titleLine, fontFamily = Reading)
         }
         items(article.paragraphs) { paragraph ->
-            Text(paragraph, color = TextMain, fontSize = 20.sp, lineHeight = 31.sp)
+            Text(paragraph, color = TextMain, fontSize = readingType.body, lineHeight = readingType.bodyLine, fontFamily = Reading)
         }
         if (sources.isNotEmpty()) {
             item {
@@ -294,14 +369,14 @@ private fun StoriesText(item: NewsItem, digest: NewsDigest, state: LauncherState
     LazyColumn(verticalArrangement = Arrangement.spacedBy(22.dp)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(item.title, color = TextMain, fontSize = 32.sp, fontWeight = FontWeight.Medium, lineHeight = 40.sp)
+                Text(item.title, color = TextMain, fontSize = readingType.title, fontWeight = FontWeight.SemiBold, lineHeight = readingType.titleLine, fontFamily = Reading)
                 if (note != null) Text(note, color = TextMuted, fontSize = 15.sp)
             }
         }
         items(digest.stories) { story ->
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(story.title, color = TextMain, fontSize = 23.sp, fontWeight = FontWeight.Medium, lineHeight = 30.sp)
-                if (story.text.isNotEmpty()) Text(story.text, color = TextMain, fontSize = 19.sp, lineHeight = 29.sp)
+                Text(story.title, color = TextMain, fontSize = readingType.story, fontWeight = FontWeight.SemiBold, lineHeight = readingType.storyLine, fontFamily = Reading)
+                if (story.text.isNotEmpty()) Text(story.text, color = TextMain, fontSize = readingType.body, lineHeight = readingType.bodyLine, fontFamily = Reading)
                 if (story.sources.isNotEmpty()) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         story.sources.forEach { source ->
@@ -330,3 +405,24 @@ private fun sourceTitle(source: NewsStorySource, state: LauncherState): String =
 private fun openSource(source: NewsStorySource, vm: LauncherViewModel, context: android.content.Context) {
     if (source.id != 0L) vm.read(source.toItem(Instant.now())) else context.openUrl(source.link)
 }
+
+/**
+ * Шрифт статей — Source Serif 4 (Adobe, лицензия OFL — `assets/licenses/source-serif-4-OFL.txt`): спокойный книжный
+ * шрифт с засечками, длинный текст читается легче. Файл переменный — жирность и оптический размер задаются
+ * осями: текст — 400 при размере ~20 pt, заголовки — 600 при ~30 pt (у крупного начертания штрихи тоньше
+ * и плотнее). Подписи, источники и кнопки — прежним шрифтом, чтобы служебное не путалось со статьёй.
+ */
+@OptIn(ExperimentalTextApi::class)
+private val Reading = FontFamily(
+    Font(R.font.source_serif_4, FontWeight.Normal, variationSettings = FontVariation.Settings(FontVariation.weight(400), FontVariation.Setting("opsz", 20f))),
+    Font(R.font.source_serif_4, FontWeight.SemiBold, variationSettings = FontVariation.Settings(FontVariation.weight(600), FontVariation.Setting("opsz", 30f))),
+)
+
+/** Размеры текста статьи: на планшете — крупно, на телефоне (уже 600 dp) — чтобы заголовок не занимал пол-экрана. */
+private class ReadingType(val title: TextUnit, val titleLine: TextUnit, val story: TextUnit, val storyLine: TextUnit, val body: TextUnit, val bodyLine: TextUnit)
+
+private val WideReading = ReadingType(32.sp, 40.sp, 23.sp, 30.sp, 20.sp, 31.sp)
+private val NarrowReading = ReadingType(24.sp, 31.sp, 20.sp, 27.sp, 18.sp, 28.sp)
+
+private val readingType: ReadingType
+    @Composable get() = if (LocalConfiguration.current.screenWidthDp >= 600) WideReading else NarrowReading
