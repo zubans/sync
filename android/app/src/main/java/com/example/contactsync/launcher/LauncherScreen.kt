@@ -16,6 +16,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -79,6 +81,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -152,11 +155,13 @@ fun LauncherScreen(
                 beyondViewportPageCount = 2,
                 modifier = Modifier.weight(1f),
             ) { page ->
+                val toPage = { target: Int -> scope.launch { pager.animateScrollToPage(target.coerceIn(0, pager.pageCount - 1)) } }
+                val webPage = Modifier.fillMaxSize().pageSwipe { forward -> toPage(if (forward) page + 1 else page - 1) }
                 when (page) {
                     0 -> Dashboard(state, vm, kb, kbVm, onAllApps = { drawerOpen = true }, onCity = { cityDialog = true },
                         onAddInstrument = { instrumentDialog = true }, onExpand = { expanded = it }, widgetBounds = widgetBounds)
-                    1 -> KbWebPage(kb, kbVm, kbCookies(), onHome = toHome, modifier = Modifier.fillMaxSize(), visible = page in visiblePages)
-                    else -> CodePage(active = pager.currentPage == 2, onHome = toHome, modifier = Modifier.fillMaxSize(),
+                    1 -> KbWebPage(kb, kbVm, kbCookies(), onHome = toHome, modifier = webPage, visible = page in visiblePages)
+                    else -> CodePage(active = pager.currentPage == 2, onHome = toHome, modifier = webPage,
                         visible = page in visiblePages)
                 }
             }
@@ -190,6 +195,37 @@ fun LauncherScreen(
         if (instrumentDialog) InstrumentDialog(vm, onDismiss = { instrumentDialog = false })
     }
 }
+
+/**
+ * Листание экранов с веб-страницей. Пейджер там выключен: обычный горизонтальный жест забирает сайт.
+ * Поэтому касание смотрим раньше WebView (проход Initial) и резкий горизонтальный взмах одним пальцем
+ * забираем себе — WebView получает отмену касания. Медленные, косые и многопальцевые жесты остаются странице.
+ */
+private fun Modifier.pageSwipe(onSwipe: (forward: Boolean) -> Unit) = pointerInput(Unit) {
+    val distance = 100.dp.toPx()
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            if (event.changes.size > 1) break
+            val change = event.changes.first()
+            if (change.id != down.id || !change.pressed) break
+            val moved = change.position - down.position
+            if (abs(moved.x) < distance || abs(moved.x) < 2 * abs(moved.y)) continue
+            if (change.uptimeMillis - down.uptimeMillis > SWIPE_MAX_MILLIS) break
+            change.consume()
+            onSwipe(moved.x < 0)
+            // Остаток жеста тоже наш, иначе страница доиграет его после отмены.
+            do {
+                val rest = awaitPointerEvent(PointerEventPass.Initial)
+                rest.changes.forEach { it.consume() }
+            } while (rest.changes.any { it.pressed })
+            break
+        }
+    }
+}
+
+private const val SWIPE_MAX_MILLIS = 400L
 
 @Composable
 private fun Dashboard(

@@ -194,13 +194,14 @@ object NewsFeed {
         listOf<String?>(null) + tabs(sources).flatMap { if (it.code == DIGEST) listOf(it.code, STORYLINES) else listOf(it.code) }
 
     /**
-     * Вкладка после свайпа: палец влево — вкладка левее, вправо — правее; у края полосы — та же вкладка.
+     * Вкладка после свайпа — как листание страниц: палец влево — следующая вкладка (правее),
+     * вправо — предыдущая (левее); у края полосы — та же вкладка.
      *
      * @param dragX смещение пальца по горизонтали: меньше нуля — влево
      */
     fun swipeTab(tabs: List<String?>, current: String?, dragX: Float): String? {
         val index = tabs.indexOf(current).takeIf { it >= 0 } ?: return current
-        val next = if (dragX < 0) index - 1 else index + 1
+        val next = if (dragX < 0) index + 1 else index - 1
         return tabs.getOrNull(next) ?: current
     }
 

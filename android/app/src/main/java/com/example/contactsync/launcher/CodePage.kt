@@ -14,13 +14,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,7 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -128,20 +125,9 @@ fun CodePage(active: Boolean, onHome: () -> Unit, modifier: Modifier, visible: B
         }
     }
 
-    val swipeHome = Modifier.pointerInput(Unit) {
-        // Горизонтальные жесты внутри редактора забирает VS Code, поэтому домой — свайпом вправо
-        // по верхней панели или по полосе у левого края, как на экране базы знаний.
-        var dragged = 0f
-        detectHorizontalDragGestures(
-            onDragStart = { dragged = 0f },
-            onHorizontalDrag = { _, dx -> dragged += dx },
-            onDragEnd = { if (dragged > 80.dp.toPx()) onHome() },
-        )
-    }
-
     Column(modifier) {
         Row(
-            Modifier.fillMaxWidth().then(swipeHome).padding(bottom = 12.dp),
+            Modifier.fillMaxWidth().padding(bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -169,7 +155,6 @@ fun CodePage(active: Boolean, onHome: () -> Unit, modifier: Modifier, visible: B
                     CodeChip("Повторить") { load() }
                 }
             }
-            Box(Modifier.align(Alignment.CenterStart).width(20.dp).fillMaxHeight().then(swipeHome))
         }
     }
 }

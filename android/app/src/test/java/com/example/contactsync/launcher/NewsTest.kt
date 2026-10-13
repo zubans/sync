@@ -144,10 +144,10 @@ class NewsTest {
         val tabs = NewsFeed.tabCodes(sources + NewsSource("digest", "Сводка"))
         assertEquals(listOf(null, "digest", "storylines", "rbc", "nyt"), tabs)
 
-        assertEquals("палец влево — вкладка левее", "digest", NewsFeed.swipeTab(tabs, "storylines", dragX = -200f))
-        assertEquals("палец вправо — вкладка правее", "rbc", NewsFeed.swipeTab(tabs, "storylines", dragX = 200f))
-        assertEquals("левее «Все» вкладок нет", null, NewsFeed.swipeTab(tabs, null, dragX = -200f))
-        assertEquals("правее последней вкладок нет", "nyt", NewsFeed.swipeTab(tabs, "nyt", dragX = 200f))
+        assertEquals("палец влево — следующая вкладка", "rbc", NewsFeed.swipeTab(tabs, "storylines", dragX = -200f))
+        assertEquals("палец вправо — предыдущая вкладка", "digest", NewsFeed.swipeTab(tabs, "storylines", dragX = 200f))
+        assertEquals("левее «Все» вкладок нет", null, NewsFeed.swipeTab(tabs, null, dragX = 200f))
+        assertEquals("правее последней вкладок нет", "nyt", NewsFeed.swipeTab(tabs, "nyt", dragX = -200f))
     }
 
     @Test
