@@ -1,0 +1,16 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.koushikdutta.superuser'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'me.phh.superuser'
+        minSdk 24
+        targetSdk 28
+        versionCode 1034
+        versionName '1.0.3.4'
+    }
+    sourceSets { main { manifest.srcFile 'AndroidManifest.xml'; assets.srcDirs = ['assets']; res.srcDirs = ['res']; java.srcDirs = ['src']; aidl.srcDirs = ['src'] } }
+    buildTypes { release { minifyEnabled false; signingConfig signingConfigs.debug } }
+    lint { abortOnError false; checkReleaseBuilds false }
+}
+dependencies { implementation project(':widgets') }

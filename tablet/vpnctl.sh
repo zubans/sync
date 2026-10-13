@@ -7,7 +7,8 @@
 # держали около 5% ядра.
 D=/data/local/oc
 A=/data/data/com.example.contactsync/files
-if [ -f $D/vpnctl.pid ] && kill -0 "$(cat $D/vpnctl.pid)" 2>/dev/null; then echo "уже запущен"; exit 0; fi
+# Номер из pid-файла после перезагрузки может достаться чужому процессу, поэтому сверяем и командную строку.
+if [ -f $D/vpnctl.pid ] && grep -q vpnctl.sh "/proc/$(cat $D/vpnctl.pid)/cmdline" 2>/dev/null; then echo "уже запущен"; exit 0; fi
 echo $$ > $D/vpnctl.pid
 last=
 ready=

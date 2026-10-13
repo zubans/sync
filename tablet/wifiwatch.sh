@@ -6,7 +6,8 @@
 # Ставится в /data/local/wifiwatch.sh, запускается из /data/local/boot.sh. Журнал — /data/local/wifiwatch.log.
 L=/data/local/wifiwatch.log
 P=/data/local/wifiwatch.pid
-if [ -f $P ] && kill -0 "$(cat $P)" 2>/dev/null; then echo "уже запущен"; exit 0; fi
+# Номер из pid-файла после перезагрузки может достаться чужому процессу, поэтому сверяем и командную строку.
+if [ -f $P ] && grep -q wifiwatch.sh "/proc/$(cat $P)/cmdline" 2>/dev/null; then echo "уже запущен"; exit 0; fi
 echo $$ > $P
 fails=0
 last_restart=0
