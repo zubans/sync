@@ -57,9 +57,11 @@ object Agenda {
 
     fun rows(events: List<AgendaEvent>, now: Instant, zone: ZoneId, limit: Int = 6): List<AgendaRow> {
         val today = now.atZone(zone).toLocalDate()
+        // День рождения сегодня — первой строкой весь день, даже когда его время уже прошло.
+        fun pinned(event: Merged) = isBirthday(event.title) && event.startDate(zone) == today
         return merge(events)
-            .filter { if (it.allDay) it.endDate() > today else it.end > now.toEpochMilli() }
-            .sortedWith(compareBy({ it.startDate(zone).coerceAtLeast(today) }, { !it.allDay }, { it.begin }))
+            .filter { pinned(it) || if (it.allDay) it.endDate() > today else it.end > now.toEpochMilli() }
+            .sortedWith(compareBy({ !pinned(it) }, { it.startDate(zone).coerceAtLeast(today) }, { !it.allDay }, { it.begin }))
             .take(limit)
             .map { event ->
                 val start = event.startDate(zone).coerceAtLeast(today)
@@ -68,7 +70,7 @@ object Agenda {
                     title = event.title.ifBlank { "Без названия" },
                     day = dayLabel(start, today),
                     time = if (event.allDay) "весь день" else timeRange(event, zone),
-                    soon = if (event.allDay) null else soonLabel(event, now),
+                    soon = if (event.allDay || (pinned(event) && event.end <= now.toEpochMilli())) null else soonLabel(event, now),
                     color = event.color,
                     begin = event.begin,
                     end = event.end,
@@ -78,6 +80,11 @@ object Agenda {
                 )
             }
     }
+
+    /** «День рождения», «Днюха у Ромы», «ДР мамы», «Света Богданова ДР». */
+    fun isBirthday(title: String): Boolean = BIRTHDAY.containsMatchIn(title)
+
+    private val BIRTHDAY = Regex("день\\s+рождени|днюх|(^|[^\\p{L}])др([^\\p{L}]|$)|birthday", RegexOption.IGNORE_CASE)
 
     /** Событие ленты: склеенное из одинаковых в разных календарях — с цветами всех этих календарей. */
     private class Merged(event: AgendaEvent, val colors: List<Int>) {

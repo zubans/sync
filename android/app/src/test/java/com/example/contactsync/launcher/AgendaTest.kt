@@ -80,4 +80,24 @@ class AgendaTest {
         assertEquals(listOf(0x34A853, 0x4285F4), rows[0].colors)
         assertEquals(listOf(0x4285F4), rows[1].colors)
     }
+
+    @Test
+    fun `today's birthday is pinned first all day even after its time`() {
+        val passed = AgendaEvent("Днюха у Ромы", at(10, 9, 30), at(10, 10, 30), false, 0)
+        val meeting = AgendaEvent("Созвон", at(10, 12), at(10, 12, 30), false, 0)
+        val tomorrow = AgendaEvent("ДР мамы", at(11, 9), at(11, 10), false, 0)
+
+        val rows = Agenda.rows(listOf(meeting, tomorrow, passed), now, zone)
+
+        assertEquals(listOf("Днюха у Ромы", "Созвон", "ДР мамы"), rows.map { it.title })
+        assertNull(rows[0].soon)
+    }
+
+    @Test
+    fun `birthday titles are recognized`() {
+        listOf("День рождения Вани", "днюха у маслова", "ДР мамы", "Света Богданова ДР", "Mom's birthday").forEach {
+            assertEquals(it, true, Agenda.isBirthday(it))
+        }
+        listOf("Драмтеатр", "Дрова", "Винзавод").forEach { assertEquals(it, false, Agenda.isBirthday(it)) }
+    }
 }
