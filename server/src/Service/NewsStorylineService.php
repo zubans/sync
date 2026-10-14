@@ -29,12 +29,14 @@ final class NewsStorylineService
     public const THRESHOLD = 0.74;
     /** Линии с центрами ближе этого — кандидаты на склейку, решает модель. */
     public const MERGE_CANDIDATE = 0.65;
-    private const MERGE_PAIRS = 20;
+    /** Пар на склейку за запрос: вместе с названиями ответ должен уложиться в лимит длины ответа модели. */
+    private const MERGE_PAIRS = 8;
     /** Линия, в которой не было новостей столько дней, закрыта: новость о том же через неделю — новая линия. */
     public const ACTIVE_DAYS = 3;
     /** За проход цикла (5 минут): на процессоре 100 заголовков — пара минут, новостей в сутки ~1500. */
     private const EMBED_LIMIT = 100;
-    private const NAME_LIMIT = 40;
+    /** Линий на название за проход: при 40 ответ модели обрезался по лимиту длины (14.10.2026), остальные — следующими проходами. */
+    private const NAME_LIMIT = 12;
     private const HEADLINES_PER_LINE = 8;
 
     public function __construct(

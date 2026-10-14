@@ -43,6 +43,16 @@ final class AgyNewsSummarizer implements NewsSummarizer
         }
 
         $run = $this->run($base, $prompt);
+        if ($model !== null && $model !== '' && $run['error'] !== null && self::unknownModel($run['error'])) {
+            // Google переименовывает и убирает модели («Gemini 3.1 Pro (High)» пропала 14.10.2026) — без модели
+            // сводка всё же выйдет. В журнал — чтобы модель в NEWS_DIGEST_MODEL_* заменили на актуальную.
+            error_log(sprintf('agy: модели «%s» больше нет, взята модель по умолчанию — замените её в .env (список: agy models)', $model));
+            $base = array_values(array_filter($base, static fn (string $a) => $a !== '--model' && $a !== $model));
+            if ($effort !== null) {
+                array_splice($base, 5, 0, ['--effort', $effort]);
+            }
+            $run = $this->run($base, $prompt);
+        }
         if ($run['answer'] === '' && $run['conversation'] !== null && $run['error'] === null) {
             $tools = $run['tools'] !== [] ? ' ('.implode(', ', $run['tools']).')' : '';
             $run = $this->run([...$base, '--conversation', $run['conversation']], sprintf(self::RETRY, $tools));
@@ -55,6 +65,12 @@ final class AgyNewsSummarizer implements NewsSummarizer
         }
 
         return $run['answer'];
+    }
+
+    /** agy не знает модель: «invalid model selection … is not recognized as a known model». */
+    public static function unknownModel(string $error): bool
+    {
+        return str_contains($error, 'invalid model selection') || str_contains($error, 'not recognized as a known model');
     }
 
     /**

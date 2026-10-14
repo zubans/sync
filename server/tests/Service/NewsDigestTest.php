@@ -120,6 +120,28 @@ final class NewsDigestTest extends DatabaseWebTestCase
         self::assertSame([], $service->run(new \DateTimeImmutable(self::NOW)), 'повторный запуск ничего не пишет');
     }
 
+    public function testMissedHourIsWrittenLaterWhileFresh(): void
+    {
+        // Сводка за 12:00–13:00 UTC не вышла (модель была недоступна) — проход в 14:30 её дописывает.
+        $this->news(6, '2026-10-12 12:20:00');
+        $service = $this->service([$this->answer('Пропущенный час')], $prompts);
+
+        $report = $service->run(new \DateTimeImmutable(self::NOW));
+
+        self::assertSame('готово: новостей 6, сюжетов 1', $report['hour:2026-10-12T13:00Z']);
+        self::assertSame(['hour:2026-10-12T14:00Z', 'day:2026-10-12T04:00Z', 'hour:2026-10-12T13:00Z'], array_keys($report));
+        self::assertArrayNotHasKey('hour:2026-10-12T13:00Z', $this->service([])->run(new \DateTimeImmutable(self::NOW)), 'дописанный час не повторяется');
+        $keys = static fn (string $now) => array_map(static fn (NewsDigestPeriod $p) => $p->key(), NewsDigestPeriod::catchUp(new \DateTimeImmutable($now)));
+        self::assertContains('hour:2026-10-12T13:00Z', $keys('2026-10-12 15:30:00'));
+        self::assertNotContains('hour:2026-10-12T13:00Z', $keys('2026-10-12 16:30:00'), 'через три часа сводка за час уже не нужна');
+    }
+
+    public function testUnknownModelErrorIsRecognized(): void
+    {
+        self::assertTrue(AgyNewsSummarizer::unknownModel('invalid model selection (--model "Gemini 3.1 Pro (High)" --effort ""): model Gemini 3.1 Pro (High) is not recognized as a known model or custom model in settings'));
+        self::assertFalse(AgyNewsSummarizer::unknownModel('UNAVAILABLE (code 503): No capacity available for model gemini-3.8-flash-medium'));
+    }
+
     public function testQuietHourIsSkippedWithoutModel(): void
     {
         $this->news(2, '2026-10-12 13:20:00');
