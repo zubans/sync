@@ -275,18 +275,26 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 } catch (e: UnauthorizedException) {
                     updateInstrument(secid) { it.copy(error = "Войдите в sync, чтобы видеть анализ") }
                     return@launch
-                } catch (e: ApiException) {
-                    // 404 — сервер ещё без анализа инструментов (не обновлён) или не получил список виджета.
-                    val message = if (e.code == 404) "Сервер sync пока не знает об этом инструменте: обновите сервер или откройте позже" else e.message
-                    updateInstrument(secid) { it.copy(error = message ?: "Сервер не ответил") }
-                    return@launch
                 } catch (e: Exception) {
-                    updateInstrument(secid) { it.copy(error = "Сервер не ответил") }
+                    // Экран уже показан — сбой одного опроса (сеть, ISS не ответила вовремя) не повод бросать ожидание анализа.
+                    if (_state.value.instrument?.detail != null) {
+                        delay(INSTRUMENT_POLL_MS)
+                        continue
+                    }
+                    // 404 — сервер ещё без анализа инструментов (не обновлён) или не получил список виджета.
+                    val message = if (e is ApiException && e.code == 404) {
+                        "Сервер sync пока не знает об этом инструменте: обновите сервер или откройте позже"
+                    } else {
+                        e.message ?: "Сервер не ответил"
+                    }
+                    updateInstrument(secid) { it.copy(error = message) }
                     return@launch
                 }
                 updateInstrument(secid) { it.copy(name = detail.dto.name, detail = detail, error = null) }
                 _state.update { s -> s.copy(insights = s.insights + (secid to InstrumentInsight(detail.analysis, detail.lots))) }
-                val waiting = detail.analysis?.pending == true || detail.analysis == null
+                // Ждём, пока пересчёт запрошен или анализа ещё не было; не удался — ждать нечего до следующего срока.
+                val analysis = detail.analysis
+                val waiting = analysis == null || analysis.pending || (analysis.recommendation == null && analysis.error == null)
                 if (!waiting) return@launch
                 delay(INSTRUMENT_POLL_MS)
             }

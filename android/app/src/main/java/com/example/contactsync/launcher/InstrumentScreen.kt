@@ -517,10 +517,12 @@ private fun ChartSection(detail: InstrumentDetail, price: Double?) {
             if (buy != null) Legend(ChartBuy, "Средняя цена покупки", dashed = true)
         }
         Spacer(Modifier.height(8.dp))
-        Box(Modifier.fillMaxWidth().height(220.dp)) {
+        Box(Modifier.fillMaxWidth().height(250.dp)) {
             Canvas(
                 Modifier
                     .fillMaxSize()
+                    // Поля сверху и снизу — под подписи максимума и минимума, чтобы они не ложились на линию.
+                    .padding(vertical = 18.dp)
                     // Палец на графике — перекрестие: пока держат и водят, показываем дату и цену под ним.
                     .pointerInput(points) {
                         val pick = { x: Float -> ((x / size.width) * (points.size - 1)).toInt().coerceIn(0, points.size - 1) }
