@@ -24,7 +24,8 @@ class MarketInstrumentRepository extends ServiceEntityRepository
     }
 
     /**
-     * Инструменты всех пользователей — кандидаты на анализ.
+     * Инструменты всех пользователей — кандидаты на анализ: сначала первые в виджете у каждого пользователя,
+     * потом вторые и так далее, чтобы длинный список одного не задерживал анализ у остальных.
      *
      * @return list<MarketInstrument>
      */
@@ -33,8 +34,8 @@ class MarketInstrumentRepository extends ServiceEntityRepository
         return $this->createQueryBuilder('i')
             ->join('i.user', 'u')
             ->addSelect('u')
-            ->orderBy('i.user', 'ASC')
-            ->addOrderBy('i.position', 'ASC')
+            ->orderBy('i.position', 'ASC')
+            ->addOrderBy('u.id', 'ASC')
             ->getQuery()
             ->getResult();
     }

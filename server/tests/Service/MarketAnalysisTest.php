@@ -213,6 +213,21 @@ final class MarketAnalysisTest extends DatabaseWebTestCase
         self::assertSame(['analyzed' => 0, 'failed' => 0, 'error' => null], $service->run($now->modify('+10 minutes')));
     }
 
+    public function testQueueTakesFirstInstrumentOfEveryUserFirst(): void
+    {
+        $first = $this->createUser('first@example.com');
+        $second = $this->createUser('second@example.com');
+        foreach (['IMOEX', 'GAZP', 'LKOH'] as $i => $secid) {
+            $this->em->persist(new MarketInstrument($first, $secid, 'stock', 'shares', 'TQBR', $secid, $i));
+        }
+        $this->em->persist(new MarketInstrument($second, 'SBER', 'stock', 'shares', 'TQBR', 'Сбербанк', 0));
+        $this->em->flush();
+
+        $due = static::getContainer()->get(MarketAnalysisService::class)->due(new \DateTimeImmutable('2026-10-14 12:00:00', new \DateTimeZone('UTC')), 2);
+
+        self::assertSame(['IMOEX', 'SBER'], array_map(static fn (MarketInstrument $i) => $i->getSecid(), $due));
+    }
+
     public function testPositionReturnFollowsPriceFromPurchasePrice(): void
     {
         $user = $this->createUser('investor@example.com');
