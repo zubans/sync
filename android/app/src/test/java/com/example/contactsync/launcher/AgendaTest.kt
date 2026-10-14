@@ -66,4 +66,18 @@ class AgendaTest {
         assertEquals(listOf("ДР мамы", "Тренировка", "Купон"), rows.map { it.title })
         assertEquals("пн 12", rows.last().day)
     }
+
+    @Test
+    fun `same event in Google and sync calendars is one row with both colors, opening the sync copy`() {
+        val google = AgendaEvent("В театр  на ревизора", at(17, 17), at(17, 18), false, color = 0x4285F4, eventId = 1)
+        val sync = AgendaEvent("в театр на ревизора", at(17, 17), at(17, 18), false, color = 0x34A853, eventId = 2, fromSync = true)
+        val other = AgendaEvent("Винзавод", at(17, 19), at(17, 21), false, color = 0x4285F4, eventId = 3)
+
+        val rows = Agenda.rows(listOf(google, sync, other), now, zone)
+
+        assertEquals(2, rows.size)
+        assertEquals(2L, rows[0].eventId)
+        assertEquals(listOf(0x34A853, 0x4285F4), rows[0].colors)
+        assertEquals(listOf(0x4285F4), rows[1].colors)
+    }
 }

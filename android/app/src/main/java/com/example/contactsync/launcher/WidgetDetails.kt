@@ -306,7 +306,7 @@ private fun AgendaDetailRow(row: AgendaRow, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(row.time, color = TextMain, fontSize = 18.sp, modifier = Modifier.width(150.dp))
-        Box(Modifier.width(5.dp).height(44.dp).clip(RoundedCornerShape(3.dp)).background(eventColor))
+        CalendarBars(row.colors, width = 5.dp, height = 44.dp)
         Spacer(Modifier.width(18.dp))
         Column(Modifier.weight(1f)) {
             Text(row.title, color = TextMain, fontSize = 20.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)

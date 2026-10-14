@@ -546,6 +546,16 @@ private fun AgendaCard(state: LauncherState, vm: LauncherViewModel, modifier: Mo
     }
 }
 
+/** Полоски цветов календарей, где есть событие: склеенный дубль из Google и sync — две полоски. */
+@Composable
+internal fun CalendarBars(colors: List<Int>, width: androidx.compose.ui.unit.Dp, height: androidx.compose.ui.unit.Dp) {
+    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        colors.forEach { color ->
+            Box(Modifier.width(width).height(height).clip(RoundedCornerShape(width / 2)).background(Color(color).copy(alpha = 1f)))
+        }
+    }
+}
+
 @Composable
 private fun AgendaItem(row: AgendaRow, onClick: () -> Unit) {
     val eventColor = Color(row.color).copy(alpha = 1f)
@@ -559,7 +569,7 @@ private fun AgendaItem(row: AgendaRow, onClick: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.width(4.dp).height(36.dp).clip(RoundedCornerShape(2.dp)).background(eventColor))
+        CalendarBars(row.colors, width = 4.dp, height = 36.dp)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(row.title, color = TextMain, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)

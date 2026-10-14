@@ -3,6 +3,7 @@ package com.example.contactsync.launcher
 import android.content.ContentUris
 import android.content.Context
 import android.provider.CalendarContract
+import com.example.contactsync.calendar.CalendarAccount
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -126,6 +127,8 @@ class CalendarSource(private val context: Context) {
             CalendarContract.Instances.DISPLAY_COLOR,
             CalendarContract.Instances.EVENT_ID,
             CalendarContract.Instances.EVENT_LOCATION,
+            // Колонка календаря события — Instances выдаёт её вместе с полями календаря.
+            CalendarContract.Calendars.ACCOUNT_TYPE,
         )
         val events = mutableListOf<AgendaEvent>()
         context.contentResolver.query(
@@ -141,6 +144,7 @@ class CalendarSource(private val context: Context) {
                     color = c.getInt(4),
                     eventId = c.getLong(5),
                     location = c.getString(6).orEmpty(),
+                    fromSync = c.getString(7) == CalendarAccount.TYPE,
                 )
             }
         }

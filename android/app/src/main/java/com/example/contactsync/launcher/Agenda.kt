@@ -19,6 +19,8 @@ data class AgendaEvent(
     /** id события в календаре Android — чтобы открыть его для просмотра и правки. */
     val eventId: Long = 0,
     val location: String = "",
+    /** Событие из календаря sync (а не Google и других): при склейке дублей открывается оно. */
+    val fromSync: Boolean = false,
 )
 
 /** Строка ленты «Ближайшее». */
@@ -38,6 +40,8 @@ data class AgendaRow(
     /** День в ленте (для идущих с прошлых дней — сегодня): по нему подробный экран группирует события. */
     val date: LocalDate? = null,
     val location: String = "",
+    /** Цвета календарей, где есть это событие (склеенные дубли): по полоске на календарь, первым — открываемый. */
+    val colors: List<Int> = listOf(color),
 )
 
 /**
@@ -53,13 +57,14 @@ object Agenda {
 
     fun rows(events: List<AgendaEvent>, now: Instant, zone: ZoneId, limit: Int = 6): List<AgendaRow> {
         val today = now.atZone(zone).toLocalDate()
-        return events
+        return merge(events)
             .filter { if (it.allDay) it.endDate() > today else it.end > now.toEpochMilli() }
             .sortedWith(compareBy({ it.startDate(zone).coerceAtLeast(today) }, { !it.allDay }, { it.begin }))
             .take(limit)
             .map { event ->
                 val start = event.startDate(zone).coerceAtLeast(today)
                 AgendaRow(
+                    colors = event.colors,
                     title = event.title.ifBlank { "Без названия" },
                     day = dayLabel(start, today),
                     time = if (event.allDay) "весь день" else timeRange(event, zone),
@@ -74,10 +79,36 @@ object Agenda {
             }
     }
 
-    private fun AgendaEvent.startDate(zone: ZoneId): LocalDate =
+    /** Событие ленты: склеенное из одинаковых в разных календарях — с цветами всех этих календарей. */
+    private class Merged(event: AgendaEvent, val colors: List<Int>) {
+        val title = event.title
+        val begin = event.begin
+        val end = event.end
+        val allDay = event.allDay
+        val color = event.color
+        val eventId = event.eventId
+        val location = event.location
+    }
+
+    /**
+     * Одно и то же событие в нескольких календарях (перенесли из Google в sync, а в Google оставили) —
+     * одна строка: одинаковые название (без учёта регистра и лишних пробелов), начало и «весь день».
+     * Открывается копия из календаря sync, если она есть.
+     */
+    private fun merge(events: List<AgendaEvent>): List<Merged> = events
+        .groupBy { Triple(it.title.trim().lowercase().replace(SPACES, " "), it.begin, it.allDay) }
+        .values
+        .map { same ->
+            val main = same.firstOrNull { it.fromSync } ?: same.first()
+            Merged(main, (listOf(main) + same.filter { it !== main }).map { it.color }.distinct())
+        }
+
+    private val SPACES = Regex("\\s+")
+
+    private fun Merged.startDate(zone: ZoneId): LocalDate =
         Instant.ofEpochMilli(begin).atZone(if (allDay) ZoneOffset.UTC else zone).toLocalDate()
 
-    private fun AgendaEvent.endDate(): LocalDate = Instant.ofEpochMilli(end).atZone(ZoneOffset.UTC).toLocalDate()
+    private fun Merged.endDate(): LocalDate = Instant.ofEpochMilli(end).atZone(ZoneOffset.UTC).toLocalDate()
 
     private fun dayLabel(date: LocalDate, today: LocalDate): String = when (date) {
         today -> "сегодня"
@@ -85,7 +116,7 @@ object Agenda {
         else -> date.format(WEEKDAY)
     }
 
-    private fun timeRange(event: AgendaEvent, zone: ZoneId): String {
+    private fun timeRange(event: Merged, zone: ZoneId): String {
         val start = Instant.ofEpochMilli(event.begin).atZone(zone)
         val end = Instant.ofEpochMilli(event.end).atZone(zone)
         // Многодневное событие: конец в другой день — показываем только начало.
@@ -96,7 +127,7 @@ object Agenda {
         }
     }
 
-    private fun soonLabel(event: AgendaEvent, now: Instant): String? {
+    private fun soonLabel(event: Merged, now: Instant): String? {
         val untilStart = Duration.between(now, Instant.ofEpochMilli(event.begin))
         return when {
             untilStart.isNegative || untilStart.isZero -> "идёт"
