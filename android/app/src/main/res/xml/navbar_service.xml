@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Своя панель навигации: следит за окнами (клавиатура, шторка), чтобы прятать кнопки, и нажимает «назад / домой / недавние». -->
+<!-- Своя панель навигации: следит за окнами (клавиатура, шторка), чтобы прятать кнопки, и нажимает «назад / домой / недавние». По содержимому строки состояния ставит лампочку VPN рядом с системными значками. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
