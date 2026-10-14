@@ -14,6 +14,7 @@ import android.widget.LinearLayout
 import com.example.contactsync.App
 import com.example.contactsync.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
@@ -34,6 +35,7 @@ class NavBarService : AccessibilityService() {
 
     private var bar: View? = null
     private var lamp: View? = null
+    private var placeJob: Job? = null
     private val scope = MainScope()
 
     override fun onServiceConnected() {
@@ -44,9 +46,13 @@ class NavBarService : AccessibilityService() {
         bar = view
         scope.launch { launcherVisible.collect { update() } }
 
-        val dot = View(this).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL } }
+        val dot = View(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL }
+            visibility = View.GONE
+        }
         windowManager.addView(dot, lampLayoutParams())
         lamp = dot
+        placeLampSoon()
         scope.launch { watchVpn(dot) }
     }
 
@@ -68,19 +74,17 @@ class NavBarService : AccessibilityService() {
             }
             (dot.background as GradientDrawable).setColor(color)
             dot.contentDescription = state.title
+            placeLamp()
             delay(LAMP_TICK_MS)
         }
     }
 
     /**
-     * Точка в строке состояния слева от значка Wi-Fi: справа от Wi-Fi только батарея, вместе они занимают
-     * ~57 dp от правого края (планшет, 240 dpi). Нажатия проходят сквозь точку — шторка открывается как обычно.
+     * Точка в строке состояния. Место задаётся в [placeLamp]; нажатия проходят сквозь точку — шторка
+     * открывается как обычно.
      */
     private fun lampLayoutParams(): WindowManager.LayoutParams {
-        val density = resources.displayMetrics.density
-        val size = (10 * density).toInt()
-        val statusBarId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        val statusBar = if (statusBarId > 0) resources.getDimensionPixelSize(statusBarId) else (24 * density).toInt()
+        val size = (10 * resources.displayMetrics.density).toInt()
         return WindowManager.LayoutParams(
             size,
             size,
@@ -91,14 +95,61 @@ class NavBarService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = (LAMP_FROM_RIGHT_DP * density).toInt()
-            y = (statusBar - size) / 2
+            gravity = Gravity.TOP or Gravity.START
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent) = update()
+    /**
+     * Ставит точку левее системных значков (Wi-Fi, сеть, батарея, ключ и т.п.) и по центру строки.
+     * Набор значков меняется, поэтому место берётся из окна системной оболочки, а не задаётся отступом.
+     * Шторка или экран блокировки открыты, или значков не видно (строка скрыта) — точку прячем.
+     */
+    private fun placeLamp() {
+        val dot = lamp ?: return
+        val params = dot.layoutParams as? WindowManager.LayoutParams ?: return
+        val icons = if (systemPanelShown()) null else systemIconsBounds()
+        if (icons == null) {
+            dot.visibility = View.GONE
+            return
+        }
+        val x = icons.left - (LAMP_GAP_DP * resources.displayMetrics.density).toInt() - params.width
+        val y = icons.centerY() - params.height / 2
+        if (params.x != x || params.y != y) {
+            params.x = x
+            params.y = y
+            getSystemService(WindowManager::class.java).updateViewLayout(dot, params)
+        }
+        dot.visibility = View.VISIBLE
+    }
+
+    private fun systemIconsBounds(): android.graphics.Rect? {
+        val rect = android.graphics.Rect()
+        for (window in windows) {
+            if (window.type != AccessibilityWindowInfo.TYPE_SYSTEM) continue
+            val node = window.root?.findAccessibilityNodeInfosByViewId(SYSTEM_ICONS_ID)?.firstOrNull { it.isVisibleToUser } ?: continue
+            node.getBoundsInScreen(rect)
+            if (!rect.isEmpty) return rect
+        }
+        return null
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) update()
+        // Значки в строке состояния появляются и пропадают без смены окон — переставляем точку и по ним.
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.packageName == SYSTEM_UI) {
+            placeLampSoon()
+        }
+    }
+
+    /** Событий от системной оболочки бывает много подряд — переставляем точку один раз после них. */
+    private fun placeLampSoon() {
+        placeJob?.cancel()
+        placeJob = scope.launch {
+            delay(LAMP_PLACE_DELAY_MS)
+            placeLamp()
+        }
+    }
 
     override fun onInterrupt() {}
 
@@ -119,17 +170,17 @@ class NavBarService : AccessibilityService() {
     }
 
     /** Клавиатура или развёрнутое системное окно (шторка, экран блокировки) — кнопки им мешают. */
-    private fun overlaysShown(): Boolean {
+    private fun overlaysShown(): Boolean =
+        windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } || systemPanelShown()
+
+    /** Развёрнутое системное окно — шторка или экран блокировки. */
+    private fun systemPanelShown(): Boolean {
         val screenHeight = resources.displayMetrics.heightPixels
         val rect = android.graphics.Rect()
         return windows.any { window ->
-            when (window.type) {
-                AccessibilityWindowInfo.TYPE_INPUT_METHOD -> true
-                AccessibilityWindowInfo.TYPE_SYSTEM -> {
-                    window.getBoundsInScreen(rect)
-                    rect.height() > screenHeight / 2
-                }
-                else -> false
+            window.type == AccessibilityWindowInfo.TYPE_SYSTEM && run {
+                window.getBoundsInScreen(rect)
+                rect.height() > screenHeight / 2
             }
         }
     }
@@ -189,8 +240,16 @@ class NavBarService : AccessibilityService() {
         /** Лампочку VPN в строке состояния проверяем как на главном экране — раз в 10 секунд. */
         private const val LAMP_TICK_MS = 10_000L
 
-        /** От правого края экрана до лампочки: батарея и Wi-Fi плюс зазор. */
-        private const val LAMP_FROM_RIGHT_DP = 63
+        /** Зазор между лампочкой и системными значками. */
+        private const val LAMP_GAP_DP = 6
+
+        /** Пауза после событий системной оболочки, прежде чем переставить лампочку. */
+        private const val LAMP_PLACE_DELAY_MS = 300L
+
+        private const val SYSTEM_UI = "com.android.systemui"
+
+        /** Блок значков справа в строке состояния: Wi-Fi, сеть, батарея и прочие. */
+        private const val SYSTEM_ICONS_ID = "$SYSTEM_UI:id/system_icons"
 
         val isEnabled: Boolean get() = instance != null
 
