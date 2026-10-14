@@ -546,12 +546,15 @@ private fun AgendaCard(state: LauncherState, vm: LauncherViewModel, modifier: Mo
     }
 }
 
-/** Полоски цветов календарей, где есть событие: склеенный дубль из Google и sync — две полоски. */
+/**
+ * Полоска события в цветах его календарей: склеенный дубль из двух календарей — полоска пополам,
+ * из трёх — на три равные части сверху вниз.
+ */
 @Composable
 internal fun CalendarBars(colors: List<Int>, width: androidx.compose.ui.unit.Dp, height: androidx.compose.ui.unit.Dp) {
-    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+    Column(Modifier.width(width).height(height).clip(RoundedCornerShape(width / 2))) {
         colors.forEach { color ->
-            Box(Modifier.width(width).height(height).clip(RoundedCornerShape(width / 2)).background(Color(color).copy(alpha = 1f)))
+            Box(Modifier.fillMaxWidth().weight(1f).background(Color(color).copy(alpha = 1f)))
         }
     }
 }
