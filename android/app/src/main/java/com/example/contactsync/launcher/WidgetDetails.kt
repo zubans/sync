@@ -8,6 +8,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
@@ -45,6 +46,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,12 +66,14 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.example.contactsync.kb.openUrl
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -325,6 +330,10 @@ private fun dayTitle(date: LocalDate?, today: LocalDate): String {
 
 /* ---------- Мосбиржа ---------- */
 
+/**
+ * Таблица котировок. Строки перетаскиваются за «≡» слева — так задаётся порядок и в карточке; нажатие
+ * открывает экран инструмента, долгое нажатие — меню. Совет модели и доходность позиции — с сервера sync.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun QuotesDetail(state: LauncherState, vm: LauncherViewModel, onAdd: () -> Unit, onClose: () -> Unit) {
@@ -333,6 +342,16 @@ internal fun QuotesDetail(state: LauncherState, vm: LauncherViewModel, onAdd: ()
     } else {
         "загрузка…"
     }
+    // Порядок на время перетаскивания живёт здесь, в настройки уходит, когда палец отпустили.
+    val codes = state.quotes.map { it.secid }
+    var order by remember { mutableStateOf(codes) }
+    var dragging by remember { mutableStateOf<String?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    var rowStep by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(codes) { if (dragging == null) order = codes }
+    val byCode = state.quotes.associateBy { it.secid }
+    val gap = with(LocalDensity.current) { 8.dp.toPx() }
+
     Column(Modifier.fillMaxSize()) {
         DetailHeader(
             title = "Мосбиржа",
@@ -341,72 +360,137 @@ internal fun QuotesDetail(state: LauncherState, vm: LauncherViewModel, onAdd: ()
             actions = { TextButton(onClick = onAdd) { Text("Добавить", color = Accent) } },
         )
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            // На узком экране — без открытия и оборота, чтобы цифры не налезали друг на друга.
+            // На узком экране — без открытия, диапазона, оборота и времени, чтобы цифры не налезали друг на друга.
             val wide = maxWidth >= 900.dp
             Column {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth().padding(start = 52.dp, end = 20.dp, top = 8.dp, bottom = 8.dp)) {
                     HeaderCell("Инструмент", 2.4f, Alignment.Start)
                     HeaderCell("Цена", 1.3f)
                     HeaderCell("Изм.", 1f)
                     if (wide) HeaderCell("Открытие", 1.2f)
-                    HeaderCell("Мин – макс", 2.3f)
-                    if (wide) HeaderCell("Оборот", 1.4f)
-                    HeaderCell("Сделка", 0.9f)
+                    if (wide) HeaderCell("Мин – макс", 2.1f)
+                    if (wide) HeaderCell("Оборот", 1.3f)
+                    HeaderCell("Позиция", 1.6f)
+                    HeaderCell("Совет", 1.5f)
                 }
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(state.quotes, key = { it.secid }) { quote ->
-                        var menu by remember { mutableStateOf(false) }
-                        Box {
-                            Row(
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    order.forEach { secid ->
+                        val quote = byCode[secid] ?: return@forEach
+                        key(secid) {
+                            val lifted = dragging == secid
+                            var menu by remember { mutableStateOf(false) }
+                            Box(
                                 Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(18.dp))
-                                    .background(CardColor)
-                                    .combinedClickable(onClick = {}, onLongClick = { menu = true })
-                                    .padding(horizontal = 20.dp, vertical = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                                    .zIndex(if (lifted) 1f else 0f)
+                                    .graphicsLayer {
+                                        translationY = if (lifted) dragOffset else 0f
+                                        shadowElevation = if (lifted) 12f else 0f
+                                    }
+                                    .onSizeChanged { rowStep = it.height + gap },
                             ) {
-                                Column(Modifier.weight(2.4f)) {
-                                    Text(quote.name, color = TextMain, fontSize = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(
-                                        listOfNotNull(quote.secid, quote.yield?.let { "доходность ${number(it, 2)}%" }).joinToString(" · "),
-                                        color = TextMuted,
-                                        fontSize = 14.sp,
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(18.dp))
+                                        .background(if (lifted) CardRaised else CardColor)
+                                        .combinedClickable(onClick = { vm.openInstrument(quote) }, onLongClick = { menu = true })
+                                        .padding(end = 20.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    // Ручка: тянуть строку вверх и вниз. Сосед меняется местами, когда строку протащили на полвысоты.
+                                    Box(
+                                        Modifier
+                                            .width(52.dp)
+                                            .height(64.dp)
+                                            .pointerInput(secid) {
+                                                detectDragGestures(
+                                                    onDragStart = { dragging = secid; dragOffset = 0f },
+                                                    onDrag = { change, amount ->
+                                                        change.consume()
+                                                        dragOffset += amount.y
+                                                        val index = order.indexOf(secid)
+                                                        if (rowStep > 0 && dragOffset > rowStep / 2 && index < order.lastIndex) {
+                                                            order = Portfolio.move(order, index, index + 1)
+                                                            dragOffset -= rowStep
+                                                        } else if (rowStep > 0 && dragOffset < -rowStep / 2 && index > 0) {
+                                                            order = Portfolio.move(order, index, index - 1)
+                                                            dragOffset += rowStep
+                                                        }
+                                                    },
+                                                    onDragEnd = { dragging = null; dragOffset = 0f; vm.reorderInstruments(order) },
+                                                    onDragCancel = { dragging = null; dragOffset = 0f; vm.reorderInstruments(order) },
+                                                )
+                                            },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text("≡", color = TextMuted, fontSize = 24.sp)
+                                    }
+                                    QuoteCells(quote, state.insights[secid], wide)
+                                }
+                                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    DropdownMenuItem(text = { Text("Открыть") }, onClick = { menu = false; vm.openInstrument(quote) })
+                                    DropdownMenuItem(
+                                        text = { Text("Убрать с экрана") },
+                                        onClick = { menu = false; vm.removeInstrument(quote.secid) },
                                     )
                                 }
-                                Cell(price(quote), 1.3f, TextMain, 19)
-                                val change = quote.changePercent
-                                Cell(
-                                    change?.let { (if (it > 0) "+" else if (it < 0) "−" else "") + number(abs(it), 2) + "%" } ?: "—",
-                                    1f,
-                                    when {
-                                        change == null || change == 0.0 -> TextMuted
-                                        change > 0 -> Up
-                                        else -> Down
-                                    },
-                                )
-                                if (wide) Cell(quote.open?.let { number(it, quote.decimals) } ?: "—", 1.2f)
-                                Cell(
-                                    if (quote.low != null && quote.high != null) {
-                                        "${number(quote.low, quote.decimals)} – ${number(quote.high, quote.decimals)}"
-                                    } else {
-                                        "—"
-                                    },
-                                    2.3f,
-                                )
-                                if (wide) Cell(quote.turnover?.let(::turnover) ?: "—", 1.4f)
-                                Cell(quote.lastTradeTime?.take(5) ?: "—", 0.9f, TextMuted)
-                            }
-                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Убрать с экрана") },
-                                    onClick = { menu = false; vm.removeInstrument(quote.secid) },
-                                )
                             }
                         }
                     }
+                    Text(
+                        "≡ — перетащить строку · нажатие — анализ, новости и покупки · долгое нажатие — убрать",
+                        color = TextMuted,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(start = 20.dp, top = 4.dp, bottom = 12.dp),
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.QuoteCells(quote: Quote, insight: InstrumentInsight?, wide: Boolean) {
+    Column(Modifier.weight(2.4f).padding(vertical = 14.dp)) {
+        Text(quote.name, color = TextMain, fontSize = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            listOfNotNull(quote.secid, quote.yield?.let { "доходность ${number(it, 2)}%" }).joinToString(" · "),
+            color = TextMuted,
+            fontSize = 14.sp,
+        )
+    }
+    Cell(price(quote), 1.3f, TextMain, 19)
+    val change = quote.changePercent
+    Cell(change?.let { signed(it, 2) + "%" } ?: "—", 1f, change?.let(::changeColor) ?: TextMuted)
+    if (wide) Cell(quote.open?.let { number(it, quote.decimals) } ?: "—", 1.2f)
+    if (wide) {
+        Cell(
+            if (quote.low != null && quote.high != null) "${number(quote.low, quote.decimals)} – ${number(quote.high, quote.decimals)}" else "—",
+            2.1f,
+        )
+    }
+    if (wide) Cell(quote.turnover?.let(::turnover) ?: "—", 1.3f)
+    val position = insight?.let { Portfolio.position(it.lots, quote.price) }
+    Box(Modifier.weight(1.6f), contentAlignment = Alignment.CenterEnd) {
+        if (position?.profitPercent != null && position.profit != null) {
+            Column(horizontalAlignment = Alignment.End) {
+                Text(signed(position.profitPercent, 2) + "%", color = changeColor(position.profit), fontSize = 17.sp, maxLines = 1)
+                Text(signed(position.profit, 0) + " ₽", color = TextMuted, fontSize = 13.sp, maxLines = 1)
+            }
+        } else {
+            Text("—", color = TextMuted, fontSize = 17.sp)
+        }
+    }
+    Box(Modifier.weight(1.5f), contentAlignment = Alignment.CenterEnd) {
+        val analysis = insight?.analysis
+        val recommendation = analysis?.recommendation
+        if (recommendation != null) {
+            Column(horizontalAlignment = Alignment.End) {
+                RecommendationBadge(recommendation, analysis.urgency, insight.lots.isNotEmpty())
+                analysis.analyzedAt?.let { Text(analysisTime(it), color = TextMuted, fontSize = 12.sp) }
+            }
+        } else {
+            Text(if (insight == null) "—" else "анализ…", color = TextMuted, fontSize = 14.sp)
         }
     }
 }

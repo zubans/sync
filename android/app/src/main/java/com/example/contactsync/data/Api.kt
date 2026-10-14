@@ -363,6 +363,29 @@ class Api(
 
     suspend fun newsSources(): List<NewsSourceDto> = get<NewsSourcesResponse>("/api/news/sources").sources
 
+    /** Инструменты виджета Мосбиржи целиком, в порядке на экране: по ним сервер пишет анализ. */
+    suspend fun putWatchlist(items: List<WatchlistItemDto>) {
+        execute<JsonObject?>(
+            request("/api/market/watchlist", auth = true).put(json.encodeToString(WatchlistRequest(items)).toRequestBody(JSON)).build(),
+        )
+    }
+
+    suspend fun marketOverview(): List<InstrumentOverviewDto> = get<MarketOverviewResponse>("/api/market/overview").instruments
+
+    suspend fun marketInstrument(secid: String): InstrumentDetailDto = get("/api/market/instruments/${secid.encodePath()}")
+
+    /** Пересчитать анализ: сервер возьмёт инструмент первым в следующем проходе (до 5 минут). */
+    suspend fun requestAnalysis(secid: String): AnalysisDto = post("/api/market/instruments/${secid.encodePath()}/analysis", "{}")
+
+    suspend fun addLot(secid: String, lot: LotRequest): LotDto =
+        post("/api/market/instruments/${secid.encodePath()}/lots", json.encodeToString(lot))
+
+    suspend fun deleteLot(id: Long) {
+        execute<JsonObject?>(request("/api/market/lots/$id", auth = true).delete().build())
+    }
+
+    private fun String.encodePath(): String = URLEncoder.encode(this, "UTF-8").replace("+", "%20")
+
     private suspend inline fun <reified T> get(path: String): T =
         execute(request(path, auth = true).get().build())
 

@@ -186,6 +186,8 @@ fun LauncherScreen(
                 }
             }
         }
+        // Инструмент Мосбиржи на весь экран — поверх раскрытого виджета; новость из него открывается поверх.
+        InstrumentScreen(state, vm)
         // Новость или сводка на весь экран — поверх дашборда и раскрытого виджета.
         NewsReader(state, vm)
       }
@@ -262,11 +264,11 @@ private fun Dashboard(
             state.weather?.let { WeatherStrip(it, Modifier.widget(LauncherWidget.WEATHER), onClick = expand(LauncherWidget.WEATHER)) }
             if (wide) {
                 Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    Column(Modifier.weight(1.15f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                         AgendaCard(state, vm, Modifier.weight(0.8f).fillMaxWidth().widget(LauncherWidget.AGENDA), expand(LauncherWidget.AGENDA))
                         KbCard(kb, kbVm, Modifier.weight(1.2f).fillMaxWidth())
                     }
-                    Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Column(Modifier.weight(1.2f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                         QuotesCard(state, vm, onAdd = onAddInstrument, Modifier.weight(0.85f).fillMaxWidth().widget(LauncherWidget.QUOTES),
                             expand(LauncherWidget.QUOTES))
                         NewsCard(state, vm, Modifier.weight(1.15f).fillMaxWidth().widget(LauncherWidget.NEWS), expand(LauncherWidget.NEWS))
@@ -642,12 +644,12 @@ private fun QuotesCard(state: LauncherState, vm: LauncherViewModel, onAdd: () ->
             color = if (state.offline) Down else TextMuted,
             fontSize = 13.sp,
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
         LazyColumn {
             items(state.quotes, key = { it.secid }) { quote ->
                 var menu by remember { mutableStateOf(false) }
                 Box {
-                    QuoteRow(quote, Modifier.combinedClickable(onClick = onExpand, onLongClick = { menu = true }))
+                    QuoteRow(quote, state.insights[quote.secid], Modifier.combinedClickable(onClick = { vm.openInstrument(quote) }, onLongClick = { menu = true }))
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(
                             text = { Text("Убрать с экрана") },
@@ -660,19 +662,37 @@ private fun QuotesCard(state: LauncherState, vm: LauncherViewModel, onAdd: () ->
     }
 }
 
+/** Строка карточки: название, доходность позиции (если есть покупки) или код, совет модели, цена и изменение за день. */
 @Composable
-private fun QuoteRow(quote: Quote, modifier: Modifier) {
-    Row(modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(quote.name, color = TextMain, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+private fun QuoteRow(quote: Quote, insight: InstrumentInsight?, modifier: Modifier) {
+    Row(modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                quote.yield?.let { "доходность ${number(it, 2)}%" } ?: quote.secid,
-                color = TextMuted,
-                fontSize = 13.sp,
+                quote.name,
+                color = TextMain,
+                fontSize = 15.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
+            Spacer(Modifier.width(8.dp))
+            val profit = insight?.let { Portfolio.position(it.lots, quote.price) }?.profitPercent
+            Text(
+                profit?.let { "поз. " + signed(it, 1) + "%" } ?: quote.yield?.let { "дох. ${number(it, 2)}%" } ?: quote.secid,
+                color = profit?.let(::changeColor) ?: TextMuted,
+                fontSize = 12.sp,
+                maxLines = 1,
+            )
+            val analysis = insight?.analysis
+            val recommendation = analysis?.recommendation
+            if (recommendation != null) {
+                Spacer(Modifier.width(6.dp))
+                RecommendationBadge(recommendation, analysis.urgency, insight.lots.isNotEmpty())
+            }
         }
-        Text(price(quote), color = TextMain, fontSize = 18.sp)
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(price(quote), color = TextMain, fontSize = 16.sp)
+        Spacer(Modifier.width(10.dp))
         val change = quote.changePercent
         val color = when {
             change == null || change == 0.0 -> TextMuted

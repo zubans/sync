@@ -238,4 +238,43 @@ class NewsItemRepository extends ServiceEntityRepository
 
         return $qb->getQuery()->getResult();
     }
+
+    /**
+     * Новости с даты, в заголовке которых (или в его переводе) встречается одно из слов, — свежие первыми.
+     * Слово ищется в трёх написаниях — «сбербанк», «Сбербанк», «СБЕРБАНК»: LIKE в PostgreSQL различает
+     * регистр, а LOWER в SQLite не понимает кириллицу.
+     *
+     * @param list<string> $words в нижнем регистре
+     *
+     * @return list<NewsItem>
+     */
+    public function findMentioning(array $words, \DateTimeImmutable $since, int $limit): array
+    {
+        if ($words === []) {
+            return [];
+        }
+        $qb = $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->addSelect('s')
+            ->where('n.sortAt >= :since AND s.format <> :digest')
+            ->setParameter('since', $since)
+            ->setParameter('digest', NewsSource::FORMAT_DIGEST);
+        $match = $qb->expr()->orX();
+        $i = 0;
+        foreach ($words as $word) {
+            $variants = array_unique([$word, mb_strtoupper(mb_substr($word, 0, 1)).mb_substr($word, 1), mb_strtoupper($word)]);
+            foreach ($variants as $variant) {
+                $match->add("n.title LIKE :w$i");
+                $match->add("n.translatedTitle LIKE :w$i");
+                $qb->setParameter("w$i", '%'.addcslashes($variant, '%_').'%');
+                ++$i;
+            }
+        }
+
+        return $qb->andWhere($match)
+            ->orderBy('n.sortAt', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
 }

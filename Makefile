@@ -8,7 +8,7 @@ HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate analyze market digest digest-preview agy-login test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate analyze market advice digest digest-preview agy-login test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -76,6 +76,9 @@ analyze: ## Векторы новостей и сюжетные линии се�
 
 market: ## Последствия новостей для Мосбиржи сейчас: связь с инструментами (agy) и замер цены (ISS)
 	$(COMPOSE) exec news php bin/console app:news:market
+
+advice: ## Анализ инструментов виджета Мосбиржи сейчас (agy): новости, индикаторы, покупки → совет (LIMIT=3 за проход)
+	$(COMPOSE) exec news php bin/console app:market:analyze --limit=$(or $(LIMIT),3)
 
 digest: ## Написать сводки новостей за прошедший час и сутки, если их ещё нет (REBUILD=1 — переписать)
 	$(COMPOSE) exec news php bin/console app:news:digest $(if $(REBUILD),--rebuild)
