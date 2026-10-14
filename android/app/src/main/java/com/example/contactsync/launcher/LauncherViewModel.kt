@@ -14,7 +14,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.contactsync.App
 import com.example.contactsync.calendar.CalendarAccount
+import com.example.contactsync.data.ApiException
+import com.example.contactsync.data.LotRequest
 import com.example.contactsync.data.UnauthorizedException
+import com.example.contactsync.data.WatchlistItemDto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,6 +44,10 @@ data class LauncherState(
     val quotes: List<Quote> = emptyList(),
     /** Когда котировки последний раз пришли с биржи, мс; 0 — ещё ни разу. */
     val quotesAt: Long = 0,
+    /** Анализ модели и покупки по коду инструмента — с сервера sync; пусто — не вошли в sync или сервер не ответил. */
+    val insights: Map<String, InstrumentInsight> = emptyMap(),
+    /** Экран инструмента поверх дашборда; null — закрыт. */
+    val instrument: InstrumentPage? = null,
     /** Все события на 14 дней: карточка показывает первые, подробный экран — все. */
     val agenda: List<AgendaRow> = emptyList(),
     /** Новости выбранной вкладки с сервера sync; если сервер не ответил, остаются прежние. */
@@ -107,6 +114,10 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     /** Последние загруженные новости каждой вкладки: при переключении показываются сразу, до ответа сервера. */
     private val newsCache = HashMap<String?, NewsPage>()
     private var calendarSyncAt = 0L
+    private var insightsAt = 0L
+    /** Список инструментов ещё не отправлен на сервер в этом запуске или изменился. */
+    private var watchlistDirty = true
+    private var instrumentJob: Job? = null
 
     fun onResume() {
         loadApps()
@@ -117,6 +128,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
                 refreshAgenda()
                 if (System.currentTimeMillis() - weatherAt > WEATHER_TTL_MS) refreshWeather()
                 refreshQuotes()
+                if (System.currentTimeMillis() - insightsAt > INSIGHTS_TTL_MS) launch { refreshInsights() }
                 // Отдельной корутиной: медленный ответ сервера не должен задерживать котировки.
                 if (System.currentTimeMillis() - newsAt > NEWS_TTL_MS && newsJob?.isActive != true) {
                     newsJob = launch { refreshNews() }
@@ -209,6 +221,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         if (settings.instruments.any { it.secid == secid }) return true
         val instrument = api.resolveInstrument(secid) ?: return false
         settings.instruments = settings.instruments + instrument
+        watchlistDirty = true
         refreshQuotes()
         return true
     }
@@ -216,6 +229,114 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     fun removeInstrument(secid: String) {
         settings.instruments = settings.instruments.filterNot { it.secid == secid }
         _state.update { s -> s.copy(quotes = s.quotes.filterNot { it.secid == secid }) }
+        watchlistDirty = true
+        viewModelScope.launch { syncWatchlist() }
+    }
+
+    /**
+     * Новый порядок инструментов — после перетаскивания на подробном экране: по нему идут и карточка,
+     * и полноэкранный вид. Коды, которых нет в [secids], остаются в конце в прежнем порядке.
+     */
+    fun reorderInstruments(secids: List<String>) {
+        val byCode = settings.instruments.associateBy { it.secid }
+        val ordered = secids.mapNotNull { byCode[it] }
+        settings.instruments = ordered + settings.instruments.filterNot { it.secid in secids }
+        val rank = settings.instruments.withIndex().associate { (i, it) -> it.secid to i }
+        _state.update { s -> s.copy(quotes = s.quotes.sortedBy { rank[it.secid] ?: Int.MAX_VALUE }) }
+        watchlistDirty = true
+        viewModelScope.launch { syncWatchlist() }
+    }
+
+    /** Экран инструмента: всё о нём с сервера — сведения, индикаторы, график, новости, покупки и анализ. */
+    fun openInstrument(quote: Quote) {
+        _state.update { it.copy(instrument = InstrumentPage(quote.secid, quote.name)) }
+        loadInstrument(quote.secid)
+    }
+
+    fun closeInstrument() {
+        instrumentJob?.cancel()
+        _state.update { it.copy(instrument = null) }
+    }
+
+    /**
+     * Загрузка экрана инструмента; пока анализ пересчитывается, экран перечитывается раз в 20 с —
+     * сервер пишет его в фоне (до 5 минут, если очередь).
+     */
+    private fun loadInstrument(secid: String) {
+        instrumentJob?.cancel()
+        instrumentJob = viewModelScope.launch {
+            // Инструмент мог только что появиться в виджете — сначала сервер должен о нём узнать.
+            if (watchlistDirty) syncWatchlist()
+            while (isActive) {
+                val detail = try {
+                    Portfolio.detail(syncApi.marketInstrument(secid))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: UnauthorizedException) {
+                    updateInstrument(secid) { it.copy(error = "Войдите в sync, чтобы видеть анализ") }
+                    return@launch
+                } catch (e: ApiException) {
+                    // 404 — сервер ещё без анализа инструментов (не обновлён) или не получил список виджета.
+                    val message = if (e.code == 404) "Сервер sync пока не знает об этом инструменте: обновите сервер или откройте позже" else e.message
+                    updateInstrument(secid) { it.copy(error = message ?: "Сервер не ответил") }
+                    return@launch
+                } catch (e: Exception) {
+                    updateInstrument(secid) { it.copy(error = "Сервер не ответил") }
+                    return@launch
+                }
+                updateInstrument(secid) { it.copy(name = detail.dto.name, detail = detail, error = null) }
+                _state.update { s -> s.copy(insights = s.insights + (secid to InstrumentInsight(detail.analysis, detail.lots))) }
+                val waiting = detail.analysis?.pending == true || detail.analysis == null
+                if (!waiting) return@launch
+                delay(INSTRUMENT_POLL_MS)
+            }
+        }
+    }
+
+    private fun updateInstrument(secid: String, transform: (InstrumentPage) -> InstrumentPage) =
+        _state.update { s ->
+            val page = s.instrument
+            if (page != null && page.secid == secid) s.copy(instrument = transform(page)) else s
+        }
+
+    /** Пересчитать анализ сейчас — кнопка на экране инструмента. */
+    fun requestAnalysis(secid: String) {
+        viewModelScope.launch {
+            try {
+                syncApi.requestAnalysis(secid)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@launch
+            }
+            loadInstrument(secid)
+        }
+    }
+
+    /** Покупка; false — сервер не принял (нет связи, неверные данные). Совет пересчитается с учётом позиции. */
+    suspend fun addLot(secid: String, lot: LotRequest): Boolean {
+        try {
+            syncApi.addLot(secid, lot)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return false
+        }
+        loadInstrument(secid)
+        return true
+    }
+
+    fun deleteLot(secid: String, id: Long) {
+        viewModelScope.launch {
+            try {
+                syncApi.deleteLot(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@launch
+            }
+            loadInstrument(secid)
+        }
     }
 
     fun selectNewsSource(code: String?) {
@@ -343,6 +464,42 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private suspend fun refreshQuotes() = network {
         val quotes = api.quotes(settings.instruments)
         _state.update { it.copy(quotes = quotes, quotesAt = System.currentTimeMillis()) }
+        if (watchlistDirty) viewModelScope.launch { syncWatchlist() }
+    }
+
+    /**
+     * Список инструментов — на сервер sync: по нему сервер пишет анализ. Названия — из котировок
+     * (их у сервера нет), без котировки — код. Не получилось — отправим при следующем обновлении.
+     */
+    private suspend fun syncWatchlist() {
+        val names = _state.value.quotes.associate { it.secid to it.name }
+        val items = settings.instruments.map { WatchlistItemDto(it.secid, it.engine, it.market, it.board, names[it.secid] ?: it.secid) }
+        watchlistDirty = false
+        try {
+            syncApi.putWatchlist(items)
+        } catch (e: CancellationException) {
+            watchlistDirty = true
+            throw e
+        } catch (e: Exception) {
+            watchlistDirty = true
+            return
+        }
+        refreshInsights()
+    }
+
+    /** Анализ и покупки для строк виджета. Нет входа в sync или сервер не ответил — строки без них. */
+    private suspend fun refreshInsights() {
+        try {
+            val list = syncApi.marketOverview()
+            insightsAt = System.currentTimeMillis()
+            _state.update { s ->
+                s.copy(insights = list.associate { it.secid to InstrumentInsight(it.analysis?.let(Portfolio::analysis), it.lots.map(Portfolio::lot)) })
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Прежние данные остаются; попробуем при следующем обновлении.
+        }
     }
 
     /**
@@ -442,5 +599,8 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         const val VPN_TICK_MS = 10_000L
         const val VPN_SWITCH_TICK_MS = 2_000L
         const val CALENDAR_SYNC_MS = 5 * 60_000L
+        /** Анализ сервер пересчитывает не чаще раза в 5 минут — чаще спрашивать незачем. */
+        const val INSIGHTS_TTL_MS = 5 * 60_000L
+        const val INSTRUMENT_POLL_MS = 20_000L
     }
 }

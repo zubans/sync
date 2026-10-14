@@ -6,7 +6,8 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 /**
  * Данные Мосбиржи из ISS (без подписки — с задержкой 15 минут): инструменты, с которыми связываются
- * новости, и десятиминутные свечи для замера реакции цены. Время ISS — московское, наружу — UTC.
+ * новости, десятиминутные свечи для замера реакции цены, а для анализа инструментов виджета — дневные свечи,
+ * сведения о бумаге и дивиденды. Время ISS — московское, наружу — UTC.
  */
 final class MoexIss
 {
@@ -97,6 +98,85 @@ final class MoexIss
                 return $candles;
             }
         }
+    }
+
+    /**
+     * Дневные свечи основного режима торгов с $from по $till включительно — для индикаторов и графика.
+     *
+     * @return list<array{date: string, open: float, high: float, low: float, close: float, value: float}> date — Y-m-d, value — оборот, ₽
+     *
+     * @throws \RuntimeException ISS не ответила
+     */
+    public function dailyCandles(string $secid, string $engine, string $market, \DateTimeImmutable $from, \DateTimeImmutable $till): array
+    {
+        $moscow = new \DateTimeZone('Europe/Moscow');
+        $path = sprintf('/engines/%s/markets/%s/securities/%s/candles.json', rawurlencode($engine), rawurlencode($market), rawurlencode($secid));
+        $candles = [];
+        for ($start = 0; ; $start += self::PAGE) {
+            $rows = self::rows($this->get($path, [
+                'from' => $from->setTimezone($moscow)->format('Y-m-d'),
+                'till' => $till->setTimezone($moscow)->format('Y-m-d'),
+                'interval' => 24,
+                'start' => $start,
+            ]), 'candles');
+            foreach ($rows as $row) {
+                if (!is_numeric($row['close'] ?? null) || !\is_string($row['begin'] ?? null)) {
+                    continue;
+                }
+                $close = (float) $row['close'];
+                $candles[] = [
+                    'date' => substr($row['begin'], 0, 10),
+                    'open' => is_numeric($row['open'] ?? null) ? (float) $row['open'] : $close,
+                    'high' => is_numeric($row['high'] ?? null) ? (float) $row['high'] : $close,
+                    'low' => is_numeric($row['low'] ?? null) ? (float) $row['low'] : $close,
+                    'close' => $close,
+                    'value' => is_numeric($row['value'] ?? null) ? (float) $row['value'] : 0.0,
+                ];
+            }
+            if (\count($rows) < self::PAGE) {
+                return $candles;
+            }
+        }
+    }
+
+    /**
+     * Сведения о бумаге из /securities/{secid}.json: полное название, тип, ISIN, уровень листинга,
+     * у облигаций — погашение, купон, номинал.
+     *
+     * @return array<string, array{title: string, value: string}> по коду поля ISS (NAME, ISIN, MATDATE…)
+     *
+     * @throws \RuntimeException ISS не ответила
+     */
+    public function description(string $secid): array
+    {
+        $fields = [];
+        foreach (self::rows($this->get('/securities/'.rawurlencode($secid).'.json', ['iss.only' => 'description']), 'description') as $row) {
+            if (\is_string($row['name'] ?? null) && ($row['value'] ?? null) !== null && (string) $row['value'] !== '') {
+                $fields[$row['name']] = ['title' => (string) ($row['title'] ?? $row['name']), 'value' => (string) $row['value']];
+            }
+        }
+
+        return $fields;
+    }
+
+    /**
+     * Дивиденды акции: дата закрытия реестра и сумма на акцию, по порядку дат.
+     *
+     * @return list<array{date: string, value: float, currency: string}>
+     *
+     * @throws \RuntimeException ISS не ответила
+     */
+    public function dividends(string $secid): array
+    {
+        $list = [];
+        foreach (self::rows($this->get('/securities/'.rawurlencode($secid).'/dividends.json', []), 'dividends') as $row) {
+            if (\is_string($row['registryclosedate'] ?? null) && is_numeric($row['value'] ?? null)) {
+                $list[] = ['date' => $row['registryclosedate'], 'value' => (float) $row['value'], 'currency' => (string) ($row['currencyid'] ?? 'RUB')];
+            }
+        }
+        usort($list, static fn (array $a, array $b) => $a['date'] <=> $b['date']);
+
+        return $list;
     }
 
     /**

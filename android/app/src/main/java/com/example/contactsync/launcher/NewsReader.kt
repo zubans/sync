@@ -312,13 +312,7 @@ internal fun marketLine(impacts: List<MarketImpact>, separator: String = " · ")
     }
 }
 
-private fun changeColor(change: Double) = when {
-    change > 0 -> Up
-    change < 0 -> Down
-    else -> TextMuted
-}
-
-private fun forecastColor(forecast: MarketForecast) = when (forecast) {
+internal fun forecastColor(forecast: MarketForecast) = when (forecast) {
     MarketForecast.UP -> Up
     MarketForecast.DOWN -> Down
     MarketForecast.MIXED -> Amber

@@ -53,4 +53,38 @@ class NewsMarketImpactRepository extends ServiceEntityRepository
 
         return $byItem;
     }
+
+    /**
+     * Последствия новостей для инструмента с даты — вместе с новостями, свежие первыми.
+     *
+     * @return list<NewsMarketImpact>
+     */
+    public function findForSecid(string $secid, \DateTimeImmutable $since, int $limit): array
+    {
+        return $this->createQueryBuilder('m')
+            ->join('m.item', 'n')
+            ->addSelect('n')
+            ->join('n.source', 's')
+            ->addSelect('s')
+            ->where('m.secid = :secid AND n.sortAt >= :since')
+            ->setParameter('secid', $secid)
+            ->setParameter('since', $since)
+            ->orderBy('n.sortAt', 'DESC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /** Когда у инструмента появилось последнее последствие; null — ни одного. */
+    public function lastCreatedAt(string $secid): ?\DateTimeImmutable
+    {
+        $value = $this->createQueryBuilder('m')
+            ->select('MAX(m.createdAt)')
+            ->where('m.secid = :secid')
+            ->setParameter('secid', $secid)
+            ->getQuery()
+            ->getSingleScalarResult();
+
+        return \is_string($value) ? new \DateTimeImmutable($value, new \DateTimeZone('UTC')) : null;
+    }
 }

@@ -40,7 +40,8 @@ services:
 
   # Сбор новостей раз в 5 минут (app:news:collect), полные тексты статей (app:news:articles), перевод новостей
   # изданий на других языках (app:news:translate), сюжетные линии (app:news:analyze), последствия для Мосбиржи
-  # (app:news:market) и сводки за час и за сутки (app:news:digest; перевод, последствия и сводки — Antigravity CLI,
+  # (app:news:market), анализ инструментов виджета Мосбиржи (app:market:analyze) и сводки за час и за сутки
+  # (app:news:digest; перевод, последствия, анализ и сводки — Antigravity CLI,
   # вход один раз: make agy-login). Тот же образ, что у сервера; миграции
   # применяет контейнер app — пока они не применены, проход пропускается без ошибок в журнале.
   news:
@@ -57,6 +58,8 @@ services:
       # Модели agy для сводок — названия из `agy models`; пусто — модель по умолчанию.
       NEWS_DIGEST_MODEL_HOUR: ${NEWS_DIGEST_MODEL_HOUR:-}
       NEWS_DIGEST_MODEL_DAY: ${NEWS_DIGEST_MODEL_DAY:-}
+      # Модель agy для анализа инструментов Мосбиржи; пусто — модель по умолчанию с --effort medium.
+      MARKET_ANALYSIS_MODEL: ${MARKET_ANALYSIS_MODEL:-}
       # Векторы новостей для сюжетных линий: Ollama с qwen3-embedding на машине с видеокартой — та же, что у KB.
       NEWS_EMBEDDINGS_URL: ${NEWS_EMBEDDINGS_URL:-http://192.168.1.133:11434}
       NEWS_EMBEDDINGS_MODEL: ${NEWS_EMBEDDINGS_MODEL:-qwen3-embedding:4b}
@@ -73,6 +76,7 @@ services:
             php bin/console app:news:translate --no-interaction
             php bin/console app:news:analyze --no-interaction
             php bin/console app:news:market --no-interaction
+            php bin/console app:market:analyze --no-interaction
             php bin/console app:news:digest --no-interaction
           else
             echo "Миграции ещё не применены — сбор пропущен"
