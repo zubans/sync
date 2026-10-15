@@ -12,8 +12,9 @@ final class AgyAccountsTest extends TestCase
     protected function setUp(): void
     {
         $this->home = sys_get_temp_dir().'/agy-'.bin2hex(random_bytes(4));
-        mkdir($this->home.'/account2/.gemini', 0o777, true);
-        mkdir($this->home.'/account3', 0o777, true); // папка есть, входа нет — не аккаунт
+        mkdir($this->home.'/account2/.gemini/antigravity-cli', 0o777, true);
+        touch($this->home.'/account2'.AgyAccounts::TOKEN);
+        mkdir($this->home.'/account3/.gemini/antigravity-cli', 0o777, true); // agy запускали, но вход не завершён — не аккаунт
     }
 
     protected function tearDown(): void
@@ -45,6 +46,13 @@ final class AgyAccountsTest extends TestCase
         $accounts = new AgyAccounts($this->home);
         $accounts->markExhausted($this->home, 1000, AgyAccounts::resetIn($answer));
         self::assertSame([$this->home.'/account2'], $accounts->available(1000 + 2 * AgyAccounts::COOLDOWN), 'через два часа основной ещё отдыхает');
+    }
+
+    public function testAuthFailuresAreRecognized(): void
+    {
+        self::assertTrue(AgyAccounts::isAuthFailure('agy: authentication failed or timed out'));
+        self::assertTrue(AgyAccounts::isAuthFailure('UNAUTHENTICATED (code 401): Request had invalid authentication credentials.'));
+        self::assertFalse(AgyAccounts::isAuthFailure('Individual quota reached. Resets in 43h17m35s.'));
     }
 
     public function testQuotaAnswersAreRecognized(): void

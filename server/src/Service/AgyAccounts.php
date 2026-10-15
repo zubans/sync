@@ -11,8 +11,12 @@ namespace App\Service;
  */
 final class AgyAccounts
 {
-    /** Сколько отдыхает аккаунт после ответа о лимите: квота agy восстанавливается в течение часа-двух. */
+    /** Сколько отдыхает аккаунт после ответа о лимите, если agy не назвал срок сброса. */
     public const COOLDOWN = 3600;
+    /** Сколько пропускается аккаунт с ошибкой входа: перелогинят — через 10 минут он снова в деле. */
+    public const AUTH_COOLDOWN = 600;
+    /** Файл, где agy хранит вход в аккаунт: папка `.gemini` появляется раньше — при первом запуске agy. */
+    public const TOKEN = '/.gemini/antigravity-cli/antigravity-oauth-token';
 
     public function __construct(private readonly string $home)
     {
@@ -21,7 +25,7 @@ final class AgyAccounts
     /** @return list<string> домашние папки аккаунтов: основной первым, дополнительные — если в них выполнен вход */
     public function all(): array
     {
-        $extra = array_filter(glob($this->home.'/account[0-9]*', \GLOB_ONLYDIR) ?: [], static fn (string $dir) => is_dir($dir.'/.gemini'));
+        $extra = array_filter(glob($this->home.'/account[0-9]*', \GLOB_ONLYDIR) ?: [], static fn (string $dir) => is_file($dir.self::TOKEN));
         natsort($extra);
 
         return [$this->home, ...array_values($extra)];
@@ -58,6 +62,12 @@ final class AgyAccounts
     public static function isQuota(string $text): bool
     {
         return (bool) preg_match('/RESOURCE_EXHAUSTED|quota|code 429|\b429 Too Many|rate.?limit|usage limit|exhausted your/i', $text);
+    }
+
+    /** Ошибка входа: «authentication failed or timed out», «UNAUTHENTICATED (code 401)». */
+    public static function isAuthFailure(string $text): bool
+    {
+        return (bool) preg_match('/authentication failed|UNAUTHENTICATED|code 401/i', $text);
     }
 
     /** «Individual quota reached… Resets in 43h17m35s.» → 155855 секунд; срока в ответе нет — null. */

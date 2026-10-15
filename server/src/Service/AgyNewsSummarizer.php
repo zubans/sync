@@ -45,12 +45,14 @@ final class AgyNewsSummarizer implements NewsSummarizer
             try {
                 return $this->completeWith($home, $prompt, $model, $effort, $schema);
             } catch (\RuntimeException $e) {
-                if (!AgyAccounts::isQuota($e->getMessage())) {
+                $quota = AgyAccounts::isQuota($e->getMessage());
+                if (!$quota && !AgyAccounts::isAuthFailure($e->getMessage())) {
                     throw $e;
                 }
-                $this->accounts->markExhausted($home, time(), AgyAccounts::resetIn($e->getMessage()));
+                $this->accounts->markExhausted($home, time(), $quota ? AgyAccounts::resetIn($e->getMessage()) : AgyAccounts::AUTH_COOLDOWN);
                 $next = $available[$i + 1] ?? null;
-                error_log(sprintf('agy: лимит аккаунта %s — %s', basename($home), $next !== null ? 'переключаюсь на '.basename($next) : 'других свободных аккаунтов нет'));
+                error_log(sprintf('agy: %s %s — %s', $quota ? 'лимит аккаунта' : 'не выполнен вход в аккаунт', basename($home),
+                    $next !== null ? 'переключаюсь на '.basename($next) : 'других свободных аккаунтов нет'));
                 if ($next === null) {
                     throw $e;
                 }
