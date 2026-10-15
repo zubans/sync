@@ -92,7 +92,7 @@ final class AgyNewsSummarizer implements NewsSummarizer
         } elseif ($effort !== null) {
             array_push($base, '--effort', $effort);
         }
-        if ($schema !== null) {
+        if ($schema !== null && self::schemaWorks($model)) {
             // agy сам добивается от модели итогового ответа по схеме — без пояснений вокруг JSON.
             array_push($base, '--json-schema', json_encode($schema, \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));
         }
@@ -120,6 +120,17 @@ final class AgyNewsSummarizer implements NewsSummarizer
         }
 
         return $run['answer'];
+    }
+
+    /**
+     * Схема ответа (`--json-schema`) работает у Gemini (и у модели по умолчанию — это Gemini). Claude через agy
+     * пишет ответ обычным текстом, а в `structured_output` кладёт отчёт «Перевод выполнен…» (15.10.2026: перевод
+     * статьи из 14 абзацев превратился в одну строку). Для остальных моделей схема не передаётся — JSON
+     * берётся из текста ответа: промпты требуют «только JSON», разборщики вырезают его от первой `{` до последней `}`.
+     */
+    public static function schemaWorks(?string $model): bool
+    {
+        return $model === null || $model === '' || str_starts_with(mb_strtolower($model), 'gemini');
     }
 
     /** agy не знает модель: «invalid model selection … is not recognized as a known model». */

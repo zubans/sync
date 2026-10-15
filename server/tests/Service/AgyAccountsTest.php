@@ -64,6 +64,14 @@ final class AgyAccountsTest extends TestCase
         self::assertSame(4600, $accounts->nextFreeFor(['Gemini 3.8 Flash (Medium)']), 'раньше всех вернётся Gemini основного аккаунта');
     }
 
+    public function testResponseSchemaOnlyForGemini(): void
+    {
+        self::assertTrue(\App\Service\AgyNewsSummarizer::schemaWorks(null));
+        self::assertTrue(\App\Service\AgyNewsSummarizer::schemaWorks('Gemini 3.8 Flash (Medium)'));
+        self::assertFalse(\App\Service\AgyNewsSummarizer::schemaWorks('Claude Sonnet 4.6 (Thinking)'));
+        self::assertFalse(\App\Service\AgyNewsSummarizer::schemaWorks('GPT-OSS 120B (Medium)'));
+    }
+
     public function testAuthFailuresAreRecognized(): void
     {
         self::assertTrue(AgyAccounts::isAuthFailure('agy: authentication failed or timed out'));
