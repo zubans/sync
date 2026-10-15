@@ -8,6 +8,8 @@ HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
 
 .DEFAULT_GOAL := help
+# Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
+AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
 .PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate analyze market advice digest digest-preview agy-login test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
 
 help: ## Список команд
@@ -86,8 +88,8 @@ digest: ## Написать сводки новостей за прошедши�
 digest-preview: ## Сводка за последние часы без сохранения: make digest-preview HOURS=3 MODEL="Gemini 3.1 Pro (High)"
 	$(COMPOSE) exec news php bin/console app:news:digest --preview --hours=$(or $(HOURS),1) $(if $(MODEL),--model="$(MODEL)")
 
-agy-login: ## Войти в аккаунт Google для сводок (Antigravity CLI): откройте ссылку, вставьте код, выйдите /quit
-	$(COMPOSE) exec -it -e HOME=/app/var/agy news sh -c "mkdir -p /app/var/agy && agy"
+agy-login: ## Войти в аккаунт Google для agy: откройте ссылку, вставьте код, выйдите /quit; запасной аккаунт — ACCOUNT=2
+	$(COMPOSE) exec -it -e HOME=$(AGY_HOME) news sh -c "mkdir -p $(AGY_HOME) && agy"
 
 test: ## Тесты сервера в контейнере
 	docker build --target dev -t contactsync-server-test ./server

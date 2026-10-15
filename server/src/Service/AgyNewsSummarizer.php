@@ -11,6 +11,10 @@ use Symfony\Component\Process\Process;
  * «Antigravity CLI (подписка)» в KB. Вход — один раз интерактивно (`make agy-login`), он хранится
  * в домашней папке agy (том `agy_data`). Каждая сводка — отдельный разговор.
  *
+ * Аккаунтов может быть несколько (`AgyAccounts`): упёрся в лимит один — запрос тут же повторяется
+ * следующим, а исчерпанный час не трогается. Исчерпаны все — ошибка сразу, без ожидания по 600 с
+ * на каждом шаге цикла (14.10.2026 такие ожидания остановили сводки и сюжеты на семь часов).
+ *
  * Собственные инструменты агента не нужны: агент получает новости в промпте, а настройки домашней
  * папки запрещают ему всё остальное (toolPermission: strict). Gemini всё равно тянется к ним
  * и заканчивает ход без ответа — тогда ход один раз повторяется в том же разговоре, как в KB.
@@ -21,15 +25,45 @@ final class AgyNewsSummarizer implements NewsSummarizer
     private const TIMEOUT = 600;
     private const RETRY = 'Собственные инструменты agy%s отклонены и не работают. Дай ответ текстом по уже переданным новостям — только JSON указанного вида.';
 
+    private readonly AgyAccounts $accounts;
+
     public function __construct(
         #[Autowire('%env(resolve:NEWS_AGY_HOME)%')]
-        private readonly string $home,
+        string $home,
     ) {
+        $this->accounts = new AgyAccounts($home);
     }
 
     public function complete(string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string
     {
-        $this->prepareHome();
+        $available = $this->accounts->available(time());
+        if ($available === []) {
+            throw new \RuntimeException(sprintf('agy: лимит исчерпан на всех аккаунтах (%d), следующий освободится в %s UTC. Ещё аккаунт — make agy-login ACCOUNT=2',
+                \count($this->accounts->all()), date('H:i', $this->accounts->nextFree())));
+        }
+        foreach ($available as $i => $home) {
+            try {
+                return $this->completeWith($home, $prompt, $model, $effort, $schema);
+            } catch (\RuntimeException $e) {
+                if (!AgyAccounts::isQuota($e->getMessage())) {
+                    throw $e;
+                }
+                $this->accounts->markExhausted($home, time());
+                $next = $available[$i + 1] ?? null;
+                error_log(sprintf('agy: лимит аккаунта %s — %s', basename($home), $next !== null ? 'переключаюсь на '.basename($next) : 'других свободных аккаунтов нет'));
+                if ($next === null) {
+                    throw $e;
+                }
+            }
+        }
+
+        throw new \LogicException('недостижимо');
+    }
+
+    /** Запрос одним аккаунтом — его домашняя папка [home]. */
+    private function completeWith(string $home, string $prompt, ?string $model, ?string $effort, ?array $schema): string
+    {
+        $this->prepareHome($home);
         $base = ['agy', '--input-format', 'stream-json', '--output-format', 'stream-json'];
         if ($model !== null && $model !== '') {
             // Уровень уже в названии модели («Gemini 3.8 Flash (Medium)»): с --effort agy такой запуск отклоняет.
@@ -42,7 +76,7 @@ final class AgyNewsSummarizer implements NewsSummarizer
             array_push($base, '--json-schema', json_encode($schema, \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));
         }
 
-        $run = $this->run($base, $prompt);
+        $run = $this->run($home, $base, $prompt);
         if ($model !== null && $model !== '' && $run['error'] !== null && self::unknownModel($run['error'])) {
             // Google переименовывает и убирает модели («Gemini 3.1 Pro (High)» пропала 14.10.2026) — без модели
             // сводка всё же выйдет. В журнал — чтобы модель в NEWS_DIGEST_MODEL_* заменили на актуальную.
@@ -51,11 +85,11 @@ final class AgyNewsSummarizer implements NewsSummarizer
             if ($effort !== null) {
                 array_splice($base, 5, 0, ['--effort', $effort]);
             }
-            $run = $this->run($base, $prompt);
+            $run = $this->run($home, $base, $prompt);
         }
         if ($run['answer'] === '' && $run['conversation'] !== null && $run['error'] === null) {
             $tools = $run['tools'] !== [] ? ' ('.implode(', ', $run['tools']).')' : '';
-            $run = $this->run([...$base, '--conversation', $run['conversation']], sprintf(self::RETRY, $tools));
+            $run = $this->run($home, [...$base, '--conversation', $run['conversation']], sprintf(self::RETRY, $tools));
         }
         if ($run['error'] !== null) {
             throw new \RuntimeException('agy: '.$run['error'].'. Если не выполнен вход в аккаунт — make agy-login');
@@ -80,21 +114,23 @@ final class AgyNewsSummarizer implements NewsSummarizer
      *
      * @return array{answer: string, conversation: ?string, tools: list<string>, error: ?string, trace: string}
      */
-    private function run(array $args, string $text): array
+    private function run(string $home, array $args, string $text): array
     {
         $input = json_encode(['event' => 'user', 'message' => ['content' => $text]], \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR)."\n";
         // Рабочая папка — домашняя agy: агенту не нужны файлы сервера.
-        $process = new Process($args, $this->home, ['HOME' => $this->home], $input, self::TIMEOUT);
+        $process = new Process($args, $home, ['HOME' => $home], $input, self::TIMEOUT);
         try {
             $process->run();
         } catch (ProcessTimedOutException) {
-            throw new \RuntimeException(sprintf('agy: нет ответа за %d с', self::TIMEOUT));
+            // agy сам повторяет запрос после ответа о лимите — и может так не дождаться ответа вовсе.
+            $partial = $process->getOutput().$process->getErrorOutput();
+            throw new \RuntimeException(sprintf('agy: нет ответа за %d с%s', self::TIMEOUT, AgyAccounts::isQuota($partial) ? ' — лимит аккаунта (RESOURCE_EXHAUSTED)' : ''));
         }
         if ($process->getExitCode() === 127) {
             throw new \RuntimeException('agy не установлен в контейнере — пересоберите образ');
         }
         // Сырой вывод последнего запуска — для разбора сбоев: что именно прислал агент.
-        @file_put_contents($this->home.'/last-run.jsonl', $process->getOutput());
+        @file_put_contents($home.'/last-run.jsonl', $process->getOutput());
         $run = self::parse($process->getOutput());
         if ($run['answer'] === '' && $run['error'] === null) {
             $stderr = trim($process->getErrorOutput());
@@ -155,9 +191,9 @@ final class AgyNewsSummarizer implements NewsSummarizer
         return ['answer' => $answer, 'conversation' => $conversation, 'tools' => array_keys($tools), 'error' => $error, 'trace' => $trace];
     }
 
-    private function prepareHome(): void
+    private function prepareHome(string $home): void
     {
-        $file = $this->home.'/.gemini/antigravity-cli/settings.json';
+        $file = $home.'/.gemini/antigravity-cli/settings.json';
         $settings = is_file($file) ? json_decode((string) file_get_contents($file), true) : null;
         $settings = \is_array($settings) ? $settings : [];
         $wanted = ['toolPermission' => 'strict', 'allowNonWorkspaceAccess' => false];
