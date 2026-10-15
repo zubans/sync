@@ -4,7 +4,8 @@ namespace App\Service;
 
 /**
  * Аккаунты Google для agy: основной — домашняя папка agy, дополнительные — её подпапки `account2`,
- * `account3`… (вход: `make agy-login ACCOUNT=2`). Аккаунт, упёршийся в лимит, отдыхает час: отметка
+ * `account3`… (вход: `make agy-login ACCOUNT=2`). Аккаунт, упёршийся в лимит, отдыхает до сброса,
+ * который называет agy («Resets in 43h17m35s»), а если срока нет — час: отметка
  * лежит в файле, поэтому её видят все шаги цикла `news` (каждый — отдельный процесс) и не ждут
  * исчерпанный аккаунт заново.
  */
@@ -42,10 +43,11 @@ final class AgyAccounts
         return min(array_map(static fn (string $home) => $state[$home] ?? 0, $this->all()));
     }
 
-    public function markExhausted(string $home, int $now): void
+    /** [resetIn] — через сколько секунд agy обещал сбросить лимит; не сказал — отдых [COOLDOWN]. */
+    public function markExhausted(string $home, int $now, ?int $resetIn = null): void
     {
         $state = array_filter($this->state(), static fn (int $until) => $until > $now);
-        $state[$home] = $now + self::COOLDOWN;
+        $state[$home] = $now + ($resetIn ?? self::COOLDOWN);
         @file_put_contents($this->file(), json_encode($state, \JSON_PRETTY_PRINT), \LOCK_EX);
     }
 
@@ -56,6 +58,18 @@ final class AgyAccounts
     public static function isQuota(string $text): bool
     {
         return (bool) preg_match('/RESOURCE_EXHAUSTED|quota|code 429|\b429 Too Many|rate.?limit|usage limit|exhausted your/i', $text);
+    }
+
+    /** «Individual quota reached… Resets in 43h17m35s.» → 155855 секунд; срока в ответе нет — null. */
+    public static function resetIn(string $text): ?int
+    {
+        if (!preg_match('/Resets in ((?:\d+\s*[dhms]\s*)+)/i', $text, $m)) {
+            return null;
+        }
+        preg_match_all('/(\d+)\s*([dhms])/i', $m[1], $parts, \PREG_SET_ORDER);
+        $unit = ['d' => 86400, 'h' => 3600, 'm' => 60, 's' => 1];
+
+        return array_sum(array_map(static fn (array $p) => (int) $p[1] * $unit[strtolower($p[2])], $parts));
     }
 
     /** @return array<string, int> */

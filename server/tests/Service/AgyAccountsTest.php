@@ -36,9 +36,21 @@ final class AgyAccountsTest extends TestCase
         self::assertSame(1000 + AgyAccounts::COOLDOWN, $accounts->nextFree());
     }
 
+    public function testExhaustedAccountRestsUntilResetNamedByAgy(): void
+    {
+        $answer = 'agy: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 43h17m35s.';
+        self::assertSame(43 * 3600 + 17 * 60 + 35, AgyAccounts::resetIn($answer));
+        self::assertNull(AgyAccounts::resetIn('RESOURCE_EXHAUSTED (code 429)'));
+
+        $accounts = new AgyAccounts($this->home);
+        $accounts->markExhausted($this->home, 1000, AgyAccounts::resetIn($answer));
+        self::assertSame([$this->home.'/account2'], $accounts->available(1000 + 2 * AgyAccounts::COOLDOWN), 'через два часа основной ещё отдыхает');
+    }
+
     public function testQuotaAnswersAreRecognized(): void
     {
         foreach ([
+            'agy: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 43h17m35s.',
             'RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model.',
             'Quota exceeded for quota metric',
             'agy: нет ответа за 600 с — лимит аккаунта (RESOURCE_EXHAUSTED)',
