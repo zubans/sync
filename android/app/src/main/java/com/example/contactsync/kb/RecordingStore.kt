@@ -2,6 +2,8 @@ package com.example.contactsync.kb
 
 import android.content.Context
 import android.media.MediaExtractor
+import android.os.Environment
+import com.example.contactsync.files.hasStorageAccess
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -44,7 +46,9 @@ data class Recording(
 }
 
 /**
- * Записи лежат в `files/recordings/<id>/`: части `part-N.m4a` (длина части — лимит KB) и `meta.json`.
+ * Записи лежат в общей памяти `Records/<id>/`, чтобы их было видно в файловом менеджере и можно было скопировать:
+ * части `part-N.m4a` (длина части — лимит KB) и `meta.json`. Без «Доступа ко всем файлам» — во внутренней
+ * `files/recordings/<id>/`; когда доступ появится, они переедут в `Records` при следующем запуске.
  * Файлы переживают перезапуск; удаляются только по выбору владельца или после приёма в KB.
  */
 object RecordingStore {
@@ -115,6 +119,7 @@ object RecordingStore {
      * остальное становится неразобранной записью.
      */
     fun recoverInterrupted(context: Context) {
+        moveToPublic(context)
         root(context).listFiles().orEmpty().mapNotNull { load(context, it.name) }
             .filter { it.status == Recording.STATUS_RECORDING }
             .forEach { recording ->
@@ -139,7 +144,22 @@ object RecordingStore {
         }
     }
 
-    private fun root(context: Context) = File(context.filesDir, "recordings").apply { mkdirs() }
+    /** Записи, сделанные без доступа к общей памяти, переносим в `Records`, как только доступ есть. */
+    private fun moveToPublic(context: Context) {
+        if (!hasStorageAccess(context)) return
+        val target = publicRoot().apply { mkdirs() }
+        internalRoot(context).listFiles().orEmpty().forEach { dir ->
+            val moved = File(target, dir.name)
+            if (!dir.renameTo(moved) && dir.copyRecursively(moved, overwrite = true)) dir.deleteRecursively()
+        }
+    }
+
+    private fun root(context: Context) =
+        (if (hasStorageAccess(context)) publicRoot() else internalRoot(context)).apply { mkdirs() }
+
+    private fun publicRoot() = File(Environment.getExternalStorageDirectory(), "Records")
+
+    private fun internalRoot(context: Context) = File(context.filesDir, "recordings")
 
     private fun dir(context: Context, id: String) = File(root(context), id)
 
