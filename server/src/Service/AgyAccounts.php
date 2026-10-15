@@ -15,6 +15,8 @@ final class AgyAccounts
     public const COOLDOWN = 3600;
     /** Сколько пропускается аккаунт с ошибкой входа: перелогинят — через 10 минут он снова в деле. */
     public const AUTH_COOLDOWN = 600;
+    /** Сколько пропускается аккаунт, который Google не допускает к Antigravity в его регионе. */
+    public const INELIGIBLE_COOLDOWN = 86400;
     /** Файл, где agy хранит вход в аккаунт: папка `.gemini` появляется раньше — при первом запуске agy. */
     public const TOKEN = '/.gemini/antigravity-cli/antigravity-oauth-token';
 
@@ -68,6 +70,12 @@ final class AgyAccounts
     public static function isAuthFailure(string $text): bool
     {
         return (bool) preg_match('/authentication failed|UNAUTHENTICATED|code 401/i', $text);
+    }
+
+    /** «Eligibility check failed: Your current account is not eligible … not currently available in your location». */
+    public static function isIneligible(string $text): bool
+    {
+        return str_contains($text, 'not eligible for Antigravity');
     }
 
     /** «Individual quota reached… Resets in 43h17m35s.» → 155855 секунд; срока в ответе нет — null. */

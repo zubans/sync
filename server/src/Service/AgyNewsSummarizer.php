@@ -45,13 +45,16 @@ final class AgyNewsSummarizer implements NewsSummarizer
             try {
                 return $this->completeWith($home, $prompt, $model, $effort, $schema);
             } catch (\RuntimeException $e) {
-                $quota = AgyAccounts::isQuota($e->getMessage());
-                if (!$quota && !AgyAccounts::isAuthFailure($e->getMessage())) {
-                    throw $e;
-                }
-                $this->accounts->markExhausted($home, time(), $quota ? AgyAccounts::resetIn($e->getMessage()) : AgyAccounts::AUTH_COOLDOWN);
+                $message = $e->getMessage();
+                [$reason, $rest] = match (true) {
+                    AgyAccounts::isQuota($message) => ['лимит аккаунта', AgyAccounts::resetIn($message)],
+                    AgyAccounts::isIneligible($message) => ['Google не допускает к Antigravity аккаунт', AgyAccounts::INELIGIBLE_COOLDOWN],
+                    AgyAccounts::isAuthFailure($message) => ['не выполнен вход в аккаунт', AgyAccounts::AUTH_COOLDOWN],
+                    default => throw $e,
+                };
+                $this->accounts->markExhausted($home, time(), $rest);
                 $next = $available[$i + 1] ?? null;
-                error_log(sprintf('agy: %s %s — %s', $quota ? 'лимит аккаунта' : 'не выполнен вход в аккаунт', basename($home),
+                error_log(sprintf('agy: %s %s — %s', $reason, basename($home),
                     $next !== null ? 'переключаюсь на '.basename($next) : 'других свободных аккаунтов нет'));
                 if ($next === null) {
                     throw $e;

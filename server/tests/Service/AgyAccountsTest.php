@@ -53,6 +53,8 @@ final class AgyAccountsTest extends TestCase
         self::assertTrue(AgyAccounts::isAuthFailure('agy: authentication failed or timed out'));
         self::assertTrue(AgyAccounts::isAuthFailure('UNAUTHENTICATED (code 401): Request had invalid authentication credentials.'));
         self::assertFalse(AgyAccounts::isAuthFailure('Individual quota reached. Resets in 43h17m35s.'));
+        self::assertTrue(AgyAccounts::isIneligible('Eligibility check failed: Your current account is not eligible for Antigravity, because it is not currently available in your location.'));
+        self::assertFalse(AgyAccounts::isIneligible('Eligibility check failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist": dial tcp: lookup daily-cloudcode-pa.googleapis.com: server misbehaving'), 'сбой DNS — не отказ в допуске');
     }
 
     public function testQuotaAnswersAreRecognized(): void
