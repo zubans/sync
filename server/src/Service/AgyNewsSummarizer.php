@@ -39,7 +39,7 @@ final class AgyNewsSummarizer implements NewsSummarizer
         $available = $this->accounts->available(time());
         if ($available === []) {
             throw new \RuntimeException(sprintf('agy: лимит исчерпан на всех аккаунтах (%d), следующий освободится в %s UTC. Ещё аккаунт — make agy-login ACCOUNT=2',
-                \count($this->accounts->all()), date('H:i', $this->accounts->nextFree())));
+                \count($this->accounts->all()), gmdate('d.m H:i', $this->accounts->nextFree())));
         }
         foreach ($available as $i => $home) {
             try {
