@@ -355,6 +355,9 @@ class Api(
     /** Новость целиком: полный текст со страницы издания, сохранённый сервером. */
     suspend fun newsItem(id: Long): NewsItemDto = get("/api/news/$id")
 
+    /** Кнопка «Перевести»: статья — в приоритетную очередь перевода; ответ — новость с `contentTranslation`. */
+    suspend fun translateNews(id: Long): NewsItemDto = post("/api/news/$id/translate", "{}")
+
     /** Сюжетные линии последних дней, самые оживлённые первыми. */
     suspend fun storylines(): List<StorylineDto> = get<StorylinesResponse>("/api/news/storylines").storylines
 

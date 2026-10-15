@@ -92,6 +92,13 @@ class NewsItem
     private int $contentTranslationAttempts = 0;
 
     /**
+     * Когда читатель попросил перевести текст статьи (кнопка «Перевести» на планшете или в виджете);
+     * null — не просили. Статьи переводятся только по просьбе: автоматически — только заголовки с анонсами.
+     */
+    #[ORM\Column(nullable: true)]
+    private ?\DateTimeImmutable $translationRequestedAt = null;
+
+    /**
      * Когда модель решила, влияет ли новость на инструменты Мосбиржи ([NewsMarketService]); null — ещё нет.
      * Последствия, если они есть, — в [NewsMarketImpact].
      */
@@ -182,6 +189,25 @@ class NewsItem
     public function setContentTranslation(array $paragraphs): void
     {
         $this->translatedContent = implode("\n\n", $paragraphs);
+        $this->translationRequestedAt = null;
+    }
+
+    /** Читатель просит перевести статью: в приоритетную очередь, прошлые неудачи не в счёт. */
+    public function requestContentTranslation(\DateTimeImmutable $at): void
+    {
+        $this->translationRequestedAt = $at;
+        $this->contentTranslationAttempts = 0;
+    }
+
+    /** Просьба снята: перевод не удался [NewsTranslator::MAX_ATTEMPTS] раз. */
+    public function dropTranslationRequest(): void
+    {
+        $this->translationRequestedAt = null;
+    }
+
+    public function getTranslationRequestedAt(): ?\DateTimeImmutable
+    {
+        return $this->translationRequestedAt;
     }
 
     public function markHeadlineTranslationAttempt(): void

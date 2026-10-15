@@ -109,6 +109,23 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
+     * Статьи, которые читатели попросили перевести, — в порядке просьб.
+     *
+     * @return list<NewsItem>
+     */
+    public function findRequestedContentTranslation(int $limit): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->addSelect('s')
+            ->where('n.translationRequestedAt IS NOT NULL AND n.translatedContent IS NULL')
+            ->orderBy('n.translationRequestedAt', 'ASC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Новости без вектора — свежие первыми, без сводок: сюжетные линии нужны для актуальных новостей,
      * а архив досчитается следующими проходами.
      *

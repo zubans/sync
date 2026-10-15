@@ -277,4 +277,49 @@ final class NewsTranslationTest extends DatabaseWebTestCase
         self::assertSame(1, $item->getContentTranslationAttempts());
         self::assertSame(0, $item->getHeadlineTranslationAttempts(), 'отвергнутый текст не трогает попытки заголовка');
     }
+
+    public function testArticlesAreTranslatedOnlyOnRequest(): void
+    {
+        $item = $this->news($this->bbc, 'Riyadh airport hit', 'Houthis strike again.');
+        $this->fetched($item, ['Houthis strike again.', 'The airport was closed.']);
+        $translator = new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model);
+
+        $this->model->answers = [self::headlines([[$item->getId(), 'Удар по аэропорту', 'Хуситы снова атакуют.']])];
+        $translator->run(NewsTranslator::HEADLINE_BATCH, NewsTranslator::AUTO_ARTICLES);
+        self::assertNull($item->getTranslatedContent(), 'без просьбы статья не переводится');
+        self::assertSame('available', NewsTranslator::contentState($item));
+        self::assertSame(['articles' => 0, 'failed' => 0, 'error' => null], $translator->runRequested(), 'просьб нет — к модели не ходим');
+
+        $item->requestContentTranslation(new \DateTimeImmutable('2026-10-15 10:00:00'));
+        $this->em->flush();
+        self::assertSame('queued', NewsTranslator::contentState($item));
+        $this->model->answers = [self::article('Удар по аэропорту', ['Хуситы снова атакуют.', 'Аэропорт закрыт.'])];
+
+        self::assertSame(['articles' => 1, 'failed' => 0, 'error' => null], $translator->runRequested());
+        self::assertSame("Хуситы снова атакуют.\n\nАэропорт закрыт.", $item->getTranslatedContent());
+        self::assertNull($item->getTranslationRequestedAt(), 'просьба выполнена');
+        self::assertSame('done', NewsTranslator::contentState($item));
+    }
+
+    public function testRequestedTranslationGivesUpAfterThreeFailuresAndWaitsForAgy(): void
+    {
+        $item = $this->news($this->bbc, 'Riyadh airport hit');
+        $this->fetched($item, ['Houthis strike again.', 'The airport was closed.']);
+        $item->requestContentTranslation(new \DateTimeImmutable('2026-10-15 10:00:00'));
+        $this->em->flush();
+        $translator = new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model);
+
+        $this->model->answers = [new \RuntimeException('agy: Individual quota reached')];
+        self::assertSame('agy: Individual quota reached', $translator->runRequested()['error']);
+        self::assertSame('queued', NewsTranslator::contentState($item), 'agy недоступен — просьба остаётся, попытка не засчитана');
+
+        foreach (range(1, 3) as $n) {
+            $this->model->answers = ['не JSON'];
+            $translator->runRequested();
+        }
+        self::assertSame('failed', NewsTranslator::contentState($item), 'после трёх неудач просьба снята');
+
+        $item->requestContentTranslation(new \DateTimeImmutable('2026-10-15 11:00:00'));
+        self::assertSame('queued', NewsTranslator::contentState($item), 'можно попросить снова — счётчик сброшен');
+    }
 }

@@ -10,7 +10,7 @@ APK       := android/app/build/outputs/apk/debug/app-debug.apk
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate analyze market advice digest digest-preview agy-login test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze market advice digest digest-preview agy-login test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -70,8 +70,11 @@ news: ## Собрать новости сейчас, не дожидаясь к�
 articles: ## Скачать полные тексты новостей со страниц изданий сейчас (LIMIT=30 за проход)
 	$(COMPOSE) exec news php bin/console app:news:articles --limit=$(or $(LIMIT),30)
 
-translate: ## Перевести новости изданий на других языках сейчас (LIMIT=40 заголовков, ARTICLES=3 статьи за проход)
-	$(COMPOSE) exec news php bin/console app:news:translate --limit=$(or $(LIMIT),40) --articles=$(or $(ARTICLES),3)
+translate: ## Перевести заголовки и анонсы новостей на других языках сейчас (LIMIT=40; статьи — только по кнопке, ARTICLES=N — принудительно)
+	$(COMPOSE) exec news php bin/console app:news:translate --limit=$(or $(LIMIT),40) --articles=$(or $(ARTICLES),0)
+
+translate-requested: ## Перевести статьи, которые попросили перевести на планшете или в виджете (обычно делает сервис translate)
+	$(COMPOSE) exec translate php bin/console app:news:translate-requested
 
 analyze: ## Векторы новостей и сюжетные линии сейчас (нужен NEWS_EMBEDDINGS_URL)
 	$(COMPOSE) exec news php bin/console app:news:analyze

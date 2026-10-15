@@ -35,6 +35,11 @@ data class NewsItemDto(
     val originalContent: List<String> = emptyList(),
     /** Последствия для инструментов Мосбиржи; у старого сервера поля нет. */
     val market: List<MarketImpactDto> = emptyList(),
+    /**
+     * Только в `GET /api/news/{id}`: перевод текста статьи — `available` (можно попросить), `queued`, `done`,
+     * `failed`, `unavailable` (полного текста нет); null — переводить нечего (русское издание, сводка, старый сервер).
+     */
+    val contentTranslation: String? = null,
 )
 
 /** Последствие новости для инструмента Мосбиржи: прогноз модели и изменение цены после новости. */

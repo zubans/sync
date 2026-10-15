@@ -228,6 +228,21 @@ private fun NewsText(item: NewsItem, state: LauncherState, vm: LauncherViewModel
                 )
             }
         }
+        translationAction(item)?.let { (label, enabled) ->
+            item {
+                // Статью сервер переводит только по просьбе: заголовок и анонс уже на русском, текст — по кнопке.
+                Text(
+                    label,
+                    color = if (enabled) Accent else TextMuted,
+                    fontSize = 16.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (enabled) Accent.copy(alpha = 0.12f) else CardRaised)
+                        .clickable(enabled = enabled) { vm.translate(item) }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
+        }
         item.storyline?.let { line ->
             item {
                 // История, к которой относится новость: вся хроника — одним нажатием.
@@ -420,3 +435,14 @@ private val NarrowReading = ReadingType(24.sp, 31.sp, 20.sp, 27.sp, 18.sp, 28.sp
 
 private val readingType: ReadingType
     @Composable get() = if (LocalConfiguration.current.screenWidthDp >= 600) WideReading else NarrowReading
+
+/** Кнопка перевода статьи: надпись и можно ли нажать; null — кнопки нет (переведена, русская, без полного текста). */
+private fun translationAction(item: NewsItem): Pair<String, Boolean>? {
+    val from = NewsFeed.languageName(item.language)?.let { " $it" }.orEmpty()
+    return when (item.contentTranslation) {
+        ContentTranslation.AVAILABLE -> "Перевести статью$from" to true
+        ContentTranslation.QUEUED -> "Перевожу статью… обычно меньше минуты" to false
+        ContentTranslation.FAILED -> "Не удалось перевести · Попробовать ещё раз" to true
+        else -> null
+    }
+}

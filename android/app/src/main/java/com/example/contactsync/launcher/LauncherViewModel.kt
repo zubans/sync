@@ -379,6 +379,32 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    /**
+     * Кнопка «Перевести» на экране статьи: просим сервер перевести и, пока статья в очереди, раз в
+     * [TRANSLATION_POLL_MS] перечитываем её — перевод появится на экране сам. Ушли с этой статьи — перестаём.
+     */
+    fun translate(item: NewsItem) {
+        fun show(next: NewsItem) = replacePage { page -> if (page is ReaderPage.News && page.item.id == item.id) ReaderPage.News(next) else page }
+        fun stillOpen() = _state.value.readingStack.any { it is ReaderPage.News && it.item.id == item.id }
+        show(item.copy(contentTranslation = ContentTranslation.QUEUED))
+        viewModelScope.launch {
+            try {
+                var current = NewsFeed.item(syncApi.translateNews(item.id)).copy(loaded = true)
+                show(current)
+                val until = System.currentTimeMillis() + TRANSLATION_WAIT_MS
+                while (current.contentTranslation == ContentTranslation.QUEUED && stillOpen() && System.currentTimeMillis() < until) {
+                    delay(TRANSLATION_POLL_MS)
+                    current = NewsFeed.item(syncApi.newsItem(item.id)).copy(loaded = true)
+                    if (stillOpen()) show(current)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                show(item.copy(contentTranslation = ContentTranslation.FAILED))
+            }
+        }
+    }
+
     /** Новость на весь экран по id — нажатие на неё в виджете рабочего стола: о новости известен только id. */
     fun read(id: Long) {
         viewModelScope.launch {
@@ -601,6 +627,9 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
     private companion object {
         const val TICK_MS = 60_000L
         const val WEATHER_TTL_MS = 30 * 60_000L
+        /** Как часто спрашивать сервер о переводе статьи, пока она в очереди, и сколько ждать всего. */
+        const val TRANSLATION_POLL_MS = 5_000L
+        const val TRANSLATION_WAIT_MS = 15 * 60_000L
         const val NEWS_TTL_MS = 5 * 60_000L
         /** Столько новостей приходит за раз; на подробном экране следующие догружаются при прокрутке. */
         const val NEWS_PAGE = 50

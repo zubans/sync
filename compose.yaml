@@ -85,6 +85,21 @@ services:
         done
     restart: unless-stopped
 
+  # Перевод статей по кнопке «Перевести» на планшете и в виджете — приоритетная очередь: проверяется каждые 5 секунд,
+  # не дожидаясь пятиминутного цикла news. Тот же образ, переменные и вход в agy (аккаунты и их отдых — общие).
+  translate:
+    extends: news
+    command:
+      - sh
+      - -c
+      - |
+        while :; do
+          if php bin/console doctrine:migrations:up-to-date -q; then
+            php bin/console app:news:translate-requested --no-interaction
+          fi
+          sleep 5
+        done
+
   # Резервные копии на Яндекс.Диск и шару в локальной сети (схема — как у бекапа KB): не работает постоянно, запускается make backup
   # и make backup-db из cron хоста. Папка проекта, хранилище и rclone.conf пользователя хоста (remote yandex, общий
   # с бекапами KB и trash) — только на чтение; хранилище на запись открывает только make restore-files
