@@ -58,6 +58,8 @@ services:
       # Модели agy для сводок — названия из `agy models`; пусто — модель по умолчанию.
       NEWS_DIGEST_MODEL_HOUR: ${NEWS_DIGEST_MODEL_HOUR:-}
       NEWS_DIGEST_MODEL_DAY: ${NEWS_DIGEST_MODEL_DAY:-}
+      # Запасные модели agy по порядку: у каждой своя квота — кончилась модель сводки, запрос идёт следующей того же аккаунта.
+      NEWS_AGY_FALLBACK_MODELS: ${NEWS_AGY_FALLBACK_MODELS:-Claude Sonnet 4.6 (Thinking),Claude Opus 4.6 (Thinking),GPT-OSS 120B (Medium)}
       # Модель agy для анализа инструментов Мосбиржи; пусто — модель по умолчанию с --effort medium.
       MARKET_ANALYSIS_MODEL: ${MARKET_ANALYSIS_MODEL:-}
       # Векторы новостей для сюжетных линий: Ollama с qwen3-embedding на машине с видеокартой — та же, что у KB.

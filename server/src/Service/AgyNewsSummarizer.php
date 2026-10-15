@@ -11,8 +11,9 @@ use Symfony\Component\Process\Process;
  * «Antigravity CLI (подписка)» в KB. Вход — один раз интерактивно (`make agy-login`), он хранится
  * в домашней папке agy (том `agy_data`). Каждая сводка — отдельный разговор.
  *
- * Аккаунтов может быть несколько (`AgyAccounts`): упёрся в лимит один — запрос тут же повторяется
- * следующим, а исчерпанный час не трогается. Исчерпаны все — ошибка сразу, без ожидания по 600 с
+ * Аккаунтов может быть несколько (`AgyAccounts`), и у каждой модели аккаунта своя квота: кончилась модель —
+ * запрос тут же повторяется следующей моделью из [fallbackModels] того же аккаунта, кончились все модели
+ * аккаунта (или вход, или отказ по региону) — следующим аккаунтом; исчерпанное до сброса не трогается. Исчерпаны все — ошибка сразу, без ожидания по 600 с
  * на каждом шаге цикла (14.10.2026 такие ожидания остановили сводки и сюжеты на семь часов).
  *
  * Собственные инструменты агента не нужны: агент получает новости в промпте, а настройки домашней
@@ -26,43 +27,58 @@ final class AgyNewsSummarizer implements NewsSummarizer
     private const RETRY = 'Собственные инструменты agy%s отклонены и не работают. Дай ответ текстом по уже переданным новостям — только JSON указанного вида.';
 
     private readonly AgyAccounts $accounts;
+    /** @var list<string> запасные модели agy по порядку — их квота своя (`NEWS_AGY_FALLBACK_MODELS`) */
+    private readonly array $fallbackModels;
 
     public function __construct(
         #[Autowire('%env(resolve:NEWS_AGY_HOME)%')]
         string $home,
+        #[Autowire('%env(NEWS_AGY_FALLBACK_MODELS)%')]
+        string $fallbackModels = '',
     ) {
         $this->accounts = new AgyAccounts($home);
+        $this->fallbackModels = array_values(array_filter(array_map('trim', explode(',', $fallbackModels)), static fn (string $m) => $m !== ''));
     }
 
     public function complete(string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string
     {
-        $available = $this->accounts->available(time());
-        if ($available === []) {
-            throw new \RuntimeException(sprintf('agy: лимит исчерпан на всех аккаунтах (%d), следующий освободится в %s UTC. Ещё аккаунт — make agy-login ACCOUNT=2',
-                \count($this->accounts->all()), gmdate('d.m H:i', $this->accounts->nextFree())));
+        $models = [$model !== '' ? $model : null];
+        foreach ($this->fallbackModels as $fallback) {
+            if (!\in_array($fallback, $models, true)) {
+                $models[] = $fallback;
+            }
         }
-        foreach ($available as $i => $home) {
-            try {
-                return $this->completeWith($home, $prompt, $model, $effort, $schema);
-            } catch (\RuntimeException $e) {
-                $message = $e->getMessage();
-                [$reason, $rest] = match (true) {
-                    AgyAccounts::isQuota($message) => ['лимит аккаунта', AgyAccounts::resetIn($message)],
-                    AgyAccounts::isIneligible($message) => ['Google не допускает к Antigravity аккаунт', AgyAccounts::INELIGIBLE_COOLDOWN],
-                    AgyAccounts::isAuthFailure($message) => ['не выполнен вход в аккаунт', AgyAccounts::AUTH_COOLDOWN],
-                    default => throw $e,
-                };
-                $this->accounts->markExhausted($home, time(), $rest);
-                $next = $available[$i + 1] ?? null;
-                error_log(sprintf('agy: %s %s — %s', $reason, basename($home),
-                    $next !== null ? 'переключаюсь на '.basename($next) : 'других свободных аккаунтов нет'));
-                if ($next === null) {
-                    throw $e;
+        $last = null;
+        foreach ($this->accounts->available(time()) as $home) {
+            foreach ($models as $m) {
+                if (!$this->accounts->isModelFree($home, $m, time())) {
+                    continue;
+                }
+                try {
+                    return $this->completeWith($home, $prompt, $m, $effort, $schema);
+                } catch (\RuntimeException $e) {
+                    $message = $e->getMessage();
+                    $last = $e;
+                    if (AgyAccounts::isQuota($message)) {
+                        $this->accounts->markModelExhausted($home, $m, time(), AgyAccounts::resetIn($message));
+                        error_log(sprintf('agy: лимит модели «%s» у аккаунта %s — пробую следующую', $m ?? 'по умолчанию', basename($home)));
+                        continue;
+                    }
+                    [$reason, $rest] = match (true) {
+                        AgyAccounts::isIneligible($message) => ['Google не допускает к Antigravity аккаунт', AgyAccounts::INELIGIBLE_COOLDOWN],
+                        AgyAccounts::isAuthFailure($message) => ['не выполнен вход в аккаунт', AgyAccounts::AUTH_COOLDOWN],
+                        default => throw $e,
+                    };
+                    $this->accounts->markExhausted($home, time(), $rest);
+                    error_log(sprintf('agy: %s %s — перехожу к следующему аккаунту', $reason, basename($home)));
+                    continue 2;
                 }
             }
         }
 
-        throw new \LogicException('недостижимо');
+        throw new \RuntimeException(sprintf('agy: лимит исчерпан у всех аккаунтов (%d) и моделей (%s), ближайшее освобождение — %s UTC%s',
+            \count($this->accounts->all()), implode(', ', array_map(static fn (?string $m) => $m ?? 'по умолчанию', $models)),
+            gmdate('d.m H:i', $this->accounts->nextFreeFor($models)), $last !== null ? '. Последняя ошибка: '.$last->getMessage() : ''), 0, $last);
     }
 
     /** Запрос одним аккаунтом — его домашняя папка [home]. */

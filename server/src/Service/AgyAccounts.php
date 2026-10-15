@@ -8,6 +8,10 @@ namespace App\Service;
  * который называет agy («Resets in 43h17m35s»), а если срока нет — час: отметка
  * лежит в файле, поэтому её видят все шаги цикла `news` (каждый — отдельный процесс) и не ждут
  * исчерпанный аккаунт заново.
+ *
+ * Квота у моделей своя (проверено 15.10.2026: Gemini исчерпана, Claude и GPT-OSS того же аккаунта отвечают),
+ * поэтому лимит отмечается парой «аккаунт + модель» ([markModelExhausted]); ошибка входа и отказ по региону —
+ * аккаунтом целиком ([markExhausted]).
  */
 final class AgyAccounts
 {
@@ -49,12 +53,51 @@ final class AgyAccounts
         return min(array_map(static fn (string $home) => $state[$home] ?? 0, $this->all()));
     }
 
+    /** Модель [model] (null — модель agy по умолчанию) аккаунта [home] не отдыхает после лимита. */
+    public function isModelFree(string $home, ?string $model, int $now): bool
+    {
+        return ($this->state()[self::modelKey($home, $model)] ?? 0) <= $now;
+    }
+
+    /** У модели аккаунта кончилась квота: остальные модели этого аккаунта работают. */
+    public function markModelExhausted(string $home, ?string $model, int $now, ?int $resetIn = null): void
+    {
+        $this->write(self::modelKey($home, $model), $now + ($resetIn ?? self::COOLDOWN), $now);
+    }
+
+    /**
+     * Когда освободится хоть одна пара «аккаунт + модель» из [models] — для текста ошибки, если заняты все.
+     *
+     * @param list<?string> $models
+     */
+    public function nextFreeFor(array $models): int
+    {
+        $state = $this->state();
+        $times = [];
+        foreach ($this->all() as $home) {
+            $model = min(array_map(static fn (?string $m) => $state[self::modelKey($home, $m)] ?? 0, $models));
+            $times[] = max($state[$home] ?? 0, $model);
+        }
+
+        return min($times);
+    }
+
+    private static function modelKey(string $home, ?string $model): string
+    {
+        return $home.'|'.($model !== null && $model !== '' ? $model : 'default');
+    }
+
     /** [resetIn] — через сколько секунд agy обещал сбросить лимит; не сказал — отдых [COOLDOWN]. */
     public function markExhausted(string $home, int $now, ?int $resetIn = null): void
     {
-        $state = array_filter($this->state(), static fn (int $until) => $until > $now);
-        $state[$home] = $now + ($resetIn ?? self::COOLDOWN);
-        @file_put_contents($this->file(), json_encode($state, \JSON_PRETTY_PRINT), \LOCK_EX);
+        $this->write($home, $now + ($resetIn ?? self::COOLDOWN), $now);
+    }
+
+    private function write(string $key, int $until, int $now): void
+    {
+        $state = array_filter($this->state(), static fn (int $u) => $u > $now);
+        $state[$key] = $until;
+        @file_put_contents($this->file(), json_encode($state, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_UNICODE), \LOCK_EX);
     }
 
     /**
@@ -100,6 +143,8 @@ final class AgyAccounts
 
     private function file(): string
     {
-        return $this->home.'/quota.json';
+        // Новое имя с 15.10.2026: в старом quota.json лимит Gemini отмечен аккаунтом целиком —
+        // с ним запасные модели исчерпанных аккаунтов не пробовались бы.
+        return $this->home.'/agy-state.json';
     }
 }
