@@ -150,12 +150,15 @@ final class NewsTranslationPrompt
         if (!\is_array($data['paragraphs'] ?? null)) {
             throw new \UnexpectedValueException('Перевод статьи: ответ модели — не JSON');
         }
-        $paragraphs = [];
-        foreach ($data['paragraphs'] as $paragraph) {
-            $paragraph = \is_string($paragraph) ? trim(preg_replace('/^\[\d+\]\s*/u', '', $paragraph) ?? $paragraph) : '';
-            if ($paragraph !== '') {
-                $paragraphs[] = $paragraph;
-            }
+        $raw = array_values(array_filter($data['paragraphs'], 'is_string'));
+        $paragraphs = self::cleanParagraphs($raw);
+        // Claude и другие модели agy иногда складывают все абзацы в один элемент — через пустые строки
+        // или с номерами «[2] …» из промпта. Мало абзацев — режем элементы сначала по пустым строкам, потом по номерам.
+        if (\count($paragraphs) < $expected) {
+            $paragraphs = self::cleanParagraphs(array_merge(...array_map(static fn (string $p) => preg_split('/\n\s*\n/u', $p) ?: [$p], $raw)));
+        }
+        if (\count($paragraphs) < $expected) {
+            $paragraphs = self::cleanParagraphs(array_merge(...array_map(static fn (string $p) => preg_split('/(?:^|\s)\[\d+\]\s+/u', $p) ?: [$p], $raw)));
         }
         if (abs(\count($paragraphs) - $expected) > (int) floor($expected * self::PARAGRAPH_TOLERANCE)) {
             throw new \UnexpectedValueException(sprintf('Перевод статьи: абзацев %d вместо %d — похоже на пересказ', \count($paragraphs), $expected));
@@ -163,6 +166,26 @@ final class NewsTranslationPrompt
         $title = trim((string) ($data['title'] ?? ''));
 
         return ['title' => $title !== '' ? $title : null, 'paragraphs' => $paragraphs];
+    }
+
+    /**
+     * Абзацы без пустых и без номеров «[3]» в начале.
+     *
+     * @param list<string> $raw
+     *
+     * @return list<string>
+     */
+    private static function cleanParagraphs(array $raw): array
+    {
+        $paragraphs = [];
+        foreach ($raw as $paragraph) {
+            $paragraph = trim(preg_replace('/^\[\d+\]\s*/u', '', trim($paragraph)) ?? $paragraph);
+            if ($paragraph !== '') {
+                $paragraphs[] = $paragraph;
+            }
+        }
+
+        return $paragraphs;
     }
 
     /** «английского» для «перевод с английского»; null — язык не из известных. */

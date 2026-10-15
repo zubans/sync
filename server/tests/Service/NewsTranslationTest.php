@@ -6,6 +6,7 @@ use App\Entity\NewsItem;
 use App\Entity\NewsSource;
 use App\Repository\NewsItemRepository;
 use App\Service\NewsSummarizer;
+use App\Service\NewsTranslationPrompt;
 use App\Service\NewsTranslator;
 use App\Tests\DatabaseWebTestCase;
 
@@ -321,5 +322,17 @@ final class NewsTranslationTest extends DatabaseWebTestCase
 
         $item->requestContentTranslation(new \DateTimeImmutable('2026-10-15 11:00:00'));
         self::assertSame('queued', NewsTranslator::contentState($item), 'можно попросить снова — счётчик сброшен');
+    }
+
+    public function testParagraphsGluedIntoOneElementAreSplit(): void
+    {
+        $blank = NewsTranslationPrompt::parseArticle(json_encode(['paragraphs' => ["Первый.\n\nВторой.\n\nТретий."]], \JSON_UNESCAPED_UNICODE), 3);
+        self::assertSame(['Первый.', 'Второй.', 'Третий.'], $blank['paragraphs']);
+
+        $numbered = NewsTranslationPrompt::parseArticle(json_encode(['paragraphs' => ['[1] Первый. [2] Второй. [3] Третий.']], \JSON_UNESCAPED_UNICODE), 3);
+        self::assertSame(['Первый.', 'Второй.', 'Третий.'], $numbered['paragraphs']);
+
+        $this->expectException(\UnexpectedValueException::class);
+        NewsTranslationPrompt::parseArticle(json_encode(['paragraphs' => ['Короткий пересказ всей статьи.']], \JSON_UNESCAPED_UNICODE), 14);
     }
 }
