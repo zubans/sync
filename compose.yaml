@@ -58,8 +58,10 @@ services:
       # Модели agy для сводок — названия из `agy models`; пусто — модель по умолчанию.
       NEWS_DIGEST_MODEL_HOUR: ${NEWS_DIGEST_MODEL_HOUR:-}
       NEWS_DIGEST_MODEL_DAY: ${NEWS_DIGEST_MODEL_DAY:-}
-      # Запасные модели agy по порядку: у каждой своя квота — кончилась модель сводки, запрос идёт следующей того же аккаунта.
-      NEWS_AGY_FALLBACK_MODELS: ${NEWS_AGY_FALLBACK_MODELS:-Claude Sonnet 4.6 (Thinking),Claude Opus 4.6 (Thinking),GPT-OSS 120B (Medium)}
+      # Запасные модели agy по порядку, через запятую (например, другие уровни Gemini): кончилась модель шага — запрос идёт
+      # следующей того же аккаунта. По умолчанию — нет: только Gemini (решение владельца 16.10.2026; Claude и GPT-OSS
+      # через agy делят одну недельную квоту и хуже держат формат ответа).
+      NEWS_AGY_FALLBACK_MODELS: ${NEWS_AGY_FALLBACK_MODELS-}
       # Модель agy для анализа инструментов Мосбиржи; пусто — модель по умолчанию с --effort medium.
       MARKET_ANALYSIS_MODEL: ${MARKET_ANALYSIS_MODEL:-}
       # Векторы новостей для сюжетных линий: Ollama с qwen3-embedding на машине с видеокартой — та же, что у KB.
