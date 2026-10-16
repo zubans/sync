@@ -69,7 +69,8 @@ final class NewsEmbedder
      *
      * @return list<list<float>> векторы по [DIMS] значений, в порядке текстов
      *
-     * @throws \RuntimeException провайдер не ответил
+     * @throws NewsEmbeddingRateLimit отказ по лимиту провайдера
+     * @throws \RuntimeException       провайдер не ответил
      */
     public function embed(array $texts): array
     {
@@ -98,7 +99,12 @@ final class NewsEmbedder
             ]);
             $data = $response->toArray(false);
             if ($response->getStatusCode() !== 200) {
-                throw new \RuntimeException(sprintf('Gemini: HTTP %d %s', $response->getStatusCode(), self::geminiError((string) ($data['error']['message'] ?? ''))));
+                $message = (string) ($data['error']['message'] ?? '');
+                $error = sprintf('Gemini: HTTP %d %s', $response->getStatusCode(), self::geminiError($message));
+                if ($response->getStatusCode() === 429) {
+                    throw new NewsEmbeddingRateLimit($error, self::retryAfter($message));
+                }
+                throw new \RuntimeException($error);
             }
             $embeddings = $data['embeddings'] ?? null;
             if (!\is_array($embeddings) || \count($embeddings) !== \count($batch)) {
@@ -122,6 +128,16 @@ final class NewsEmbedder
         preg_match_all('/Quota exceeded for metric: [^\n]+|Please retry in [^\n]+/', $message, $m);
 
         return $m[0] !== [] ? 'лимит: '.implode('; ', array_map('trim', $m[0])) : mb_substr($message, 0, 300);
+    }
+
+    /** Секунды из «Please retry in 618.95259ms.» / «Please retry in 34.5s.»; null — срока нет. */
+    private static function retryAfter(string $message): ?float
+    {
+        if (!preg_match('/retry in ([\d.]+)(ms|s)\b/', $message, $m)) {
+            return null;
+        }
+
+        return (float) $m[1] / ($m[2] === 'ms' ? 1000 : 1);
     }
 
     /**

@@ -40,9 +40,20 @@ final class NewsStorylineService
     /** За проход цикла (5 минут): Ollama на процессоре — 100 заголовков за пару минут; Gemini API — 1000 за секунды. */
     private const EMBED_LIMIT = 100;
     private const GEMINI_EMBED_LIMIT = 1000;
+    /**
+     * Бесплатный Gemini API — 100 текстов в минуту (`embed_content_free_tier_requests`, 16.10.2026): на отказ
+     * с повтором через минуту и меньше ждём и повторяем пачку, но всего не дольше 4 минут за проход —
+     * цикл `news` идёт раз в 5 минут. За проход выходит ~400 новостей при ~1500 в сутки. Повтор дальше
+     * минуты (суточный лимит) — проход заканчивается с ошибкой.
+     */
+    private const RATE_LIMIT_WAIT = 240;
+    private const RATE_LIMIT_RETRY_MAX = 65;
     /** Линий на название за проход: при 40 ответ модели обрезался по лимиту длины (14.10.2026), остальные — следующими проходами. */
     private const NAME_LIMIT = 12;
     private const HEADLINES_PER_LINE = 8;
+
+    /** @var \Closure(float): void пауза перед повтором при лимите провайдера; в тестах — без ожидания */
+    private readonly \Closure $sleep;
 
     public function __construct(
         private readonly EntityManagerInterface $em,
@@ -56,7 +67,9 @@ final class NewsStorylineService
         private readonly string $threshold = '',
         #[Autowire('%env(NEWS_STORYLINE_MERGE)%')]
         private readonly string $mergeCandidate = '',
+        ?\Closure $sleep = null,
     ) {
+        $this->sleep = $sleep ?? static fn (float $seconds) => usleep((int) ($seconds * 1_000_000));
     }
 
     /** Порог привязки к линии для текущей модели векторов. */
@@ -151,11 +164,22 @@ final class NewsStorylineService
             $now->modify('-'.self::ACTIVE_DAYS.' days'),
         );
         $embedded = 0;
+        $waited = 0.0;
         foreach (array_chunk($items, $this->embedder->batchSize()) as $batch) {
-            try {
-                $vectors = $this->embedder->embed(array_map(self::text(...), $batch));
-            } catch (\RuntimeException $e) {
-                return [$embedded, $e->getMessage()];
+            while (true) {
+                try {
+                    $vectors = $this->embedder->embed(array_map(self::text(...), $batch));
+                    break;
+                } catch (NewsEmbeddingRateLimit $e) {
+                    $pause = ($e->retryAfter ?? \INF) + 1;
+                    if ($e->retryAfter === null || $e->retryAfter > self::RATE_LIMIT_RETRY_MAX || $waited + $pause > self::RATE_LIMIT_WAIT) {
+                        return [$embedded, $e->getMessage()];
+                    }
+                    ($this->sleep)($pause);
+                    $waited += $pause;
+                } catch (\RuntimeException $e) {
+                    return [$embedded, $e->getMessage()];
+                }
             }
             foreach ($batch as $i => $item) {
                 $item->setEmbedding($vectors[$i]);

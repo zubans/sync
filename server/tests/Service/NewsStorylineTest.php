@@ -178,6 +178,31 @@ final class NewsStorylineTest extends DatabaseWebTestCase
             'taskType' => 'CLUSTERING', 'outputDimensionality' => NewsEmbedder::DIMS], $requests[0]['body']['requests'][0]);
     }
 
+    public function testGeminiMinuteLimitIsWaitedOut(): void
+    {
+        for ($i = 0; $i < 150; ++$i) {
+            $this->news('Эр-Рияд удар '.$i, '2026-10-12 06:00:00');
+        }
+        $calls = 0;
+        $http = new MockHttpClient(static function (string $method, string $url, array $options) use (&$calls) {
+            if (++$calls === 2) {
+                return new MockResponse(json_encode(['error' => ['message' => "* Quota exceeded for metric: embed_content_free_tier_requests, limit: 100\nPlease retry in 618.95259ms."]]), ['http_code' => 429]);
+            }
+
+            return new MockResponse(json_encode(['embeddings' => array_map(static fn () => ['values' => [1.0, 0.0]], json_decode($options['body'], true)['requests'])]));
+        });
+        $pauses = [];
+        $service = new NewsStorylineService($this->em, static::getContainer()->get(NewsItemRepository::class),
+            static::getContainer()->get(NewsStorylineRepository::class),
+            new NewsEmbedder($http, '', 'gemini-embedding-001', NewsEmbedder::PROVIDER_GEMINI, 'k'), $this->createStub(NewsSummarizer::class),
+            sleep: static function (float $seconds) use (&$pauses) { $pauses[] = $seconds; });
+
+        $result = $service->run(new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')));
+
+        self::assertSame(150, $result['embedded'], 'после паузы вторая пачка досчитана');
+        self::assertEqualsWithDelta([1.619], $pauses, 1e-3);
+    }
+
     public function testGeminiErrorIsReported(): void
     {
         $http = new MockHttpClient(new MockResponse(json_encode(['error' => ['message' => 'API key not valid']]), ['http_code' => 400]));
@@ -202,10 +227,13 @@ final class NewsStorylineTest extends DatabaseWebTestCase
         });
         $service = new NewsStorylineService($this->em, static::getContainer()->get(NewsItemRepository::class),
             static::getContainer()->get(NewsStorylineRepository::class),
-            new NewsEmbedder($http, '', 'gemini-embedding-001', NewsEmbedder::PROVIDER_GEMINI, 'k'), $this->createStub(NewsSummarizer::class));
+            new NewsEmbedder($http, '', 'gemini-embedding-001', NewsEmbedder::PROVIDER_GEMINI, 'k'), $this->createStub(NewsSummarizer::class),
+            sleep: static function (float $seconds) use (&$pauses) { $pauses[] = $seconds; });
+        $pauses = [];
 
         $result = $service->run(new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')));
 
+        self::assertSame([35.5, 35.5, 35.5, 35.5, 35.5, 35.5], $pauses, 'ждём, пока ожидание за проход не превысит 4 минуты');
         self::assertSame(100, $result['embedded'], 'первая пачка сохранена');
         self::assertSame(100, $result['assigned'], 'и привязана');
         self::assertStringStartsWith('Gemini: HTTP 429 лимит: Quota exceeded for metric: generativelanguage.googleapis.com/embed_content_free_tier_requests, limit: 100; Please retry in 34.5s.', (string) $result['error']);
