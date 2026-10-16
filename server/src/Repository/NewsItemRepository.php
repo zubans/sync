@@ -70,12 +70,14 @@ class NewsItemRepository extends ServiceEntityRepository
      *
      * @return list<NewsItem>
      */
-    public function findNeedingHeadlineTranslation(int $limit, int $maxAttempts): array
+    public function findNeedingHeadlineTranslation(int $limit, int $maxAttempts, \DateTimeImmutable $since): array
     {
         return $this->createQueryBuilder('n')
             ->join('n.source', 's')
             ->addSelect('s')
             ->where('s.format <> :digest AND s.language <> :ru AND n.translatedTitle IS NULL AND n.headlineTranslationAttempts < :attempts')
+            ->andWhere('n.sortAt >= :since')
+            ->setParameter('since', $since)
             ->setParameter('digest', NewsSource::FORMAT_DIGEST)
             ->setParameter('ru', NewsSource::LANGUAGE_RU)
             ->setParameter('attempts', $maxAttempts)

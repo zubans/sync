@@ -29,6 +29,11 @@ final class NewsTranslator
      * вызов на статью (и больше у длинных), поэтому статей за проход немного.
      */
     public const HEADLINE_BATCH = 40;
+    /**
+     * Заголовки переводятся только у новостей за последние сутки (решение владельца 16.10.2026): после простоя agy
+     * копился хвост в тысячи заголовков старых новостей, которые уже никто не откроет, а квота уходила на них.
+     */
+    public const HEADLINE_WINDOW_HOURS = 24;
     public const ARTICLE_LIMIT = 3;
     /** Статей за проход цикла `news` без просьбы читателя: 0 — автоматически статьи не переводятся. */
     public const AUTO_ARTICLES = 0;
@@ -47,11 +52,12 @@ final class NewsTranslator
     }
 
     /** @return array{headlines: int, articles: int, failed: int, error: ?string} */
-    public function run(int $headlineLimit = self::HEADLINE_BATCH, int $articleLimit = self::ARTICLE_LIMIT): array
+    public function run(int $headlineLimit = self::HEADLINE_BATCH, int $articleLimit = self::ARTICLE_LIMIT, ?\DateTimeImmutable $now = null): array
     {
         $report = ['headlines' => 0, 'articles' => 0, 'failed' => 0, 'error' => null];
+        $since = ($now ?? new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->modify('-'.self::HEADLINE_WINDOW_HOURS.' hours');
         try {
-            $items = $this->items->findNeedingHeadlineTranslation(max(0, $headlineLimit), self::MAX_ATTEMPTS);
+            $items = $this->items->findNeedingHeadlineTranslation(max(0, $headlineLimit), self::MAX_ATTEMPTS, $since);
             foreach (array_chunk($items, self::HEADLINE_BATCH) as $batch) {
                 [$done, $failed, $error] = $this->translateHeadlines($batch);
                 $report['headlines'] += $done;

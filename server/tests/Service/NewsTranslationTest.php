@@ -80,7 +80,7 @@ final class NewsTranslationTest extends DatabaseWebTestCase
     {
         $this->model->answers = $answers;
 
-        return (new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model))->run(NewsTranslator::HEADLINE_BATCH, $articles);
+        return (new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model))->run(NewsTranslator::HEADLINE_BATCH, $articles, new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')));
     }
 
     public function testForeignHeadlinesAreTranslatedInOneRequest(): void
@@ -286,7 +286,7 @@ final class NewsTranslationTest extends DatabaseWebTestCase
         $translator = new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model);
 
         $this->model->answers = [self::headlines([[$item->getId(), 'Удар по аэропорту', 'Хуситы снова атакуют.']])];
-        $translator->run(NewsTranslator::HEADLINE_BATCH, NewsTranslator::AUTO_ARTICLES);
+        $translator->run(NewsTranslator::HEADLINE_BATCH, NewsTranslator::AUTO_ARTICLES, new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')));
         self::assertNull($item->getTranslatedContent(), 'без просьбы статья не переводится');
         self::assertSame('available', NewsTranslator::contentState($item));
         self::assertSame(['articles' => 0, 'failed' => 0, 'error' => null], $translator->runRequested(), 'просьб нет — к модели не ходим');
@@ -334,5 +334,18 @@ final class NewsTranslationTest extends DatabaseWebTestCase
 
         $this->expectException(\UnexpectedValueException::class);
         NewsTranslationPrompt::parseArticle(json_encode(['paragraphs' => ['Короткий пересказ всей статьи.']], \JSON_UNESCAPED_UNICODE), 14);
+    }
+
+    public function testOnlyHeadlinesOfLastDayAreTranslated(): void
+    {
+        $fresh = $this->news($this->bbc, 'Fresh news', null, '2026-10-16 10:00:00');
+        $this->news($this->bbc, 'Old news', null, '2026-10-14 10:00:00');
+        $this->model->answers = [self::headlines([[$fresh->getId(), 'Свежая новость', '']])];
+
+        $result = (new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model))
+            ->run(NewsTranslator::HEADLINE_BATCH, 0, new \DateTimeImmutable('2026-10-16 12:00:00', new \DateTimeZone('UTC')));
+
+        self::assertSame(1, $result['headlines']);
+        self::assertStringNotContainsString('Old news', $this->model->prompts[0], 'старше суток — не переводится');
     }
 }
