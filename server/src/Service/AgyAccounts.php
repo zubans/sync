@@ -133,6 +133,26 @@ final class AgyAccounts
         return array_sum(array_map(static fn (array $p) => (int) $p[1] * $unit[strtolower($p[2])], $parts));
     }
 
+    /**
+     * Что сейчас отдыхает: ключ — аккаунт целиком (домашняя папка) или «папка|модель», значение — до какого времени.
+     *
+     * @return array<string, int>
+     */
+    public function resting(int $now): array
+    {
+        return array_filter($this->state(), static fn (int $until) => $until > $now);
+    }
+
+    /** Адрес аккаунта Google из файла входа agy; нет входа — null. */
+    public static function email(string $home): ?string
+    {
+        $token = json_decode((string) @file_get_contents($home.self::TOKEN), true);
+        $parts = explode('.', (string) ($token['id_token'] ?? ''));
+        $claims = isset($parts[1]) ? json_decode((string) base64_decode(strtr($parts[1], '-_', '+/')), true) : null;
+
+        return \is_array($claims) && isset($claims['email']) ? (string) $claims['email'] : null;
+    }
+
     /** @return array<string, int> */
     private function state(): array
     {
