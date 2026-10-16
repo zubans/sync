@@ -67,6 +67,12 @@ services:
       # Векторы новостей для сюжетных линий: Ollama с qwen3-embedding на машине с видеокартой — та же, что у KB.
       NEWS_EMBEDDINGS_URL: ${NEWS_EMBEDDINGS_URL:-http://192.168.1.133:11434}
       NEWS_EMBEDDINGS_MODEL: ${NEWS_EMBEDDINGS_MODEL:-qwen3-embedding:4b}
+      # gemini — Gemini API (ключ из Google AI Studio в NEWS_EMBEDDINGS_KEY, модель gemini-embedding-001), ollama — машина KB.
+      NEWS_EMBEDDINGS_PROVIDER: ${NEWS_EMBEDDINGS_PROVIDER:-ollama}
+      NEWS_EMBEDDINGS_KEY: ${NEWS_EMBEDDINGS_KEY:-}
+      # Пороги сюжетов под модель векторов; пусто — по умолчанию для провайдера. Подбор — make storyline-tune.
+      NEWS_STORYLINE_THRESHOLD: ${NEWS_STORYLINE_THRESHOLD:-}
+      NEWS_STORYLINE_MERGE: ${NEWS_STORYLINE_MERGE:-}
     volumes:
       - agy_data:/app/var/agy
     command:

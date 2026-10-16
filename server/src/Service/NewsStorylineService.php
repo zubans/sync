@@ -22,19 +22,24 @@ use Symfony\Component\DependencyInjection\Attribute\Autowire;
 final class NewsStorylineService
 {
     /**
-     * Порог сходства новости с центром линии. Подобран на 956 новостях 11–12.10.2026 (qwen3-embedding:4b,
-     * 1024): при 0,72 в одну линию слипаются разные новости о Трампе, при 0,75 русские новости
-     * об Эр-Рияде дробятся на две линии.
+     * Порог сходства новости с центром линии и порог кандидатов на склейку — свои у каждой модели векторов
+     * (`NEWS_STORYLINE_THRESHOLD`, `NEWS_STORYLINE_MERGE`; пусто — по умолчанию для провайдера).
+     * qwen3-embedding (Ollama): 0,74 — подобран на 956 новостях 11–12.10.2026: при 0,72 в одну линию слипаются
+     * разные новости о Трампе, при 0,75 русские новости об Эр-Рияде дробятся на две линии.
+     * gemini-embedding-001: шкала выше (одно событие ru/en — 0,90), значения — временные, до подбора
+     * командой `app:news:storyline-tune` на реальных новостях.
      */
     public const THRESHOLD = 0.74;
-    /** Линии с центрами ближе этого — кандидаты на склейку, решает модель. */
     public const MERGE_CANDIDATE = 0.65;
+    public const GEMINI_THRESHOLD = 0.86;
+    public const GEMINI_MERGE_CANDIDATE = 0.80;
     /** Пар на склейку за запрос: вместе с названиями ответ должен уложиться в лимит длины ответа модели. */
     private const MERGE_PAIRS = 8;
     /** Линия, в которой не было новостей столько дней, закрыта: новость о том же через неделю — новая линия. */
     public const ACTIVE_DAYS = 3;
-    /** За проход цикла (5 минут): на процессоре 100 заголовков — пара минут, новостей в сутки ~1500. */
+    /** За проход цикла (5 минут): Ollama на процессоре — 100 заголовков за пару минут; Gemini API — 1000 за секунды. */
     private const EMBED_LIMIT = 100;
+    private const GEMINI_EMBED_LIMIT = 1000;
     /** Линий на название за проход: при 40 ответ модели обрезался по лимиту длины (14.10.2026), остальные — следующими проходами. */
     private const NAME_LIMIT = 12;
     private const HEADLINES_PER_LINE = 8;
@@ -47,7 +52,69 @@ final class NewsStorylineService
         private readonly NewsSummarizer $summarizer,
         #[Autowire('%env(NEWS_DIGEST_MODEL_HOUR)%')]
         private readonly string $model = '',
+        #[Autowire('%env(NEWS_STORYLINE_THRESHOLD)%')]
+        private readonly string $threshold = '',
+        #[Autowire('%env(NEWS_STORYLINE_MERGE)%')]
+        private readonly string $mergeCandidate = '',
     ) {
+    }
+
+    /** Порог привязки к линии для текущей модели векторов. */
+    public function threshold(): float
+    {
+        return $this->threshold !== '' ? (float) $this->threshold
+            : ($this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_THRESHOLD : self::THRESHOLD);
+    }
+
+    /**
+     * Жадная раскладка векторов по линиям, как в {@see assign()}, но без базы и окна активности — для подбора
+     * порога (`app:news:storyline-tune`) на новостях за день-два.
+     *
+     * @param list<list<float>> $vectors в порядке времени
+     *
+     * @return list<list<int>> номера векторов по линиям
+     */
+    public static function group(array $vectors, float $threshold): array
+    {
+        $groups = [];
+        $centroids = [];
+        foreach ($vectors as $n => $vector) {
+            $best = null;
+            $bestScore = $threshold;
+            foreach ($centroids as $i => $centroid) {
+                $score = NewsVector::similarity($vector, $centroid);
+                if ($score >= $bestScore) {
+                    [$best, $bestScore] = [$i, $score];
+                }
+            }
+            if ($best === null) {
+                $groups[] = [$n];
+                $centroids[] = $vector;
+            } else {
+                $centroids[$best] = NewsVector::addToCentroid($centroids[$best], \count($groups[$best]), $vector);
+                $groups[$best][] = $n;
+            }
+        }
+
+        return $groups;
+    }
+
+    private function mergeCandidate(): float
+    {
+        return $this->mergeCandidate !== '' ? (float) $this->mergeCandidate
+            : ($this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_MERGE_CANDIDATE : self::MERGE_CANDIDATE);
+    }
+
+    /**
+     * Пересобрать сюжеты: [embeddings] — заново посчитать и векторы (смена модели векторов), иначе только
+     * привязку и линии (смена порога). Названия линий модель даст заново следующими проходами.
+     */
+    public function reset(bool $embeddings): void
+    {
+        $db = $this->em->getConnection();
+        $db->executeStatement('UPDATE news_item SET storyline_id = NULL'.($embeddings ? ', embedding = NULL' : ''));
+        $db->executeStatement('DELETE FROM news_storyline');
+        $this->em->clear();
     }
 
     /** @return array{embedded: int, assigned: int, created: int, named: int, merged: int, error: ?string} */
@@ -55,7 +122,7 @@ final class NewsStorylineService
     {
         $report = ['embedded' => 0, 'assigned' => 0, 'created' => 0, 'named' => 0, 'merged' => 0, 'error' => null];
         if (!$this->embedder->isEnabled()) {
-            $report['error'] = 'NEWS_EMBEDDINGS_URL не задан — векторов и сюжетов нет';
+            $report['error'] = $this->embedder->missing().' — векторов и сюжетов нет';
 
             return $report;
         }
@@ -72,7 +139,7 @@ final class NewsStorylineService
 
     private function embedMissing(): int
     {
-        $items = $this->items->findNeedingEmbedding(self::EMBED_LIMIT);
+        $items = $this->items->findNeedingEmbedding($this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_EMBED_LIMIT : self::EMBED_LIMIT);
         if ($items === []) {
             return 0;
         }
@@ -104,7 +171,7 @@ final class NewsStorylineService
             $vector = (array) $item->getEmbedding();
             $at = EventTime::fromDb($item->getSortAt());
             $best = null;
-            $bestScore = self::THRESHOLD;
+            $bestScore = $this->threshold();
             foreach ($active as $i => $candidate) {
                 if (EventTime::fromDb($candidate['line']->getLastSeenAt()) < $at->modify('-'.self::ACTIVE_DAYS.' days')) {
                     continue;
@@ -201,7 +268,7 @@ final class NewsStorylineService
                     continue;
                 }
                 $score = NewsVector::similarity($centroid, $other->getCentroid());
-                if ($score >= self::MERGE_CANDIDATE) {
+                if ($score >= $this->mergeCandidate()) {
                     $seen[$key] = true;
                     $scored[] = [$score, $line, $other];
                 }

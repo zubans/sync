@@ -128,6 +128,22 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
+     * Новости с вектором с момента [since] — по времени, для подбора порога сюжетов.
+     *
+     * @return list<NewsItem>
+     */
+    public function findEmbeddedSince(\DateTimeImmutable $since): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')->addSelect('s')
+            ->where('n.embedding IS NOT NULL AND n.sortAt >= :since')
+            ->setParameter('since', $since)
+            ->orderBy('n.sortAt', 'ASC')
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
      * Новости без вектора — свежие первыми, без сводок: сюжетные линии нужны для актуальных новостей,
      * а архив досчитается следующими проходами.
      *

@@ -10,7 +10,7 @@ APK       := android/app/build/outputs/apk/debug/app-debug.apk
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze market advice digest digest-preview agy-login agy-status test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune market advice digest digest-preview agy-login agy-status test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -76,8 +76,11 @@ translate: ## Перевести заголовки и анонсы новост
 translate-requested: ## Перевести статьи, которые попросили перевести на планшете или в виджете (обычно делает сервис translate)
 	$(COMPOSE) exec translate php bin/console app:news:translate-requested
 
-analyze: ## Векторы новостей и сюжетные линии сейчас (нужен NEWS_EMBEDDINGS_URL)
-	$(COMPOSE) exec news php bin/console app:news:analyze
+analyze: ## Векторы новостей и сюжетные линии сейчас (REBUILD=1 — заново векторы и сюжеты, REASSIGN=1 — заново только сюжеты)
+	$(COMPOSE) exec news php bin/console app:news:analyze $(if $(REBUILD),--rebuild) $(if $(REASSIGN),--reassign)
+
+storyline-tune: ## Подобрать порог сюжетов по готовым векторам (DAYS=2 — за сколько дней новости)
+	$(COMPOSE) exec news php bin/console app:news:storyline-tune --days=$(or $(DAYS),2)
 
 market: ## Последствия новостей для Мосбиржи сейчас: связь с инструментами (agy) и замер цены (ISS)
 	$(COMPOSE) exec news php bin/console app:news:market

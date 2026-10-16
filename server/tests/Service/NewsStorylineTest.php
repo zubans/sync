@@ -150,6 +150,75 @@ final class NewsStorylineTest extends DatabaseWebTestCase
         self::assertStringContainsString('{сюжет «Удары хуситов по Эр-Рияду», с 10.10, новостей 1}', NewsDigestPrompt::build($period, [$item]));
     }
 
+    public function testGeminiEmbedsInBatchesForClusteringAndNormalizes(): void
+    {
+        $requests = [];
+        $http = new MockHttpClient(static function (string $method, string $url, array $options) use (&$requests) {
+            $body = json_decode($options['body'], true);
+            $requests[] = ['url' => $url, 'headers' => $options['headers'], 'body' => $body];
+
+            return new MockResponse(json_encode(['embeddings' => array_map(static fn () => ['values' => [3.0, 4.0]], $body['requests'])]));
+        });
+        $embedder = new NewsEmbedder($http, '', 'gemini-embedding-001', NewsEmbedder::PROVIDER_GEMINI, 'test-key');
+
+        $vectors = $embedder->embed(array_fill(0, 150, 'Эр-Рияд удар'));
+
+        self::assertCount(150, $vectors);
+        self::assertEqualsWithDelta([0.6, 0.8], $vectors[149], 1e-6);
+        self::assertCount(2, $requests, 'до 100 текстов за запрос');
+        self::assertSame('https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents', $requests[0]['url']);
+        self::assertContains('x-goog-api-key: test-key', $requests[0]['headers']);
+        self::assertCount(50, $requests[1]['body']['requests']);
+        self::assertSame(['model' => 'models/gemini-embedding-001', 'content' => ['parts' => [['text' => 'Эр-Рияд удар']]],
+            'taskType' => 'CLUSTERING', 'outputDimensionality' => NewsEmbedder::DIMS], $requests[0]['body']['requests'][0]);
+    }
+
+    public function testGeminiErrorIsReported(): void
+    {
+        $http = new MockHttpClient(new MockResponse(json_encode(['error' => ['message' => 'API key not valid']]), ['http_code' => 400]));
+        $embedder = new NewsEmbedder($http, '', 'gemini-embedding-001', NewsEmbedder::PROVIDER_GEMINI, 'bad');
+
+        $this->expectExceptionMessage('Gemini: HTTP 400 API key not valid');
+        $embedder->embed(['текст']);
+    }
+
+    public function testThresholdDependsOnProviderUnlessSet(): void
+    {
+        $service = fn (NewsEmbedder $embedder, string $threshold = '') => new NewsStorylineService($this->em,
+            static::getContainer()->get(NewsItemRepository::class), static::getContainer()->get(NewsStorylineRepository::class),
+            $embedder, $this->createStub(NewsSummarizer::class), '', $threshold);
+        $http = new MockHttpClient();
+
+        self::assertSame(NewsStorylineService::THRESHOLD, $service(new NewsEmbedder($http, 'http://ollama.test'))->threshold());
+        self::assertSame(NewsStorylineService::GEMINI_THRESHOLD, $service(new NewsEmbedder($http, '', 'gemini-embedding-001', 'gemini', 'k'))->threshold());
+        self::assertSame(0.9, $service(new NewsEmbedder($http, '', 'gemini-embedding-001', 'gemini', 'k'), '0.9')->threshold());
+        self::assertFalse((new NewsEmbedder($http, '', 'gemini-embedding-001', 'gemini'))->isEnabled(), 'Gemini без ключа выключен');
+    }
+
+    public function testGroupSplitsByThresholdForTuning(): void
+    {
+        $vectors = [NewsVector::normalize([1.0, 0.1, 0.0]), NewsVector::normalize([0.95, 0.2, 0.05]), NewsVector::normalize([0.0, 0.1, 1.0])];
+
+        self::assertSame([[0, 1], [2]], NewsStorylineService::group($vectors, 0.9));
+        self::assertSame([[0], [1], [2]], NewsStorylineService::group($vectors, 0.999));
+    }
+
+    public function testRebuildClearsStorylinesAndVectors(): void
+    {
+        $item = $this->news('Эр-Рияд удар по аэропорту', '2026-10-12 06:00:00');
+        $service = $this->service([]);
+        $service->run(new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')));
+
+        $service->reset(false);
+        $db = $this->em->getConnection();
+        self::assertSame(0, (int) $db->fetchOne('SELECT COUNT(*) FROM news_storyline'));
+        self::assertSame(1, (int) $db->fetchOne('SELECT COUNT(*) FROM news_item WHERE embedding IS NOT NULL'), 'перепривязка векторы оставляет');
+
+        $service->reset(true);
+        self::assertSame(0, (int) $db->fetchOne('SELECT COUNT(*) FROM news_item WHERE embedding IS NOT NULL'));
+        self::assertSame(1, $service->run(new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')))['created'], $item->getTitle());
+    }
+
     public function testVectorsSurviveStorageAndCentroidIsNormalized(): void
     {
         $vector = NewsVector::normalize([3.0, 4.0]);
