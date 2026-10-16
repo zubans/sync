@@ -144,17 +144,18 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
-     * Новости без вектора — свежие первыми, без сводок: сюжетные линии нужны для актуальных новостей,
-     * а архив досчитается следующими проходами.
+     * Новости без вектора с момента [since] — свежие первыми, без сводок: сюжетные линии нужны для
+     * актуальных новостей.
      *
      * @return list<NewsItem>
      */
-    public function findNeedingEmbedding(int $limit): array
+    public function findNeedingEmbedding(int $limit, \DateTimeImmutable $since): array
     {
         return $this->createQueryBuilder('n')
             ->join('n.source', 's')
-            ->where('n.embedding IS NULL AND s.format <> :digest')
+            ->where('n.embedding IS NULL AND s.format <> :digest AND n.sortAt >= :since')
             ->setParameter('digest', NewsSource::FORMAT_DIGEST)
+            ->setParameter('since', $since)
             ->orderBy('n.sortAt', 'DESC')
             ->setMaxResults($limit)
             ->getQuery()

@@ -127,29 +127,44 @@ final class NewsStorylineService
             return $report;
         }
         try {
-            $report['embedded'] = $this->embedMissing();
+            [$report['embedded'], $report['error']] = $this->embedMissing($now);
             [$report['assigned'], $report['created']] = $this->assign();
             [$report['named'], $report['merged']] = $this->name($now);
         } catch (\Throwable $e) {
-            $report['error'] = $e->getMessage();
+            $report['error'] = ($report['error'] !== null ? $report['error'].'; ' : '').$e->getMessage();
         }
 
         return $report;
     }
 
-    private function embedMissing(): int
+    /**
+     * Векторы только новостям за последние [ACTIVE_DAYS] дней — старше в линии уже не попадут, а лимит
+     * бесплатного Gemini API — около тысячи текстов в сутки. Сохраняются пачками: отказ (лимит Gemini,
+     * недоступная Ollama) не теряет посчитанное, привязка идёт по нему.
+     *
+     * @return array{int, ?string} сколько новостей получили вектор и ошибка провайдера
+     */
+    private function embedMissing(\DateTimeImmutable $now): array
     {
-        $items = $this->items->findNeedingEmbedding($this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_EMBED_LIMIT : self::EMBED_LIMIT);
-        if ($items === []) {
-            return 0;
+        $items = $this->items->findNeedingEmbedding(
+            $this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_EMBED_LIMIT : self::EMBED_LIMIT,
+            $now->modify('-'.self::ACTIVE_DAYS.' days'),
+        );
+        $embedded = 0;
+        foreach (array_chunk($items, $this->embedder->batchSize()) as $batch) {
+            try {
+                $vectors = $this->embedder->embed(array_map(self::text(...), $batch));
+            } catch (\RuntimeException $e) {
+                return [$embedded, $e->getMessage()];
+            }
+            foreach ($batch as $i => $item) {
+                $item->setEmbedding($vectors[$i]);
+            }
+            $this->em->flush();
+            $embedded += \count($batch);
         }
-        $vectors = $this->embedder->embed(array_map(self::text(...), $items));
-        foreach ($items as $i => $item) {
-            $item->setEmbedding($vectors[$i]);
-        }
-        $this->em->flush();
 
-        return \count($items);
+        return [$embedded, null];
     }
 
     /** @return array{int, int} сколько новостей привязано и сколько линий открыто */

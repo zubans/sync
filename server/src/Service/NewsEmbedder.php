@@ -52,6 +52,12 @@ final class NewsEmbedder
         return $this->model;
     }
 
+    /** Сколько текстов за запрос: столько новостей сервис сохраняет за раз, чтобы отказ не терял уже посчитанное. */
+    public function batchSize(): int
+    {
+        return $this->provider() === self::PROVIDER_GEMINI ? self::GEMINI_BATCH : self::OLLAMA_BATCH;
+    }
+
     /** Что не настроено — для текста ошибки. */
     public function missing(): string
     {
@@ -92,7 +98,7 @@ final class NewsEmbedder
             ]);
             $data = $response->toArray(false);
             if ($response->getStatusCode() !== 200) {
-                throw new \RuntimeException(sprintf('Gemini: HTTP %d %s', $response->getStatusCode(), mb_substr((string) ($data['error']['message'] ?? ''), 0, 200)));
+                throw new \RuntimeException(sprintf('Gemini: HTTP %d %s', $response->getStatusCode(), self::geminiError((string) ($data['error']['message'] ?? ''))));
             }
             $embeddings = $data['embeddings'] ?? null;
             if (!\is_array($embeddings) || \count($embeddings) !== \count($batch)) {
@@ -105,6 +111,17 @@ final class NewsEmbedder
         }
 
         return $vectors;
+    }
+
+    /**
+     * Суть ошибки Gemini: у отказа по лимиту (429) начало сообщения — общая отсылка к тарифу, а какой лимит
+     * исчерпан и когда повторить — в строках «Quota exceeded for metric: …, limit: …» и «Please retry in …».
+     */
+    private static function geminiError(string $message): string
+    {
+        preg_match_all('/Quota exceeded for metric: [^\n]+|Please retry in [^\n]+/', $message, $m);
+
+        return $m[0] !== [] ? 'лимит: '.implode('; ', array_map('trim', $m[0])) : mb_substr($message, 0, 300);
     }
 
     /**
