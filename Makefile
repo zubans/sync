@@ -10,7 +10,7 @@ APK       := android/app/build/outputs/apk/debug/app-debug.apk
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune market advice digest digest-preview agy-login agy-status test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -78,6 +78,9 @@ translate-requested: ## Перевести статьи, которые попр
 
 analyze: ## Векторы новостей и сюжетные линии сейчас (REBUILD=1 — заново векторы и сюжеты, REASSIGN=1 — заново только сюжеты)
 	$(COMPOSE) exec news php bin/console app:news:analyze $(if $(REBUILD),--rebuild) $(if $(REASSIGN),--reassign)
+
+embedding-compare: ## Сравнить векторы Gemini и Qwen на сюжетах часовых сводок (HOURS=48)
+	$(COMPOSE) exec news php bin/console app:news:embedding-compare --hours=$(or $(HOURS),48)
 
 storyline-tune: ## Подобрать порог сюжетов по готовым векторам (DAYS=2 — за сколько дней новости)
 	$(COMPOSE) exec news php bin/console app:news:storyline-tune --days=$(or $(DAYS),2)

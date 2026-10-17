@@ -168,7 +168,7 @@ final class NewsStorylineService
         foreach (array_chunk($items, $this->embedder->batchSize()) as $batch) {
             while (true) {
                 try {
-                    $vectors = $this->embedder->embed(array_map(self::text(...), $batch));
+                    $vectors = $this->embedder->embed(array_map(self::embeddingText(...), $batch));
                     break;
                 } catch (NewsEmbeddingRateLimit $e) {
                     $pause = ($e->retryAfter ?? \INF) + 1;
@@ -364,7 +364,7 @@ final class NewsStorylineService
     }
 
     /** Текст для вектора — заголовок и анонс: этого хватает, чтобы узнать событие; полный текст размывает вектор. */
-    private static function text(NewsItem $item): string
+    public static function embeddingText(NewsItem $item): string
     {
         return trim($item->getTitle().'. '.mb_substr((string) $item->getSummary(), 0, 300));
     }
