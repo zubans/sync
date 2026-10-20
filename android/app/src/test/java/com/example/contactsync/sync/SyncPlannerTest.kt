@@ -134,6 +134,33 @@ class SyncPlannerTest {
     }
 
     @Test
+    fun `family contact with a number already in the phone book is not added under another name`() {
+        val plan = SyncPlanner.planFamily(
+            server = listOf(
+                // У пользователя этот номер записан как «Мамуля» и в формате 8…
+                server("mom", "Мама", "+7 900 111-11-11"),
+                // Один из номеров совпадает — это тот же человек, второй контакт не нужен.
+                server("dad", "Папа", "+7 900 333-33-33", "+7 900 222-22-22"),
+                // Того же номера нет, имя совпадает с контактом телефона — это другой человек.
+                server("namesake", "Мамуля", "+7 900 444-44-44"),
+                // Номер, которого нет, у двух членов семьи под разными именами — ставим один раз.
+                server("aunt", "Тётя Оля", "+7 900 555-55-55"),
+                server("aunt-2", "Ольга", "8 (900) 555-55-55"),
+            ),
+            local = listOf(
+                local(1, "Мамуля", "8 900 111 11 11"),
+                local(2, "Отец", "9002222222"),
+            ),
+            current = emptyMap(),
+        )
+
+        assertEquals(listOf("namesake", "aunt"), plan.toInsert.map { it.serverId })
+        assertEquals(10L, plan.delivered["mom"]?.rawContactId)
+        assertEquals(20L, plan.delivered["dad"]?.rawContactId)
+        assertEquals(false, plan.delivered["mom"]?.createdByUs)
+    }
+
+    @Test
     fun `delivered family contacts are uploaded as normal contacts`() {
         val upload = SyncPlanner.buildUpload(
             local = listOf(local(1, "Личный", "+79000000001"), local(2, "Из семьи", "+79000000002")),

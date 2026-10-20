@@ -70,6 +70,11 @@ object Birthday {
     fun normalize(raw: String?): String? = raw?.trim()?.let { FORMAT.find(it)?.value }
 }
 
+/** Ключ номера — последние 10 цифр: +7 900 000-00-01, 8 (900) 000-00-01 и 900 000-00-01 — один номер. */
+object PhoneKey {
+    fun of(phone: String): String = phone.filter(Char::isDigit).takeLast(10)
+}
+
 /**
  * «Отпечаток» контакта для поиска дублей: одинаковый контакт, записанный разными приложениями
  * или по-разному отформатированный номер, дают один отпечаток.
@@ -77,8 +82,7 @@ object Birthday {
 object Fingerprint {
     fun of(name: String?, phones: List<String>, emails: List<String>): String {
         val normalizedName = name.orEmpty().trim().lowercase().replace(Regex("\\s+"), " ")
-        // Последние 10 цифр: +7 900 000-00-01 и 8 (900) 000-00-01 — один номер.
-        val normalizedPhones = phones.map { it.filter(Char::isDigit).takeLast(10) }.filter { it.isNotEmpty() }.sorted()
+        val normalizedPhones = phones.map(PhoneKey::of).filter { it.isNotEmpty() }.sorted()
         val keys = normalizedPhones.ifEmpty { emails.map { it.trim().lowercase() }.sorted() }
         return normalizedName + "|" + keys.distinct().joinToString(",")
     }
