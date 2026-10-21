@@ -99,9 +99,30 @@ class ApkInstaller(private val context: Context, private val api: Api) {
         val baseIndex = meta.indexOfFirst { it.name == "base.apk" }.coerceAtLeast(0)
         verifySignature(app, files[baseIndex])
 
+        commit(app.packageName, meta.map { it.name }.zip(files))
+    }
+
+    /**
+     * Обновление самого приложения скачанной с сервера сборкой. Пакет и подпись должны совпасть
+     * с установленными — иначе это чужой или подменённый APK (Android всё равно его не поставит).
+     */
+    suspend fun installUpdate(apk: File) = withContext(Dispatchers.IO) {
+        val pm = context.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES else @Suppress("DEPRECATION") PackageManager.GET_SIGNATURES
+        val archive = pm.getPackageArchiveInfo(apk.path, flags) ?: throw IOException("Не удалось прочитать APK")
+        if (archive.packageName != context.packageName) throw IOException("В APK другой пакет: ${archive.packageName}")
+        val signature = AppInventory.signingSha256(archive) ?: throw IOException("APK не подписан")
+        if (signature != AppInventory.signingSha256(pm.getPackageInfo(context.packageName, flags))) {
+            throw IOException("Сборка подписана другим ключом — обновление невозможно")
+        }
+        commit(context.packageName, listOf("base.apk" to apk))
+    }
+
+    /** Одна сессия PackageInstaller на все части (base + split); итог придёт в [InstallResultReceiver]. */
+    private fun commit(packageName: String, parts: List<Pair<String, File>>) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
-            setAppPackageName(app.packageName)
+            setAppPackageName(packageName)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 setRequireUserAction(
                     if (isSystemInstaller) PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED
@@ -111,13 +132,13 @@ class ApkInstaller(private val context: Context, private val api: Api) {
         }
         val sessionId = installer.createSession(params)
         installer.openSession(sessionId).use { session ->
-            meta.zip(files).forEach { (apk, file) ->
-                session.openWrite(apk.name, 0, file.length()).use { out ->
+            parts.forEach { (name, file) ->
+                session.openWrite(name, 0, file.length()).use { out ->
                     file.inputStream().use { it.copyTo(out) }
                     session.fsync(out)
                 }
             }
-            session.commit(InstallResultReceiver.intentSender(context, sessionId, app.packageName))
+            session.commit(InstallResultReceiver.intentSender(context, sessionId, packageName))
         }
     }
 

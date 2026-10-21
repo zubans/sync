@@ -3,6 +3,7 @@ package com.example.contactsync.sync
 import com.example.contactsync.contacts.ContactData
 import com.example.contactsync.contacts.Fingerprint
 import com.example.contactsync.contacts.LocalContact
+import com.example.contactsync.contacts.PhoneKey
 import com.example.contactsync.data.ContactUpload
 import com.example.contactsync.data.ServerContact
 
@@ -22,6 +23,8 @@ data class RestorePlan(
  * Доставка общих контактов семьи на телефон. Семья нужна для заполнения новых устройств:
  * недостающие контакты ставятся один раз, дальше это обычные контакты владельца телефона —
  * приложение их не обновляет и не удаляет, даже если контакт убрали из семьи.
+ * Контакт с номером, который уже есть в телефонной книге (под любым именем), не ставится:
+ * свой контакт не переименовываем и второй с другим именем не добавляем.
  */
 data class FamilyPlan(
     val toInsert: List<ServerContact>,
@@ -65,19 +68,36 @@ object SyncPlanner {
         local: List<LocalContact>,
         current: Map<String, FamilyEntry>,
     ): FamilyPlan {
-        // Такой же контакт (имя + телефоны) уже есть на телефоне — второй не нужен.
-        val onPhone = local.groupBy { it.fingerprint }
+        // Номер (последние 10 цифр) → raw-контакт телефона, у которого он есть.
+        val byPhone = mutableMapOf<String, Long>()
+        for (contact in local) {
+            val rawId = contact.rawContactIds.firstOrNull() ?: continue
+            contact.phones.map(PhoneKey::of).filter { it.isNotEmpty() }.forEach { byPhone.putIfAbsent(it, rawId) }
+        }
+        // Контакты без номера (только email) сверяем по имени и email.
+        val byFingerprint = local.groupBy { it.fingerprint }
         val toInsert = mutableListOf<ServerContact>()
-        val inserting = mutableSetOf<String>()
+        val insertingPhones = mutableSetOf<String>()
+        val insertingFingerprints = mutableSetOf<String>()
         val delivered = mutableMapOf<String, FamilyEntry>()
 
         for (contact in server) {
             val already = current[contact.serverId]
-            val twin = onPhone[contact.fingerprint]?.firstOrNull()?.rawContactIds?.firstOrNull()
+            val phones = contact.phones.map(PhoneKey::of).filter { it.isNotEmpty() }
+            val twin = if (phones.isEmpty()) {
+                byFingerprint[contact.fingerprint]?.firstOrNull()?.rawContactIds?.firstOrNull()
+            } else {
+                phones.firstNotNullOfOrNull { byPhone[it] }
+            }
             when {
                 already != null -> delivered[contact.serverId] = already
                 twin != null -> delivered[contact.serverId] = FamilyEntry(twin, contact.updatedAt, createdByUs = false)
-                inserting.add(contact.fingerprint) -> toInsert += contact
+                // Тот же номер у двух членов семьи под разными именами — ставим первый.
+                phones.isNotEmpty() -> if (phones.none { it in insertingPhones }) {
+                    insertingPhones += phones
+                    toInsert += contact
+                }
+                insertingFingerprints.add(contact.fingerprint) -> toInsert += contact
             }
         }
         // Записи о контактах, которых больше нет в семье, просто забываем — с телефона ничего не удаляем.

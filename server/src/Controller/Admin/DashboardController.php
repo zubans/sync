@@ -76,6 +76,9 @@ final class DashboardController extends AbstractDashboardController
         yield MenuItem::linkTo(DeviceCrudController::class, 'Устройства', 'fa fa-mobile-screen');
         yield MenuItem::linkTo(GoogleAccountCrudController::class, 'Google-аккаунты', 'fa-brands fa-google');
 
+        yield MenuItem::section('Клиент');
+        yield MenuItem::linkTo(AppReleaseCrudController::class, 'Версии приложения', 'fa fa-mobile-arrow-down');
+
         yield MenuItem::section('Резервные копии');
         yield MenuItem::linkTo(InstalledAppCrudController::class, 'Приложения', 'fa fa-box-archive');
         yield MenuItem::linkTo(VaultCrudController::class, 'Хранилища паролей', 'fa fa-key');

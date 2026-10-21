@@ -13,6 +13,8 @@ import com.example.contactsync.kb.MeetingUploads
 import com.example.contactsync.kb.RecordingStore
 import com.example.contactsync.sync.SyncEngine
 import com.example.contactsync.sync.SyncScheduler
+import com.example.contactsync.update.AppUpdateWorker
+import com.example.contactsync.update.AppUpdater
 import com.example.contactsync.vault.BiometricUnlock
 import com.example.contactsync.vault.VaultRepository
 import com.example.contactsync.vault.VaultStore
@@ -34,6 +36,8 @@ class App : Application() {
         private set
     lateinit var apkInstaller: ApkInstaller
         private set
+    lateinit var updater: AppUpdater
+        private set
     lateinit var kbSession: KbSession
         private set
     lateinit var kbApi: KbApi
@@ -50,6 +54,9 @@ class App : Application() {
         vault = VaultRepository(VaultStore(this), api, biometric = BiometricUnlock(this))
         apkBackup = ApkBackup(this, session, api)
         apkInstaller = ApkInstaller(this, api)
+        updater = AppUpdater(this, api, apkInstaller)
+        // Новая версия на сервере — напомнить уведомлением (проверка раз в 6 часов).
+        AppUpdateWorker.schedule(this)
         kbSession = KbSession(this)
         kbApi = KbApi(kbSession)
         // Записи встреч, не отправленные до перезапуска (нет сети, кончилась сессия), — снова в очередь.

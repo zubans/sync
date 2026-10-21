@@ -1,8 +1,9 @@
-# Contact Sync: сервер в Docker, Android-клиент — локальным Android SDK.
+# Contact Sync: сервер в Docker, Android-клиент — локальным Android SDK (или в Docker при make release).
 # Список команд: make help
 
 COMPOSE   := docker compose
 APP       := $(COMPOSE) exec app
+APP_T     := $(COMPOSE) exec -T app
 HTTP_PORT ?= $(shell grep -s '^HTTP_PORT=' .env | cut -d= -f2)
 HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK       := android/app/build/outputs/apk/debug/app-debug.apk
@@ -10,7 +11,7 @@ APK       := android/app/build/outputs/apk/debug/app-debug.apk
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse release deploy
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -161,3 +162,32 @@ install-apk: apk ## Поставить APK на подключённое уст�
 
 reverse: ## Пробросить порт сервера на устройство: в приложении адрес http://127.0.0.1:<порт>
 	adb reverse tcp:$(HTTP_PORT) tcp:$(HTTP_PORT)
+
+# --- Обновление приложения: сборка на сервере (Android SDK — в Docker) ---
+
+# Ключ подписи: тот же debug-ключ, что на машине разработчика, — иначе обновление не встанет поверх установленного.
+KEYSTORE     ?= $(HOME)/.android/debug.keystore
+GRADLE_CACHE ?= $(HOME)/.cache/contactsync-gradle
+BUILDER      := contactsync-android-builder
+
+release: ## Собрать и опубликовать APK, если клиент (android/) изменился с активной версии; FORCE=1 — собрать всё равно
+	@test -f "$(KEYSTORE)" || { echo "Нет ключа подписи $(KEYSTORE): скопируйте ~/.android/debug.keystore с машины разработчика (или KEYSTORE=путь)"; exit 1; }
+	@rev=$$(git rev-parse HEAD:android); \
+	active=$$($(APP_T) php bin/console app:release:revision | tr -d '\r'); \
+	if [ "$$rev" = "$$active" ] && [ -z "$(FORCE)" ]; then echo "Клиент не менялся с активной версии — сборка не нужна"; exit 0; fi; \
+	code=$$(git rev-list --count HEAD -- android); \
+	echo "Собираю версию 1.$$code (несколько минут, первый раз — дольше: скачивается Android SDK и зависимости)"; \
+	docker build --platform linux/amd64 -q -t $(BUILDER) docker/android-builder > /dev/null && \
+	mkdir -p "$(GRADLE_CACHE)" && \
+	docker run --rm --platform linux/amd64 --user "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/src" -v "$(GRADLE_CACHE):/gradle" -v "$(KEYSTORE):/keystore/debug.keystore:ro" \
+		$(if $(wildcard android/local.properties),-v /dev/null:/src/android/local.properties:ro) \
+		$(BUILDER) ./gradlew --no-daemon --no-watch-fs -q assembleRelease -PversionCode=$$code -PsigningStoreFile=/keystore/debug.keystore && \
+	$(COMPOSE) cp android/app/build/outputs/apk/release/app-release.apk app:/tmp/contactsync.apk && \
+	$(APP_T) php bin/console app:release:publish /tmp/contactsync.apk --version-code=$$code --version-name=1.$$code --revision=$$rev && \
+	$(APP_T) rm -f /tmp/contactsync.apk
+
+deploy: ## Раскатка на сервере: git pull, make up и, если клиент изменился, make release
+	git pull --ff-only
+	$(MAKE) up
+	$(MAKE) release

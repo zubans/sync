@@ -1,5 +1,7 @@
 package com.example.contactsync.ui
 
+import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -26,6 +28,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.contactsync.ui.vault.VaultScreen
+import com.example.contactsync.update.UpdatePrompt
 
 /** FragmentActivity — нужна для системного диалога отпечатка (BiometricPrompt). */
 class MainActivity : FragmentActivity() {
@@ -37,8 +40,15 @@ class MainActivity : FragmentActivity() {
                 val vm: AppViewModel = viewModel()
                 val state by vm.state.collectAsStateWithLifecycle()
                 if (state.loggedIn) MainTabs(state, vm) else LoginScreen(state, vm)
+                UpdatePrompt()
             }
         }
+    }
+
+    companion object {
+        /** Из уведомления о новой версии: приложение откроется и предложит обновиться. */
+        fun updateIntent(context: Context): Intent =
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
     }
 }
 

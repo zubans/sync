@@ -13,8 +13,15 @@ android {
         applicationId = "com.example.contactsync"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // Номер сборки растёт с каждым изменением клиента: число коммитов, затронувших android/.
+        // По нему приложение понимает, что на сервере версия новее. make release передаёт его явно (-PversionCode).
+        val gitVersionCode = providers.exec {
+            workingDir(rootDir)
+            commandLine("git", "rev-list", "--count", "HEAD", "--", ".")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.map { it.trim().toIntOrNull() ?: 1 }
+        versionCode = providers.gradleProperty("versionCode").map(String::toInt).orElse(gitVersionCode).get()
+        versionName = "1.$versionCode"
 
         // Адрес сервера по умолчанию — VPS; другой: ./gradlew assembleDebug -PserverUrl=http://host:port
         val serverUrl = providers.gradleProperty("serverUrl").getOrElse("http://94.103.9.172:8001")
@@ -25,12 +32,25 @@ android {
         buildConfigField("String", "CODE_SERVER_URL", "\"$codeServerUrl\"")
     }
 
+    signingConfigs {
+        // Сборка на сервере (make release в Docker): тот же debug-ключ, что на машине разработчика, но из
+        // указанного файла — иначе Android не поставит обновление поверх установленной версии.
+        providers.gradleProperty("signingStoreFile").orNull?.let { store ->
+            create("shared") {
+                storeFile = file(store)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             // Приложение ставится не из магазина, своего ключа нет: release подписан debug-ключом этой машины,
             // поэтому ставится поверх debug-сборки без потери данных. Release нужен ради скорости:
             // debuggable-сборка Compose на планшете не успевает в 60 кадров (см. docs/launcher.md).
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("shared") ?: signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

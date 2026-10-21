@@ -21,7 +21,8 @@ abstract class DatabaseWebTestCase extends WebTestCase
     protected function setUp(): void
     {
         $this->client = static::createClient();
-        (new Filesystem())->remove(static::getContainer()->getParameter('kernel.project_dir').'/var/storage/photos_test');
+        $storage = static::getContainer()->getParameter('kernel.project_dir').'/var/storage';
+        (new Filesystem())->remove([$storage.'/photos_test', $storage.'/releases_test']);
         $this->em = static::getContainer()->get(EntityManagerInterface::class);
 
         $schemaTool = new SchemaTool($this->em);
