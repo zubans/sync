@@ -36,6 +36,11 @@ class Session(context: Context) {
         get() = prefs.getString(KEY_LAST_SUMMARY, null)
         set(value) = prefs.edit().putString(KEY_LAST_SUMMARY, value).apply()
 
+    /** Версия, о которой уже напомнили уведомлением: о каждой новой — один раз. */
+    var notifiedUpdateVersion: Int
+        get() = prefs.getInt(KEY_NOTIFIED_UPDATE, 0)
+        set(value) = prefs.edit().putInt(KEY_NOTIFIED_UPDATE, value).apply()
+
     var lastAppsBackupAt: Long
         get() = prefs.getLong(KEY_APPS_BACKUP_AT, 0)
         set(value) = prefs.edit().putLong(KEY_APPS_BACKUP_AT, value).apply()
@@ -97,5 +102,6 @@ class Session(context: Context) {
         const val KEY_APPS_BACKUP_SUMMARY = "apps_backup_summary"
         const val KEY_RESTORE_PENDING = "restore_pending"
         const val KEY_APPS_BACKUP_ERROR = "apps_backup_error"
+        const val KEY_NOTIFIED_UPDATE = "notified_update_version"
     }
 }

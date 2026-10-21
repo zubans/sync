@@ -175,6 +175,17 @@ data class AppVersionDto(
     val size: Long,
 )
 
+/** Активная сборка этого приложения на сервере (GET /api/app/version) — для обновления. */
+@Serializable
+data class ClientReleaseDto(
+    val versionCode: Int,
+    val versionName: String,
+    val sha256: String,
+    val size: Long,
+    /** Ссылка на эту сборку — для браузера и пересылки. */
+    val url: String,
+)
+
 @Serializable
 data class BackedUpApp(
     val packageName: String,
@@ -290,12 +301,26 @@ class Api(
      * (Range), до [DOWNLOAD_ATTEMPTS] попыток подряд без прогресса.
      * @param onProgress сколько байт файла уже на диске — вызывается по мере записи
      */
-    suspend fun downloadApk(sha256: String, target: java.io.File, onProgress: (Long) -> Unit = {}) = withContext(Dispatchers.IO) {
+    suspend fun downloadApk(sha256: String, target: java.io.File, onProgress: (Long) -> Unit = {}) =
+        download("/api/apk/$sha256", auth = true, target, onProgress)
+
+    /** Активная версия приложения на сервере; null — опубликованных версий нет. Без входа. */
+    suspend fun appVersion(): ClientReleaseDto? = try {
+        execute(request("/api/app/version", auth = false).get().build())
+    } catch (e: ApiException) {
+        if (e.code == 404) null else throw e
+    }
+
+    /** Скачивает сборку приложения с докачкой — как [downloadApk]. Без входа. */
+    suspend fun downloadAppUpdate(versionCode: Int, target: java.io.File, onProgress: (Long) -> Unit = {}) =
+        download("/api/app/download/$versionCode", auth = false, target, onProgress)
+
+    private suspend fun download(path: String, auth: Boolean, target: java.io.File, onProgress: (Long) -> Unit) = withContext(Dispatchers.IO) {
         var failures = 0
         while (true) {
             val before = target.length()
             try {
-                downloadFrom(sha256, target, onProgress)
+                downloadFrom(path, auth, target, onProgress)
                 return@withContext
             } catch (e: java.io.IOException) {
                 if (e is ApiException || e is UnauthorizedException) throw e
@@ -305,9 +330,9 @@ class Api(
         }
     }
 
-    private fun downloadFrom(sha256: String, target: java.io.File, onProgress: (Long) -> Unit) {
+    private fun downloadFrom(path: String, auth: Boolean, target: java.io.File, onProgress: (Long) -> Unit) {
         val offset = if (target.exists()) target.length() else 0L
-        val builder = request("/api/apk/$sha256", auth = true).get()
+        val builder = request(path, auth).get()
         if (offset > 0) builder.header("Range", "bytes=$offset-")
         client.newCall(builder.build()).execute().use { response ->
             if (response.code == 401) throw UnauthorizedException()
