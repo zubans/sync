@@ -66,9 +66,15 @@ android {
         compose = true
         buildConfig = true
     }
+    packaging {
+        // Нативные библиотеки — сжатыми: движок CEP (libgojni.so) несжатым весит ~50 МБ, сжатым — ~18 МБ.
+        jniLibs { useLegacyPackaging = true }
+    }
 }
 
 dependencies {
+    // Движок CEP (цепочки VPN): Go + sing-box, собирается make cep-engine из android/cep-engine
+    implementation(files("libs/cepcore.aar"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

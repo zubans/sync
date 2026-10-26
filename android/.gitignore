@@ -4,3 +4,6 @@ build/
 .idea/
 *.iml
 .kotlin/
+# Движок CEP собирается из cep-engine/ (make cep-engine)
+/app/libs/cepcore.aar
+/app/libs/cepcore-sources.jar
