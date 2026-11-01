@@ -22,9 +22,11 @@ final readonly class NewsDigestPeriod
     ) {
     }
 
+    /** Сколько прошлых часов дописывать, если их сводка не вышла (сбой модели): дальше она уже не свежая. */
+    public const CATCH_UP_HOURS = 3;
+
     /**
-     * Периоды, сводка за которые уже должна быть. Пропущенные раньше часы не догоняются:
-     * часовая сводка нужна, пока она свежая.
+     * Периоды, сводка за которые уже должна быть: последний полный час и сутки.
      *
      * @return list<self>
      */
@@ -41,6 +43,25 @@ final readonly class NewsDigestPeriod
             new self(NewsDigest::PERIOD_HOUR, $hourEnd->modify('-1 hour'), $hourEnd),
             new self(NewsDigest::PERIOD_DAY, $dayEnd->modify('-1 day'), $dayEnd),
         ];
+    }
+
+    /**
+     * Часы перед последним полным, за которые сводка ещё нужна, если её нет: модель бывает недоступна
+     * («No capacity available», 503) — тогда час дописывается на следующих проходах. Свежие первыми.
+     *
+     * @return list<self>
+     */
+    public static function catchUp(\DateTimeImmutable $now): array
+    {
+        $now = $now->setTimezone(new \DateTimeZone('UTC'));
+        $hourEnd = $now->setTime((int) $now->format('H'), 0);
+        $periods = [];
+        for ($i = 1; $i < self::CATCH_UP_HOURS; ++$i) {
+            $end = $hourEnd->modify("-$i hour");
+            $periods[] = new self(NewsDigest::PERIOD_HOUR, $end->modify('-1 hour'), $end);
+        }
+
+        return $periods;
     }
 
     /** Ключ новости-сводки: «hour:2026-10-11T14:00Z». */

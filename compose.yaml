@@ -58,11 +58,21 @@ services:
       # Модели agy для сводок — названия из `agy models`; пусто — модель по умолчанию.
       NEWS_DIGEST_MODEL_HOUR: ${NEWS_DIGEST_MODEL_HOUR:-}
       NEWS_DIGEST_MODEL_DAY: ${NEWS_DIGEST_MODEL_DAY:-}
+      # Запасные модели agy по порядку, через запятую (например, другие уровни Gemini): кончилась модель шага — запрос идёт
+      # следующей того же аккаунта. По умолчанию — нет: только Gemini (решение владельца 16.10.2026; Claude и GPT-OSS
+      # через agy делят одну недельную квоту и хуже держат формат ответа).
+      NEWS_AGY_FALLBACK_MODELS: ${NEWS_AGY_FALLBACK_MODELS-}
       # Модель agy для анализа инструментов Мосбиржи; пусто — модель по умолчанию с --effort medium.
       MARKET_ANALYSIS_MODEL: ${MARKET_ANALYSIS_MODEL:-}
       # Векторы новостей для сюжетных линий: Ollama с qwen3-embedding на машине с видеокартой — та же, что у KB.
       NEWS_EMBEDDINGS_URL: ${NEWS_EMBEDDINGS_URL:-http://192.168.1.133:11434}
       NEWS_EMBEDDINGS_MODEL: ${NEWS_EMBEDDINGS_MODEL:-qwen3-embedding:4b}
+      # gemini — Gemini API (ключ из Google AI Studio в NEWS_EMBEDDINGS_KEY, модель gemini-embedding-001), ollama — машина KB.
+      NEWS_EMBEDDINGS_PROVIDER: ${NEWS_EMBEDDINGS_PROVIDER:-ollama}
+      NEWS_EMBEDDINGS_KEY: ${NEWS_EMBEDDINGS_KEY:-}
+      # Пороги сюжетов под модель векторов; пусто — по умолчанию для провайдера. Подбор — make storyline-tune.
+      NEWS_STORYLINE_THRESHOLD: ${NEWS_STORYLINE_THRESHOLD:-}
+      NEWS_STORYLINE_MERGE: ${NEWS_STORYLINE_MERGE:-}
     volumes:
       - agy_data:/app/var/agy
     command:
@@ -84,6 +94,21 @@ services:
           sleep 300
         done
     restart: unless-stopped
+
+  # Перевод статей по кнопке «Перевести» на планшете и в виджете — приоритетная очередь: проверяется каждые 5 секунд,
+  # не дожидаясь пятиминутного цикла news. Тот же образ, переменные и вход в agy (аккаунты и их отдых — общие).
+  translate:
+    extends: news
+    command:
+      - sh
+      - -c
+      - |
+        while :; do
+          if php bin/console doctrine:migrations:up-to-date -q; then
+            php bin/console app:news:translate-requested --no-interaction
+          fi
+          sleep 5
+        done
 
   # Резервные копии на Яндекс.Диск и шару в локальной сети (схема — как у бекапа KB): не работает постоянно, запускается make backup
   # и make backup-db из cron хоста. Папка проекта, хранилище и rclone.conf пользователя хоста (remote yandex, общий
@@ -108,6 +133,27 @@ services:
     depends_on:
       - database
 
+  tunnel:
+    build:
+      context: ./tunnel-server
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    environment:
+      ARGON_MASTER_PASSWORD: ${ARGON_MASTER_PASSWORD:-change-me-master-password}
+      ARGON_LISTEN_INTERFACE: ${ARGON_LISTEN_INTERFACE:-}
+      ARGON_LISTEN_ADDR: 0.0.0.0:${ARGON_UDP_PORT:-51820}
+      ARGON_TUN_NAME: ${ARGON_TUN_NAME:-argon0}
+      ARGON_SUBNET: ${ARGON_SUBNET:-10.44.0.1/24}
+      ARGON_OUT_INTERFACE: ${ARGON_OUT_INTERFACE:-eth0}
+      ARGON_BACKEND_TARGET: ${ARGON_BACKEND_TARGET:-app:80}
+      ARGON_ENABLE_NAT: ${ARGON_ENABLE_NAT:-1}
+    ports:
+      - "${ARGON_UDP_PORT:-51820}:${ARGON_UDP_PORT:-51820}/udp"
+    restart: unless-stopped
 volumes:
   agy_data:
   database_data:

@@ -54,6 +54,15 @@ final class NewsDigestService
             }
             $report[$period->key()] = $this->build($source, $period, $existing[sha1($period->key())] ?? null);
         }
+        // Часы, сводка за которые не вышла из-за сбоя модели, — дописываются, пока свежие. Не переписываются.
+        foreach (NewsDigestPeriod::catchUp($now) as $period) {
+            // Тихий час (мало новостей) сводки не получает — его не трогаем: ни отчёта, ни отметки «успешно»
+            // в издании «Сводка», которая стёрла бы текст настоящей ошибки.
+            $quiet = \count($this->items->findSeenBetween($period->start, $period->end, self::MIN_HOURLY_NEWS)) < self::MIN_HOURLY_NEWS;
+            if (!$quiet && $this->items->findByKeys($source, [sha1($period->key())]) === []) {
+                $report[$period->key()] = $this->build($source, $period, null);
+            }
+        }
 
         return $report;
     }

@@ -195,4 +195,13 @@ class NewsTest {
 
         assertEquals(emptyList<MarketImpact>(), NewsFeed.item(dto).market)
     }
+
+    @Test
+    fun `article translation state comes from server and unknown values mean nothing to translate`() {
+        val dto = NewsItemDto(id = 1, source = "bbc", title = "Strike", link = "https://bbc.com/1", time = "2026-10-15T07:00:00+00:00", contentTranslation = "queued")
+        assertEquals(ContentTranslation.QUEUED, NewsFeed.item(dto).contentTranslation)
+        assertEquals(null, NewsFeed.item(dto.copy(contentTranslation = null)).contentTranslation)
+        assertEquals(null, NewsFeed.item(dto.copy(contentTranslation = "something-new")).contentTranslation)
+        assertEquals("с японского", NewsFeed.languageName("ja"))
+    }
 }

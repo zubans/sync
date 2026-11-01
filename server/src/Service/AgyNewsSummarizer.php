@@ -11,6 +11,11 @@ use Symfony\Component\Process\Process;
  * «Antigravity CLI (подписка)» в KB. Вход — один раз интерактивно (`make agy-login`), он хранится
  * в домашней папке agy (том `agy_data`). Каждая сводка — отдельный разговор.
  *
+ * Аккаунтов может быть несколько (`AgyAccounts`), и у каждой модели аккаунта своя квота: кончилась модель —
+ * запрос тут же повторяется следующей моделью из [fallbackModels] того же аккаунта, кончились все модели
+ * аккаунта (или вход, или отказ по региону) — следующим аккаунтом; исчерпанное до сброса не трогается. Исчерпаны все — ошибка сразу, без ожидания по 600 с
+ * на каждом шаге цикла (14.10.2026 такие ожидания остановили сводки и сюжеты на семь часов).
+ *
  * Собственные инструменты агента не нужны: агент получает новости в промпте, а настройки домашней
  * папки запрещают ему всё остальное (toolPermission: strict). Gemini всё равно тянется к ним
  * и заканчивает ход без ответа — тогда ход один раз повторяется в том же разговоре, как в KB.
@@ -21,15 +26,65 @@ final class AgyNewsSummarizer implements NewsSummarizer
     private const TIMEOUT = 600;
     private const RETRY = 'Собственные инструменты agy%s отклонены и не работают. Дай ответ текстом по уже переданным новостям — только JSON указанного вида.';
 
+    private readonly AgyAccounts $accounts;
+    /** @var list<string> запасные модели agy по порядку — их квота своя (`NEWS_AGY_FALLBACK_MODELS`) */
+    private readonly array $fallbackModels;
+
     public function __construct(
         #[Autowire('%env(resolve:NEWS_AGY_HOME)%')]
-        private readonly string $home,
+        string $home,
+        #[Autowire('%env(NEWS_AGY_FALLBACK_MODELS)%')]
+        string $fallbackModels = '',
     ) {
+        $this->accounts = new AgyAccounts($home);
+        $this->fallbackModels = array_values(array_filter(array_map('trim', explode(',', $fallbackModels)), static fn (string $m) => $m !== ''));
     }
 
     public function complete(string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string
     {
-        $this->prepareHome();
+        $models = [$model !== '' ? $model : null];
+        foreach ($this->fallbackModels as $fallback) {
+            if (!\in_array($fallback, $models, true)) {
+                $models[] = $fallback;
+            }
+        }
+        $last = null;
+        foreach ($this->accounts->available(time()) as $home) {
+            foreach ($models as $m) {
+                if (!$this->accounts->isModelFree($home, $m, time())) {
+                    continue;
+                }
+                try {
+                    return $this->completeWith($home, $prompt, $m, $effort, $schema);
+                } catch (\RuntimeException $e) {
+                    $message = $e->getMessage();
+                    $last = $e;
+                    if (AgyAccounts::isQuota($message)) {
+                        $this->accounts->markModelExhausted($home, $m, time(), AgyAccounts::resetIn($message));
+                        error_log(sprintf('agy: лимит модели «%s» у аккаунта %s — пробую следующую', $m ?? 'по умолчанию', basename($home)));
+                        continue;
+                    }
+                    [$reason, $rest] = match (true) {
+                        AgyAccounts::isIneligible($message) => ['Google не допускает к Antigravity аккаунт', AgyAccounts::INELIGIBLE_COOLDOWN],
+                        AgyAccounts::isAuthFailure($message) => ['не выполнен вход в аккаунт', AgyAccounts::AUTH_COOLDOWN],
+                        default => throw $e,
+                    };
+                    $this->accounts->markExhausted($home, time(), $rest);
+                    error_log(sprintf('agy: %s %s — перехожу к следующему аккаунту', $reason, basename($home)));
+                    continue 2;
+                }
+            }
+        }
+
+        throw new \RuntimeException(sprintf('agy: лимит исчерпан у всех аккаунтов (%d) и моделей (%s), ближайшее освобождение — %s UTC%s',
+            \count($this->accounts->all()), implode(', ', array_map(static fn (?string $m) => $m ?? 'по умолчанию', $models)),
+            gmdate('d.m H:i', $this->accounts->nextFreeFor($models)), $last !== null ? '. Последняя ошибка: '.$last->getMessage() : ''), 0, $last);
+    }
+
+    /** Запрос одним аккаунтом — его домашняя папка [home]. */
+    private function completeWith(string $home, string $prompt, ?string $model, ?string $effort, ?array $schema): string
+    {
+        $this->prepareHome($home);
         $base = ['agy', '--input-format', 'stream-json', '--output-format', 'stream-json'];
         if ($model !== null && $model !== '') {
             // Уровень уже в названии модели («Gemini 3.8 Flash (Medium)»): с --effort agy такой запуск отклоняет.
@@ -37,15 +92,25 @@ final class AgyNewsSummarizer implements NewsSummarizer
         } elseif ($effort !== null) {
             array_push($base, '--effort', $effort);
         }
-        if ($schema !== null) {
+        if ($schema !== null && self::schemaWorks($model)) {
             // agy сам добивается от модели итогового ответа по схеме — без пояснений вокруг JSON.
             array_push($base, '--json-schema', json_encode($schema, \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));
         }
 
-        $run = $this->run($base, $prompt);
+        $run = $this->run($home, $base, $prompt);
+        if ($model !== null && $model !== '' && $run['error'] !== null && self::unknownModel($run['error'])) {
+            // Google переименовывает и убирает модели («Gemini 3.1 Pro (High)» пропала 14.10.2026) — без модели
+            // сводка всё же выйдет. В журнал — чтобы модель в NEWS_DIGEST_MODEL_* заменили на актуальную.
+            error_log(sprintf('agy: модели «%s» больше нет, взята модель по умолчанию — замените её в .env (список: agy models)', $model));
+            $base = array_values(array_filter($base, static fn (string $a) => $a !== '--model' && $a !== $model));
+            if ($effort !== null) {
+                array_splice($base, 5, 0, ['--effort', $effort]);
+            }
+            $run = $this->run($home, $base, $prompt);
+        }
         if ($run['answer'] === '' && $run['conversation'] !== null && $run['error'] === null) {
             $tools = $run['tools'] !== [] ? ' ('.implode(', ', $run['tools']).')' : '';
-            $run = $this->run([...$base, '--conversation', $run['conversation']], sprintf(self::RETRY, $tools));
+            $run = $this->run($home, [...$base, '--conversation', $run['conversation']], sprintf(self::RETRY, $tools));
         }
         if ($run['error'] !== null) {
             throw new \RuntimeException('agy: '.$run['error'].'. Если не выполнен вход в аккаунт — make agy-login');
@@ -58,27 +123,46 @@ final class AgyNewsSummarizer implements NewsSummarizer
     }
 
     /**
+     * Схема ответа (`--json-schema`) работает у Gemini (и у модели по умолчанию — это Gemini). Claude через agy
+     * пишет ответ обычным текстом, а в `structured_output` кладёт отчёт «Перевод выполнен…» (15.10.2026: перевод
+     * статьи из 14 абзацев превратился в одну строку). Для остальных моделей схема не передаётся — JSON
+     * берётся из текста ответа: промпты требуют «только JSON», разборщики вырезают его от первой `{` до последней `}`.
+     */
+    public static function schemaWorks(?string $model): bool
+    {
+        return $model === null || $model === '' || str_starts_with(mb_strtolower($model), 'gemini');
+    }
+
+    /** agy не знает модель: «invalid model selection … is not recognized as a known model». */
+    public static function unknownModel(string $error): bool
+    {
+        return str_contains($error, 'invalid model selection') || str_contains($error, 'not recognized as a known model');
+    }
+
+    /**
      * Один запуск agy.
      *
      * @param list<string> $args
      *
      * @return array{answer: string, conversation: ?string, tools: list<string>, error: ?string, trace: string}
      */
-    private function run(array $args, string $text): array
+    private function run(string $home, array $args, string $text): array
     {
         $input = json_encode(['event' => 'user', 'message' => ['content' => $text]], \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR)."\n";
         // Рабочая папка — домашняя agy: агенту не нужны файлы сервера.
-        $process = new Process($args, $this->home, ['HOME' => $this->home], $input, self::TIMEOUT);
+        $process = new Process($args, $home, ['HOME' => $home], $input, self::TIMEOUT);
         try {
             $process->run();
         } catch (ProcessTimedOutException) {
-            throw new \RuntimeException(sprintf('agy: нет ответа за %d с', self::TIMEOUT));
+            // agy сам повторяет запрос после ответа о лимите — и может так не дождаться ответа вовсе.
+            $partial = $process->getOutput().$process->getErrorOutput();
+            throw new \RuntimeException(sprintf('agy: нет ответа за %d с%s', self::TIMEOUT, AgyAccounts::isQuota($partial) ? ' — лимит аккаунта (RESOURCE_EXHAUSTED)' : ''));
         }
         if ($process->getExitCode() === 127) {
             throw new \RuntimeException('agy не установлен в контейнере — пересоберите образ');
         }
         // Сырой вывод последнего запуска — для разбора сбоев: что именно прислал агент.
-        @file_put_contents($this->home.'/last-run.jsonl', $process->getOutput());
+        @file_put_contents($home.'/last-run.jsonl', $process->getOutput());
         $run = self::parse($process->getOutput());
         if ($run['answer'] === '' && $run['error'] === null) {
             $stderr = trim($process->getErrorOutput());
@@ -139,9 +223,9 @@ final class AgyNewsSummarizer implements NewsSummarizer
         return ['answer' => $answer, 'conversation' => $conversation, 'tools' => array_keys($tools), 'error' => $error, 'trace' => $trace];
     }
 
-    private function prepareHome(): void
+    private function prepareHome(string $home): void
     {
-        $file = $this->home.'/.gemini/antigravity-cli/settings.json';
+        $file = $home.'/.gemini/antigravity-cli/settings.json';
         $settings = is_file($file) ? json_decode((string) file_get_contents($file), true) : null;
         $settings = \is_array($settings) ? $settings : [];
         $wanted = ['toolPermission' => 'strict', 'allowNonWorkspaceAccess' => false];

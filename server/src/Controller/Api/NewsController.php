@@ -13,6 +13,7 @@ use App\Repository\NewsSourceRepository;
 use App\Repository\NewsStorylineRepository;
 use App\Service\EventTime;
 use App\Service\NewsArticleFetcher;
+use App\Service\NewsTranslator;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -99,8 +100,36 @@ final class NewsController extends AbstractController
             'content' => $translated !== [] ? $translated : $paragraphs,
             // Полный текст — скачанный со страницы или достаточно длинный из ленты (РБК), а не анонс.
             'fullText' => $item->getContentFetchedAt() !== null || mb_strlen($content) >= NewsArticleFetcher::FULL_TEXT || $item->getSource()->isDigest(),
+            // Перевод текста статьи: только по кнопке «Перевести» (POST …/translate).
+            'contentTranslation' => NewsTranslator::contentState($item),
         ] + ($translated !== [] ? ['originalContent' => $paragraphs] : [])
             + (isset($digest[$id]) ? ['digest' => $digest[$id]] : []));
+    }
+
+    /**
+     * Кнопка «Перевести» на экране статьи: статья — в приоритетную очередь перевода (её переводит отдельный
+     * быстрый цикл, сервис `translate`). Ответ — новость целиком, как `GET /{id}`, с `contentTranslation: queued`;
+     * клиент спрашивает новость снова, пока перевод не станет `done` или `failed`. Переведена — `200` сразу;
+     * переводить нечего (русское издание, сводка, нет полного текста) — `422`.
+     */
+    #[Route('/{id}/translate', name: 'api_news_translate', requirements: ['id' => '\\d+'], methods: ['POST'])]
+    public function translate(int $id, EntityManagerInterface $em): JsonResponse
+    {
+        $item = $this->items->find($id);
+        if ($item === null) {
+            return $this->json(['error' => 'Новость не найдена.'], Response::HTTP_NOT_FOUND);
+        }
+        $state = NewsTranslator::contentState($item);
+        if ($state === null || $state === 'unavailable') {
+            return $this->json(['error' => 'Переводить нечего: статья на русском или полного текста нет.'], Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
+        if ($state !== 'done' && $state !== 'queued') {
+            $item->requestContentTranslation(new \DateTimeImmutable('now', new \DateTimeZone('UTC')));
+            $em->flush();
+        }
+        $response = $this->item($id);
+
+        return $state === 'done' ? $response : $response->setStatusCode(Response::HTTP_ACCEPTED);
     }
 
     /**

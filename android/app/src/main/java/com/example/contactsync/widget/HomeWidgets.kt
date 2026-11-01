@@ -138,7 +138,12 @@ private fun AgendaWidgetRow(context: Context, row: AgendaRow) {
         GlanceModifier.fillMaxWidth().padding(vertical = 6.dp).clickable(actionStartActivity(CalendarActionActivity.openEvent(context, row))),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(GlanceModifier.width(4.dp).height(36.dp).background(Color(row.color or 0xFF000000.toInt())).cornerRadius(2.dp)) {}
+        // Одна полоска в цветах календарей события: из двух календарей — пополам, из трёх — на три части.
+        Column(GlanceModifier.width(4.dp).height(36.dp).cornerRadius(2.dp)) {
+            row.colors.forEach { color ->
+                Box(GlanceModifier.fillMaxWidth().defaultWeight().background(Color(color or 0xFF000000.toInt()))) {}
+            }
+        }
         Spacer(GlanceModifier.width(10.dp))
         Column(GlanceModifier.defaultWeight()) {
             Text(row.title.ifEmpty { "Без названия" }, style = TextStyle(color = Main, fontSize = 15.sp), maxLines = 1)

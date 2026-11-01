@@ -9,9 +9,10 @@ use Symfony\Component\DependencyInjection\Attribute\Autowire;
 
 /**
  * Перевод новостей изданий на других языках (CNN, BBC, Le Monde…) на русский — тем же agy, что пишет сводки.
- * Два шага, каждый догоняет своё, свежие новости первыми:
- * 1. заголовки с анонсами — пачкой в один запрос: лента и сюжеты нужны быстро;
- * 2. полные тексты — по статье, когда текст скачан; длинная статья — частями по границе абзаца.
+ * - Заголовки с анонсами — автоматически, пачкой в один запрос, свежие первыми: лента и сюжеты нужны быстро.
+ * - Полные тексты — только по просьбе читателя (кнопка «Перевести», [runRequested]) в отдельном быстром цикле:
+ *   автоматический перевод всех статей тратил квоту agy на тысячи статей, которые никто не открывал.
+ *   Длинная статья — частями по границе абзаца.
  *
  * Перевод хранится рядом с оригиналом (оригинал не меняется). Неудача не роняет проход. Модель ответила,
  * но перевода новости в ответе нет или он не годится — попытка засчитывается этому шагу (у заголовка и текста
@@ -28,7 +29,16 @@ final class NewsTranslator
      * вызов на статью (и больше у длинных), поэтому статей за проход немного.
      */
     public const HEADLINE_BATCH = 40;
+    /**
+     * Заголовки переводятся только у новостей за последние сутки (решение владельца 16.10.2026): после простоя agy
+     * копился хвост в тысячи заголовков старых новостей, которые уже никто не откроет, а квота уходила на них.
+     */
+    public const HEADLINE_WINDOW_HOURS = 24;
     public const ARTICLE_LIMIT = 3;
+    /** Статей за проход цикла `news` без просьбы читателя: 0 — автоматически статьи не переводятся. */
+    public const AUTO_ARTICLES = 0;
+    /** Статей по просьбам за один заход быстрого цикла. */
+    public const REQUESTED_BATCH = 2;
     /** Часть длинной статьи в одном запросе, символов: ответ модели не обрывается и не сокращается. */
     public const CHUNK_CHARS = 12000;
 
@@ -42,11 +52,12 @@ final class NewsTranslator
     }
 
     /** @return array{headlines: int, articles: int, failed: int, error: ?string} */
-    public function run(int $headlineLimit = self::HEADLINE_BATCH, int $articleLimit = self::ARTICLE_LIMIT): array
+    public function run(int $headlineLimit = self::HEADLINE_BATCH, int $articleLimit = self::ARTICLE_LIMIT, ?\DateTimeImmutable $now = null): array
     {
         $report = ['headlines' => 0, 'articles' => 0, 'failed' => 0, 'error' => null];
+        $since = ($now ?? new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->modify('-'.self::HEADLINE_WINDOW_HOURS.' hours');
         try {
-            $items = $this->items->findNeedingHeadlineTranslation(max(0, $headlineLimit), self::MAX_ATTEMPTS);
+            $items = $this->items->findNeedingHeadlineTranslation(max(0, $headlineLimit), self::MAX_ATTEMPTS, $since);
             foreach (array_chunk($items, self::HEADLINE_BATCH) as $batch) {
                 [$done, $failed, $error] = $this->translateHeadlines($batch);
                 $report['headlines'] += $done;
@@ -77,6 +88,64 @@ final class NewsTranslator
         }
 
         return $report;
+    }
+
+    /**
+     * Статьи по просьбам читателей — приоритетная очередь, её проверяет отдельный цикл каждые несколько секунд.
+     * Неудача засчитывается попыткой; после [MAX_ATTEMPTS] просьба снимается (клиент покажет «не удалось»
+     * и предложит попросить снова). agy недоступен — просьба остаётся до следующего захода.
+     *
+     * @return array{articles: int, failed: int, error: ?string}
+     */
+    public function runRequested(int $limit = self::REQUESTED_BATCH): array
+    {
+        $report = ['articles' => 0, 'failed' => 0, 'error' => null];
+        foreach ($this->items->findRequestedContentTranslation($limit) as $item) {
+            if (NewsItem::paragraphs($item->getContent()) === []) {
+                $item->dropTranslationRequest();
+                $this->em->flush();
+                continue;
+            }
+            try {
+                $this->translateArticle($item);
+                ++$report['articles'];
+            } catch (\UnexpectedValueException $e) {
+                $item->markContentTranslationAttempt();
+                if ($item->getContentTranslationAttempts() >= self::MAX_ATTEMPTS) {
+                    $item->dropTranslationRequest();
+                }
+                ++$report['failed'];
+                $report['error'] ??= $e->getMessage();
+            } catch (\RuntimeException $e) {
+                $report['error'] ??= $e->getMessage();
+                $this->em->flush();
+                break;
+            }
+            $this->em->flush();
+        }
+
+        return $report;
+    }
+
+    /**
+     * Состояние перевода текста статьи для клиента: `null` — переводить нечего (русское издание, сводка);
+     * `done`, `queued` (попросили, ждёт), `failed` (не удалось — можно попросить снова), `available` (можно попросить),
+     * `unavailable` (полного текста нет — переведены только заголовок и анонс).
+     */
+    public static function contentState(NewsItem $item): ?string
+    {
+        $source = $item->getSource();
+        if ($source->isDigest() || $source->getLanguage() === \App\Entity\NewsSource::LANGUAGE_RU) {
+            return null;
+        }
+
+        return match (true) {
+            $item->getTranslatedContent() !== null => 'done',
+            $item->getTranslationRequestedAt() !== null => 'queued',
+            NewsItem::paragraphs($item->getContent()) === [] => 'unavailable',
+            $item->getContentTranslationAttempts() >= self::MAX_ATTEMPTS => 'failed',
+            default => 'available',
+        };
     }
 
     /**

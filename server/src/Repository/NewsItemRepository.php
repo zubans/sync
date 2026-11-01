@@ -70,12 +70,14 @@ class NewsItemRepository extends ServiceEntityRepository
      *
      * @return list<NewsItem>
      */
-    public function findNeedingHeadlineTranslation(int $limit, int $maxAttempts): array
+    public function findNeedingHeadlineTranslation(int $limit, int $maxAttempts, \DateTimeImmutable $since): array
     {
         return $this->createQueryBuilder('n')
             ->join('n.source', 's')
             ->addSelect('s')
             ->where('s.format <> :digest AND s.language <> :ru AND n.translatedTitle IS NULL AND n.headlineTranslationAttempts < :attempts')
+            ->andWhere('n.sortAt >= :since')
+            ->setParameter('since', $since)
             ->setParameter('digest', NewsSource::FORMAT_DIGEST)
             ->setParameter('ru', NewsSource::LANGUAGE_RU)
             ->setParameter('attempts', $maxAttempts)
@@ -109,17 +111,51 @@ class NewsItemRepository extends ServiceEntityRepository
     }
 
     /**
-     * Новости без вектора — свежие первыми, без сводок: сюжетные линии нужны для актуальных новостей,
-     * а архив досчитается следующими проходами.
+     * Статьи, которые читатели попросили перевести, — в порядке просьб.
      *
      * @return list<NewsItem>
      */
-    public function findNeedingEmbedding(int $limit): array
+    public function findRequestedContentTranslation(int $limit): array
     {
         return $this->createQueryBuilder('n')
             ->join('n.source', 's')
-            ->where('n.embedding IS NULL AND s.format <> :digest')
+            ->addSelect('s')
+            ->where('n.translationRequestedAt IS NOT NULL AND n.translatedContent IS NULL')
+            ->orderBy('n.translationRequestedAt', 'ASC')
+            ->setMaxResults($limit)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Новости с вектором с момента [since] — по времени, для подбора порога сюжетов.
+     *
+     * @return list<NewsItem>
+     */
+    public function findEmbeddedSince(\DateTimeImmutable $since): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')->addSelect('s')
+            ->where('n.embedding IS NOT NULL AND n.sortAt >= :since')
+            ->setParameter('since', $since)
+            ->orderBy('n.sortAt', 'ASC')
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Новости без вектора с момента [since] — свежие первыми, без сводок: сюжетные линии нужны для
+     * актуальных новостей.
+     *
+     * @return list<NewsItem>
+     */
+    public function findNeedingEmbedding(int $limit, \DateTimeImmutable $since): array
+    {
+        return $this->createQueryBuilder('n')
+            ->join('n.source', 's')
+            ->where('n.embedding IS NULL AND s.format <> :digest AND n.sortAt >= :since')
             ->setParameter('digest', NewsSource::FORMAT_DIGEST)
+            ->setParameter('since', $since)
             ->orderBy('n.sortAt', 'DESC')
             ->setMaxResults($limit)
             ->getQuery()

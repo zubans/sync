@@ -28,7 +28,7 @@ final class NewsTranslateCommand extends Command
     {
         $this
             ->addOption('limit', null, InputOption::VALUE_REQUIRED, 'Сколько заголовков перевести за проход', (string) NewsTranslator::HEADLINE_BATCH)
-            ->addOption('articles', null, InputOption::VALUE_REQUIRED, 'Сколько полных текстов перевести за проход', (string) NewsTranslator::ARTICLE_LIMIT);
+            ->addOption('articles', null, InputOption::VALUE_REQUIRED, 'Сколько полных текстов перевести за проход без просьбы читателя (по умолчанию — ни одного: статьи переводятся по кнопке)', (string) NewsTranslator::AUTO_ARTICLES);
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int

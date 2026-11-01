@@ -6,10 +6,13 @@ APP       := $(COMPOSE) exec app
 APP_T     := $(COMPOSE) exec -T app
 HTTP_PORT ?= $(shell grep -s '^HTTP_PORT=' .env | cut -d= -f2)
 HTTP_PORT := $(or $(HTTP_PORT),8001)
-APK       := android/app/build/outputs/apk/debug/app-debug.apk
+APK        := android/app/build/outputs/apk/debug/app-debug.apk
+TUNNEL_APK := android/tunnel/build/outputs/apk/debug/tunnel-debug.apk
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate analyze market advice digest digest-preview agy-login test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse release deploy
+# Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
+AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk install-apk install-tunnel-apk reverse release deploy
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -18,8 +21,8 @@ help: ## Список команд
 
 init: ## Создать .env со случайными секретами (один раз)
 	@if [ -f .env ]; then echo ".env уже есть — не трогаю"; else \
-		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nHTTP_PORT=8001\n' \
-			"$$(openssl rand -hex 32)" "$$(openssl rand -hex 24)" > .env && \
+		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nARGON_MASTER_PASSWORD=%s\nHTTP_PORT=8001\nARGON_UDP_PORT=51820\n' \
+			"$$(openssl rand -hex 32)" "$$(openssl rand -hex 24)" "$$(openssl rand -hex 16)" > .env && \
 		echo "Создан .env (секреты сгенерированы)"; fi
 
 build: init ## Собрать образ сервера
@@ -69,11 +72,20 @@ news: ## Собрать новости сейчас, не дожидаясь к�
 articles: ## Скачать полные тексты новостей со страниц изданий сейчас (LIMIT=30 за проход)
 	$(COMPOSE) exec news php bin/console app:news:articles --limit=$(or $(LIMIT),30)
 
-translate: ## Перевести новости изданий на других языках сейчас (LIMIT=40 заголовков, ARTICLES=3 статьи за проход)
-	$(COMPOSE) exec news php bin/console app:news:translate --limit=$(or $(LIMIT),40) --articles=$(or $(ARTICLES),3)
+translate: ## Перевести заголовки и анонсы новостей на других языках сейчас (LIMIT=40; статьи — только по кнопке, ARTICLES=N — принудительно)
+	$(COMPOSE) exec news php bin/console app:news:translate --limit=$(or $(LIMIT),40) --articles=$(or $(ARTICLES),0)
 
-analyze: ## Векторы новостей и сюжетные линии сейчас (нужен NEWS_EMBEDDINGS_URL)
-	$(COMPOSE) exec news php bin/console app:news:analyze
+translate-requested: ## Перевести статьи, которые попросили перевести на планшете или в виджете (обычно делает сервис translate)
+	$(COMPOSE) exec translate php bin/console app:news:translate-requested
+
+analyze: ## Векторы новостей и сюжетные линии сейчас (REBUILD=1 — заново векторы и сюжеты, REASSIGN=1 — заново только сюжеты)
+	$(COMPOSE) exec news php bin/console app:news:analyze $(if $(REBUILD),--rebuild) $(if $(REASSIGN),--reassign)
+
+embedding-compare: ## Сравнить векторы Gemini и Qwen на сюжетах часовых сводок (HOURS=48)
+	$(COMPOSE) exec news php bin/console app:news:embedding-compare --hours=$(or $(HOURS),48)
+
+storyline-tune: ## Подобрать порог сюжетов по готовым векторам (DAYS=2 — за сколько дней новости)
+	$(COMPOSE) exec news php bin/console app:news:storyline-tune --days=$(or $(DAYS),2)
 
 market: ## Последствия новостей для Мосбиржи сейчас: связь с инструментами (agy) и замер цены (ISS)
 	$(COMPOSE) exec news php bin/console app:news:market
@@ -81,14 +93,20 @@ market: ## Последствия новостей для Мосбиржи се�
 advice: ## Анализ инструментов виджета Мосбиржи сейчас (agy): новости, индикаторы, покупки → совет (LIMIT=3 за проход)
 	$(COMPOSE) exec news php bin/console app:market:analyze --limit=$(or $(LIMIT),3)
 
+agy-status: ## Состояние agy: аккаунты и их лимиты, модели, очередь новостей, последняя сводка и журнал за час
+	@$(COMPOSE) exec news php bin/console app:agy:status
+	@echo
+	@echo "Журнал за час (шаги с agy):"
+	@$(COMPOSE) logs --since 1h news translate 2>&1 | grep -E "agy:|перевод|сюжеты:|мосбиржа|анализ инструментов|hour:|day:" | tail -15 || true
+
 digest: ## Написать сводки новостей за прошедший час и сутки, если их ещё нет (REBUILD=1 — переписать)
 	$(COMPOSE) exec news php bin/console app:news:digest $(if $(REBUILD),--rebuild)
 
 digest-preview: ## Сводка за последние часы без сохранения: make digest-preview HOURS=3 MODEL="Gemini 3.1 Pro (High)"
 	$(COMPOSE) exec news php bin/console app:news:digest --preview --hours=$(or $(HOURS),1) $(if $(MODEL),--model="$(MODEL)")
 
-agy-login: ## Войти в аккаунт Google для сводок (Antigravity CLI): откройте ссылку, вставьте код, выйдите /quit
-	$(COMPOSE) exec -it -e HOME=/app/var/agy news sh -c "mkdir -p /app/var/agy && agy"
+agy-login: ## Войти в аккаунт Google для agy: откройте ссылку, вставьте код, выйдите /quit; запасной аккаунт — ACCOUNT=2
+	$(COMPOSE) exec -it -e HOME=$(AGY_HOME) news sh -c "mkdir -p $(AGY_HOME) && agy"
 
 test: ## Тесты сервера в контейнере
 	docker build --target dev -t contactsync-server-test ./server
@@ -140,8 +158,14 @@ android/local.properties:
 apk: android/local.properties ## Собрать debug APK (сервер по умолчанию — VPS); другой: make apk SERVER_URL=http://host:port
 	cd android && ./gradlew assembleDebug $(if $(SERVER_URL),-PserverUrl=$(SERVER_URL))
 
+tunnel-apk: android/local.properties ## Собрать debug APK клиента Argon Tunnel
+	cd android && ./gradlew :tunnel:assembleDebug
+
 install-apk: apk ## Поставить APK на подключённое устройство
 	adb install -r $(APK)
+
+install-tunnel-apk: tunnel-apk ## Поставить APK Argon Tunnel на подключённое устройство
+	adb install -r $(TUNNEL_APK)
 
 reverse: ## Пробросить порт сервера на устройство: в приложении адрес http://127.0.0.1:<порт>
 	adb reverse tcp:$(HTTP_PORT) tcp:$(HTTP_PORT)
@@ -174,3 +198,25 @@ deploy: ## Раскатка на сервере: git pull, make up и, если 
 	git pull --ff-only
 	$(MAKE) up
 	$(MAKE) release
+
+# --- Шлюз-надстройка Argon4 Tunnel (Ubuntu сервер) ---
+
+build-tunnel: ## Собрать бинарник серверного демона Argon4 для Linux/Ubuntu
+	cd tunnel-server && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o argon-tunnel-server ./cmd/argon-tunnel-server
+
+test-tunnel: ## Запустить unit-тесты протокола шифрования Argon4 в Docker
+	docker run --rm -v "$(PWD)/tunnel-server:/src" -w /src golang:1.23-alpine go test -v ./...
+
+e2e-tunnel: ## Сквозной тест Argon4 туннеля в Docker (Ubuntu TUN + NAT + HTTP в Contact Sync)
+	@PASS=$$(grep -s '^ARGON_MASTER_PASSWORD=' .env | cut -d= -f2); \
+	PASS=$${PASS:-change-me-master-password}; \
+	echo "==> 1. Проверка рукопожатия, отправки материала и маршрутизации через TUN в Contact Sync (10.44.0.1:80 -> app:80)"; \
+	docker run --rm --network sync_default --cap-add NET_ADMIN --device /dev/net/tun:/dev/net/tun \
+		--entrypoint /usr/local/bin/argon-tunnel-client sync-tunnel \
+		-server tunnel:51820 -interface eth0 -tun argon-c0 \
+		-password "$$PASS" \
+		-send-material "argon4-encrypted-material" \
+		-probe-url http://10.44.0.1:80/admin/login
+
+install-ubuntu-tunnel: ## Установить демон Argon4 Tunnel как systemd-сервис на Ubuntu (требует sudo)
+	sudo ./tunnel-server/ubuntu/install-ubuntu.sh

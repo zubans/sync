@@ -22,20 +22,38 @@ use Symfony\Component\DependencyInjection\Attribute\Autowire;
 final class NewsStorylineService
 {
     /**
-     * Порог сходства новости с центром линии. Подобран на 956 новостях 11–12.10.2026 (qwen3-embedding:4b,
-     * 1024): при 0,72 в одну линию слипаются разные новости о Трампе, при 0,75 русские новости
-     * об Эр-Рияде дробятся на две линии.
+     * Порог сходства новости с центром линии и порог кандидатов на склейку — свои у каждой модели векторов
+     * (`NEWS_STORYLINE_THRESHOLD`, `NEWS_STORYLINE_MERGE`; пусто — по умолчанию для провайдера).
+     * qwen3-embedding (Ollama): 0,74 — подобран на 956 новостях 11–12.10.2026: при 0,72 в одну линию слипаются
+     * разные новости о Трампе, при 0,75 русские новости об Эр-Рияде дробятся на две линии.
+     * gemini-embedding-001: шкала выше (одно событие ru/en — 0,90), значения — временные, до подбора
+     * командой `app:news:storyline-tune` на реальных новостях.
      */
     public const THRESHOLD = 0.74;
-    /** Линии с центрами ближе этого — кандидаты на склейку, решает модель. */
     public const MERGE_CANDIDATE = 0.65;
-    private const MERGE_PAIRS = 20;
+    public const GEMINI_THRESHOLD = 0.86;
+    public const GEMINI_MERGE_CANDIDATE = 0.80;
+    /** Пар на склейку за запрос: вместе с названиями ответ должен уложиться в лимит длины ответа модели. */
+    private const MERGE_PAIRS = 8;
     /** Линия, в которой не было новостей столько дней, закрыта: новость о том же через неделю — новая линия. */
     public const ACTIVE_DAYS = 3;
-    /** За проход цикла (5 минут): на процессоре 100 заголовков — пара минут, новостей в сутки ~1500. */
+    /** За проход цикла (5 минут): Ollama на процессоре — 100 заголовков за пару минут; Gemini API — 1000 за секунды. */
     private const EMBED_LIMIT = 100;
-    private const NAME_LIMIT = 40;
+    private const GEMINI_EMBED_LIMIT = 1000;
+    /**
+     * Бесплатный Gemini API — 100 текстов в минуту (`embed_content_free_tier_requests`, 16.10.2026): на отказ
+     * с повтором через минуту и меньше ждём и повторяем пачку, но всего не дольше 4 минут за проход —
+     * цикл `news` идёт раз в 5 минут. За проход выходит ~400 новостей при ~1500 в сутки. Повтор дальше
+     * минуты (суточный лимит) — проход заканчивается с ошибкой.
+     */
+    private const RATE_LIMIT_WAIT = 240;
+    private const RATE_LIMIT_RETRY_MAX = 65;
+    /** Линий на название за проход: при 40 ответ модели обрезался по лимиту длины (14.10.2026), остальные — следующими проходами. */
+    private const NAME_LIMIT = 12;
     private const HEADLINES_PER_LINE = 8;
+
+    /** @var \Closure(float): void пауза перед повтором при лимите провайдера; в тестах — без ожидания */
+    private readonly \Closure $sleep;
 
     public function __construct(
         private readonly EntityManagerInterface $em,
@@ -45,7 +63,71 @@ final class NewsStorylineService
         private readonly NewsSummarizer $summarizer,
         #[Autowire('%env(NEWS_DIGEST_MODEL_HOUR)%')]
         private readonly string $model = '',
+        #[Autowire('%env(NEWS_STORYLINE_THRESHOLD)%')]
+        private readonly string $threshold = '',
+        #[Autowire('%env(NEWS_STORYLINE_MERGE)%')]
+        private readonly string $mergeCandidate = '',
+        ?\Closure $sleep = null,
     ) {
+        $this->sleep = $sleep ?? static fn (float $seconds) => usleep((int) ($seconds * 1_000_000));
+    }
+
+    /** Порог привязки к линии для текущей модели векторов. */
+    public function threshold(): float
+    {
+        return $this->threshold !== '' ? (float) $this->threshold
+            : ($this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_THRESHOLD : self::THRESHOLD);
+    }
+
+    /**
+     * Жадная раскладка векторов по линиям, как в {@see assign()}, но без базы и окна активности — для подбора
+     * порога (`app:news:storyline-tune`) на новостях за день-два.
+     *
+     * @param list<list<float>> $vectors в порядке времени
+     *
+     * @return list<list<int>> номера векторов по линиям
+     */
+    public static function group(array $vectors, float $threshold): array
+    {
+        $groups = [];
+        $centroids = [];
+        foreach ($vectors as $n => $vector) {
+            $best = null;
+            $bestScore = $threshold;
+            foreach ($centroids as $i => $centroid) {
+                $score = NewsVector::similarity($vector, $centroid);
+                if ($score >= $bestScore) {
+                    [$best, $bestScore] = [$i, $score];
+                }
+            }
+            if ($best === null) {
+                $groups[] = [$n];
+                $centroids[] = $vector;
+            } else {
+                $centroids[$best] = NewsVector::addToCentroid($centroids[$best], \count($groups[$best]), $vector);
+                $groups[$best][] = $n;
+            }
+        }
+
+        return $groups;
+    }
+
+    private function mergeCandidate(): float
+    {
+        return $this->mergeCandidate !== '' ? (float) $this->mergeCandidate
+            : ($this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_MERGE_CANDIDATE : self::MERGE_CANDIDATE);
+    }
+
+    /**
+     * Пересобрать сюжеты: [embeddings] — заново посчитать и векторы (смена модели векторов), иначе только
+     * привязку и линии (смена порога). Названия линий модель даст заново следующими проходами.
+     */
+    public function reset(bool $embeddings): void
+    {
+        $db = $this->em->getConnection();
+        $db->executeStatement('UPDATE news_item SET storyline_id = NULL'.($embeddings ? ', embedding = NULL' : ''));
+        $db->executeStatement('DELETE FROM news_storyline');
+        $this->em->clear();
     }
 
     /** @return array{embedded: int, assigned: int, created: int, named: int, merged: int, error: ?string} */
@@ -53,34 +135,60 @@ final class NewsStorylineService
     {
         $report = ['embedded' => 0, 'assigned' => 0, 'created' => 0, 'named' => 0, 'merged' => 0, 'error' => null];
         if (!$this->embedder->isEnabled()) {
-            $report['error'] = 'NEWS_EMBEDDINGS_URL не задан — векторов и сюжетов нет';
+            $report['error'] = $this->embedder->missing().' — векторов и сюжетов нет';
 
             return $report;
         }
         try {
-            $report['embedded'] = $this->embedMissing();
+            [$report['embedded'], $report['error']] = $this->embedMissing($now);
             [$report['assigned'], $report['created']] = $this->assign();
             [$report['named'], $report['merged']] = $this->name($now);
         } catch (\Throwable $e) {
-            $report['error'] = $e->getMessage();
+            $report['error'] = ($report['error'] !== null ? $report['error'].'; ' : '').$e->getMessage();
         }
 
         return $report;
     }
 
-    private function embedMissing(): int
+    /**
+     * Векторы только новостям за последние [ACTIVE_DAYS] дней — старше в линии уже не попадут, а лимит
+     * бесплатного Gemini API — около тысячи текстов в сутки. Сохраняются пачками: отказ (лимит Gemini,
+     * недоступная Ollama) не теряет посчитанное, привязка идёт по нему.
+     *
+     * @return array{int, ?string} сколько новостей получили вектор и ошибка провайдера
+     */
+    private function embedMissing(\DateTimeImmutable $now): array
     {
-        $items = $this->items->findNeedingEmbedding(self::EMBED_LIMIT);
-        if ($items === []) {
-            return 0;
+        $items = $this->items->findNeedingEmbedding(
+            $this->embedder->provider() === NewsEmbedder::PROVIDER_GEMINI ? self::GEMINI_EMBED_LIMIT : self::EMBED_LIMIT,
+            $now->modify('-'.self::ACTIVE_DAYS.' days'),
+        );
+        $embedded = 0;
+        $waited = 0.0;
+        foreach (array_chunk($items, $this->embedder->batchSize()) as $batch) {
+            while (true) {
+                try {
+                    $vectors = $this->embedder->embed(array_map(self::embeddingText(...), $batch));
+                    break;
+                } catch (NewsEmbeddingRateLimit $e) {
+                    $pause = ($e->retryAfter ?? \INF) + 1;
+                    if ($e->retryAfter === null || $e->retryAfter > self::RATE_LIMIT_RETRY_MAX || $waited + $pause > self::RATE_LIMIT_WAIT) {
+                        return [$embedded, $e->getMessage()];
+                    }
+                    ($this->sleep)($pause);
+                    $waited += $pause;
+                } catch (\RuntimeException $e) {
+                    return [$embedded, $e->getMessage()];
+                }
+            }
+            foreach ($batch as $i => $item) {
+                $item->setEmbedding($vectors[$i]);
+            }
+            $this->em->flush();
+            $embedded += \count($batch);
         }
-        $vectors = $this->embedder->embed(array_map(self::text(...), $items));
-        foreach ($items as $i => $item) {
-            $item->setEmbedding($vectors[$i]);
-        }
-        $this->em->flush();
 
-        return \count($items);
+        return [$embedded, null];
     }
 
     /** @return array{int, int} сколько новостей привязано и сколько линий открыто */
@@ -102,7 +210,7 @@ final class NewsStorylineService
             $vector = (array) $item->getEmbedding();
             $at = EventTime::fromDb($item->getSortAt());
             $best = null;
-            $bestScore = self::THRESHOLD;
+            $bestScore = $this->threshold();
             foreach ($active as $i => $candidate) {
                 if (EventTime::fromDb($candidate['line']->getLastSeenAt()) < $at->modify('-'.self::ACTIVE_DAYS.' days')) {
                     continue;
@@ -199,7 +307,7 @@ final class NewsStorylineService
                     continue;
                 }
                 $score = NewsVector::similarity($centroid, $other->getCentroid());
-                if ($score >= self::MERGE_CANDIDATE) {
+                if ($score >= $this->mergeCandidate()) {
                     $seen[$key] = true;
                     $scored[] = [$score, $line, $other];
                 }
@@ -256,7 +364,7 @@ final class NewsStorylineService
     }
 
     /** Текст для вектора — заголовок и анонс: этого хватает, чтобы узнать событие; полный текст размывает вектор. */
-    private static function text(NewsItem $item): string
+    public static function embeddingText(NewsItem $item): string
     {
         return trim($item->getTitle().'. '.mb_substr((string) $item->getSummary(), 0, 300));
     }

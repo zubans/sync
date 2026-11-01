@@ -47,7 +47,28 @@ data class NewsItem(
     val original: NewsOriginal? = null,
     /** Инструменты Мосбиржи, которые новость может сдвинуть; пусто — последствий нет или новость ещё не разобрана. */
     val market: List<MarketImpact> = emptyList(),
+    /** Перевод текста статьи по кнопке «Перевести»; null — переводить нечего. */
+    val contentTranslation: ContentTranslation? = null,
 )
+
+/**
+ * Перевод текста статьи. Сервер сам переводит только заголовки и анонсы, статью — по просьбе читателя:
+ * [AVAILABLE] — можно попросить, [QUEUED] — попросили и ждём, [DONE] — переведена, [FAILED] — не удалось,
+ * можно попросить снова, [UNAVAILABLE] — полного текста нет.
+ */
+enum class ContentTranslation { AVAILABLE, QUEUED, DONE, FAILED, UNAVAILABLE;
+
+    companion object {
+        fun of(value: String?): ContentTranslation? = when (value) {
+            "available" -> AVAILABLE
+            "queued" -> QUEUED
+            "done" -> DONE
+            "failed" -> FAILED
+            "unavailable" -> UNAVAILABLE
+            else -> null
+        }
+    }
+}
 
 /**
  * Последствие новости для инструмента Мосбиржи. Прогноз с объяснением даёт модель на сервере, факт сервер
@@ -153,6 +174,7 @@ object NewsFeed {
             NewsOriginal(it.title, it.summary.orEmpty(), if (dto.fullText) dto.originalContent else emptyList())
         },
         market = dto.market.map(::marketImpact),
+        contentTranslation = ContentTranslation.of(dto.contentTranslation),
     )
 
     private fun marketImpact(dto: MarketImpactDto) = MarketImpact(
@@ -209,6 +231,11 @@ object NewsFeed {
         "en" -> "с английского"
         "fr" -> "с французского"
         "uk" -> "с украинского"
+        "ja" -> "с японского"
+        "zh" -> "с китайского"
+        "pt" -> "с португальского"
+        "fa" -> "с персидского"
+        "ar" -> "с арабского"
         else -> null
     }
 

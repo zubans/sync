@@ -258,6 +258,30 @@ final class NewsApiTest extends DatabaseWebTestCase
         self::assertSame([], $this->api('GET', '/api/news/'.$quiet->getId(), token: $token)['market']);
     }
 
+    public function testTranslateButtonQueuesArticle(): void
+    {
+        $token = $this->login($this->createUser('anna@example.com')->getEmail());
+        $bbc = (new NewsSource('bbc', 'BBC', 'https://bbc.example/feed'))->setLanguage(NewsSource::LANGUAGE_EN);
+        $rbc = new NewsSource('rbc', 'РБК', 'https://rbc.example/feed');
+        $this->em->persist($bbc);
+        $this->em->persist($rbc);
+        $foreign = $this->item($bbc, 'a', '2026-10-15 07:00:00');
+        $foreign->setFetchedContent("First paragraph.\n\nSecond paragraph.", new \DateTimeImmutable('2026-10-15 07:05:00'));
+        $russian = $this->item($rbc, 'b', '2026-10-15 07:00:00');
+        $this->em->flush();
+
+        self::assertSame('available', $this->api('GET', '/api/news/'.$foreign->getId(), token: $token)['contentTranslation']);
+
+        $queued = $this->api('POST', '/api/news/'.$foreign->getId().'/translate', token: $token);
+        self::assertResponseStatusCodeSame(202);
+        self::assertSame('queued', $queued['contentTranslation']);
+        self::assertSame(['First paragraph.', 'Second paragraph.'], $queued['content'], 'пока — оригинал');
+
+        $this->api('POST', '/api/news/'.$russian->getId().'/translate', token: $token);
+        self::assertResponseStatusCodeSame(422);
+        self::assertNull($this->api('GET', '/api/news/'.$russian->getId(), token: $token)['contentTranslation']);
+    }
+
     public function testUnknownSourceAndBadCursorAreRejected(): void
     {
         $token = $this->login($this->createUser('anna@example.com')->getEmail());

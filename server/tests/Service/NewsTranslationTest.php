@@ -6,6 +6,7 @@ use App\Entity\NewsItem;
 use App\Entity\NewsSource;
 use App\Repository\NewsItemRepository;
 use App\Service\NewsSummarizer;
+use App\Service\NewsTranslationPrompt;
 use App\Service\NewsTranslator;
 use App\Tests\DatabaseWebTestCase;
 
@@ -79,7 +80,7 @@ final class NewsTranslationTest extends DatabaseWebTestCase
     {
         $this->model->answers = $answers;
 
-        return (new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model))->run(NewsTranslator::HEADLINE_BATCH, $articles);
+        return (new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model))->run(NewsTranslator::HEADLINE_BATCH, $articles, new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')));
     }
 
     public function testForeignHeadlinesAreTranslatedInOneRequest(): void
@@ -276,5 +277,75 @@ final class NewsTranslationTest extends DatabaseWebTestCase
         self::assertNull($item->getTranslatedContent());
         self::assertSame(1, $item->getContentTranslationAttempts());
         self::assertSame(0, $item->getHeadlineTranslationAttempts(), 'отвергнутый текст не трогает попытки заголовка');
+    }
+
+    public function testArticlesAreTranslatedOnlyOnRequest(): void
+    {
+        $item = $this->news($this->bbc, 'Riyadh airport hit', 'Houthis strike again.');
+        $this->fetched($item, ['Houthis strike again.', 'The airport was closed.']);
+        $translator = new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model);
+
+        $this->model->answers = [self::headlines([[$item->getId(), 'Удар по аэропорту', 'Хуситы снова атакуют.']])];
+        $translator->run(NewsTranslator::HEADLINE_BATCH, NewsTranslator::AUTO_ARTICLES, new \DateTimeImmutable('2026-10-12 08:00:00', new \DateTimeZone('UTC')));
+        self::assertNull($item->getTranslatedContent(), 'без просьбы статья не переводится');
+        self::assertSame('available', NewsTranslator::contentState($item));
+        self::assertSame(['articles' => 0, 'failed' => 0, 'error' => null], $translator->runRequested(), 'просьб нет — к модели не ходим');
+
+        $item->requestContentTranslation(new \DateTimeImmutable('2026-10-15 10:00:00'));
+        $this->em->flush();
+        self::assertSame('queued', NewsTranslator::contentState($item));
+        $this->model->answers = [self::article('Удар по аэропорту', ['Хуситы снова атакуют.', 'Аэропорт закрыт.'])];
+
+        self::assertSame(['articles' => 1, 'failed' => 0, 'error' => null], $translator->runRequested());
+        self::assertSame("Хуситы снова атакуют.\n\nАэропорт закрыт.", $item->getTranslatedContent());
+        self::assertNull($item->getTranslationRequestedAt(), 'просьба выполнена');
+        self::assertSame('done', NewsTranslator::contentState($item));
+    }
+
+    public function testRequestedTranslationGivesUpAfterThreeFailuresAndWaitsForAgy(): void
+    {
+        $item = $this->news($this->bbc, 'Riyadh airport hit');
+        $this->fetched($item, ['Houthis strike again.', 'The airport was closed.']);
+        $item->requestContentTranslation(new \DateTimeImmutable('2026-10-15 10:00:00'));
+        $this->em->flush();
+        $translator = new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model);
+
+        $this->model->answers = [new \RuntimeException('agy: Individual quota reached')];
+        self::assertSame('agy: Individual quota reached', $translator->runRequested()['error']);
+        self::assertSame('queued', NewsTranslator::contentState($item), 'agy недоступен — просьба остаётся, попытка не засчитана');
+
+        foreach (range(1, 3) as $n) {
+            $this->model->answers = ['не JSON'];
+            $translator->runRequested();
+        }
+        self::assertSame('failed', NewsTranslator::contentState($item), 'после трёх неудач просьба снята');
+
+        $item->requestContentTranslation(new \DateTimeImmutable('2026-10-15 11:00:00'));
+        self::assertSame('queued', NewsTranslator::contentState($item), 'можно попросить снова — счётчик сброшен');
+    }
+
+    public function testParagraphsGluedIntoOneElementAreSplit(): void
+    {
+        $blank = NewsTranslationPrompt::parseArticle(json_encode(['paragraphs' => ["Первый.\n\nВторой.\n\nТретий."]], \JSON_UNESCAPED_UNICODE), 3);
+        self::assertSame(['Первый.', 'Второй.', 'Третий.'], $blank['paragraphs']);
+
+        $numbered = NewsTranslationPrompt::parseArticle(json_encode(['paragraphs' => ['[1] Первый. [2] Второй. [3] Третий.']], \JSON_UNESCAPED_UNICODE), 3);
+        self::assertSame(['Первый.', 'Второй.', 'Третий.'], $numbered['paragraphs']);
+
+        $this->expectException(\UnexpectedValueException::class);
+        NewsTranslationPrompt::parseArticle(json_encode(['paragraphs' => ['Короткий пересказ всей статьи.']], \JSON_UNESCAPED_UNICODE), 14);
+    }
+
+    public function testOnlyHeadlinesOfLastDayAreTranslated(): void
+    {
+        $fresh = $this->news($this->bbc, 'Fresh news', null, '2026-10-16 10:00:00');
+        $this->news($this->bbc, 'Old news', null, '2026-10-14 10:00:00');
+        $this->model->answers = [self::headlines([[$fresh->getId(), 'Свежая новость', '']])];
+
+        $result = (new NewsTranslator($this->em, static::getContainer()->get(NewsItemRepository::class), $this->model))
+            ->run(NewsTranslator::HEADLINE_BATCH, 0, new \DateTimeImmutable('2026-10-16 12:00:00', new \DateTimeZone('UTC')));
+
+        self::assertSame(1, $result['headlines']);
+        self::assertStringNotContainsString('Old news', $this->model->prompts[0], 'старше суток — не переводится');
     }
 }
