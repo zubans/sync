@@ -75,6 +75,7 @@ final class DashboardController extends AbstractDashboardController
         yield MenuItem::linkTo(FamilyCrudController::class, 'Семьи', 'fa fa-people-group');
         yield MenuItem::linkTo(DeviceCrudController::class, 'Устройства', 'fa fa-mobile-screen');
         yield MenuItem::linkTo(GoogleAccountCrudController::class, 'Google-аккаунты', 'fa-brands fa-google');
+        yield MenuItem::linkTo(BrowsingVisitCrudController::class, 'История браузеров', 'fa fa-clock-rotate-left');
 
         yield MenuItem::section('Клиент');
         yield MenuItem::linkTo(AppReleaseCrudController::class, 'Версии приложения', 'fa fa-mobile-arrow-down');

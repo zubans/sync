@@ -101,6 +101,23 @@ data class ContactsResponse(val contacts: List<ServerContact>)
 @Serializable
 data class FamilyContactsResponse(val family: FamilyDto? = null, val contacts: List<ServerContact>)
 
+// --- История браузеров ---
+
+@Serializable
+data class BrowsingVisitUpload(
+    val url: String,
+    val title: String? = null,
+    val browser: String? = null,
+    /** Время посещения, миллисекунды Unix. */
+    val visitedAt: Long,
+)
+
+@Serializable
+data class BrowsingRequest(val device: DeviceDto, val visits: List<BrowsingVisitUpload>)
+
+@Serializable
+data class BrowsingResult(val saved: Int = 0)
+
 /** Сервер не принял токен: нужно войти заново. */
 class UnauthorizedException : IOException("Сессия истекла, войдите заново")
 
@@ -247,6 +264,9 @@ class Api(
     }
 
     suspend fun familyContacts(): FamilyContactsResponse = get("/api/family/contacts")
+
+    suspend fun uploadBrowsing(request: BrowsingRequest): BrowsingResult =
+        post("/api/browsing", json.encodeToString(request))
 
     /** null — хранилище ещё не создано. */
     override suspend fun vault(): VaultKeyDto? = try {

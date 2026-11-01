@@ -15,7 +15,9 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.contactsync.App
 import com.example.contactsync.kb.KbViewModel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 
 /**
  * Главный экран планшета (HOME): часы, погода, Мосбиржа, события, база знаний и приложения.
@@ -29,6 +31,9 @@ class LauncherActivity : ComponentActivity() {
     /** «Домой», нажатое на самом главном экране, — вернуться на первый экран. */
     private val homePressed = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
+    /** Открыть все приложения: щипок тремя пальцами в другом приложении. Ждёт, пока экран соберётся. */
+    private val openApps = Channel<Unit>(Channel.CONFLATED)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
@@ -37,18 +42,22 @@ class LauncherActivity : ComponentActivity() {
         )
         // «Назад» на главном экране уводить некуда; экраны и шторка обрабатывают его сами.
         onBackPressedDispatcher.addCallback(this) {}
+        if (intent?.action == ACTION_OPEN_APPS) openApps.trySend(Unit)
+        val openAppsRequests = openApps.receiveAsFlow()
         setContent {
             val state by vm.state.collectAsStateWithLifecycle()
             val kb by kbVm.state.collectAsStateWithLifecycle()
             val pager = rememberPagerState(pageCount = { 3 })
             LaunchedEffect(Unit) { homePressed.collect { pager.animateScrollToPage(0) } }
-            LauncherScreen(state, vm, kb, kbVm, kbCookies = { (application as App).kbSession.cookieHeaders() }, pager = pager)
+            LauncherScreen(state, vm, kb, kbVm, kbCookies = { (application as App).kbSession.cookieHeaders() }, pager = pager,
+                openApps = openAppsRequests)
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.hasCategory(Intent.CATEGORY_HOME)) homePressed.tryEmit(Unit)
+        if (intent.action == ACTION_OPEN_APPS) openApps.trySend(Unit)
     }
 
     override fun onResume() {
@@ -64,5 +73,9 @@ class LauncherActivity : ComponentActivity() {
         NavBarService.launcherVisible.value = false
         vm.onPause()
         kbVm.onPause()
+    }
+
+    companion object {
+        const val ACTION_OPEN_APPS = "com.example.contactsync.action.OPEN_APPS"
     }
 }
