@@ -133,6 +133,27 @@ services:
     depends_on:
       - database
 
+  tunnel:
+    build:
+      context: ./tunnel-server
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    environment:
+      ARGON_MASTER_PASSWORD: ${ARGON_MASTER_PASSWORD:-change-me-master-password}
+      ARGON_LISTEN_INTERFACE: ${ARGON_LISTEN_INTERFACE:-}
+      ARGON_LISTEN_ADDR: 0.0.0.0:${ARGON_UDP_PORT:-51820}
+      ARGON_TUN_NAME: ${ARGON_TUN_NAME:-argon0}
+      ARGON_SUBNET: ${ARGON_SUBNET:-10.44.0.1/24}
+      ARGON_OUT_INTERFACE: ${ARGON_OUT_INTERFACE:-eth0}
+      ARGON_BACKEND_TARGET: ${ARGON_BACKEND_TARGET:-app:80}
+      ARGON_ENABLE_NAT: ${ARGON_ENABLE_NAT:-1}
+    ports:
+      - "${ARGON_UDP_PORT:-51820}:${ARGON_UDP_PORT:-51820}/udp"
+    restart: unless-stopped
 volumes:
   agy_data:
   database_data:

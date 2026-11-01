@@ -6,12 +6,13 @@ APP       := $(COMPOSE) exec app
 APP_T     := $(COMPOSE) exec -T app
 HTTP_PORT ?= $(shell grep -s '^HTTP_PORT=' .env | cut -d= -f2)
 HTTP_PORT := $(or $(HTTP_PORT),8001)
-APK       := android/app/build/outputs/apk/debug/app-debug.apk
+APK        := android/app/build/outputs/apk/debug/app-debug.apk
+TUNNEL_APK := android/tunnel/build/outputs/apk/debug/tunnel-debug.apk
 
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk install-apk reverse release deploy
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk install-apk install-tunnel-apk reverse release deploy
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -20,8 +21,8 @@ help: ## Список команд
 
 init: ## Создать .env со случайными секретами (один раз)
 	@if [ -f .env ]; then echo ".env уже есть — не трогаю"; else \
-		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nHTTP_PORT=8001\n' \
-			"$$(openssl rand -hex 32)" "$$(openssl rand -hex 24)" > .env && \
+		printf 'APP_SECRET=%s\nPOSTGRES_PASSWORD=%s\nARGON_MASTER_PASSWORD=%s\nHTTP_PORT=8001\nARGON_UDP_PORT=51820\n' \
+			"$$(openssl rand -hex 32)" "$$(openssl rand -hex 24)" "$$(openssl rand -hex 16)" > .env && \
 		echo "Создан .env (секреты сгенерированы)"; fi
 
 build: init ## Собрать образ сервера
@@ -157,8 +158,14 @@ android/local.properties:
 apk: android/local.properties ## Собрать debug APK (сервер по умолчанию — VPS); другой: make apk SERVER_URL=http://host:port
 	cd android && ./gradlew assembleDebug $(if $(SERVER_URL),-PserverUrl=$(SERVER_URL))
 
+tunnel-apk: android/local.properties ## Собрать debug APK клиента Argon Tunnel
+	cd android && ./gradlew :tunnel:assembleDebug
+
 install-apk: apk ## Поставить APK на подключённое устройство
 	adb install -r $(APK)
+
+install-tunnel-apk: tunnel-apk ## Поставить APK Argon Tunnel на подключённое устройство
+	adb install -r $(TUNNEL_APK)
 
 reverse: ## Пробросить порт сервера на устройство: в приложении адрес http://127.0.0.1:<порт>
 	adb reverse tcp:$(HTTP_PORT) tcp:$(HTTP_PORT)
@@ -191,3 +198,25 @@ deploy: ## Раскатка на сервере: git pull, make up и, если 
 	git pull --ff-only
 	$(MAKE) up
 	$(MAKE) release
+
+# --- Шлюз-надстройка Argon4 Tunnel (Ubuntu сервер) ---
+
+build-tunnel: ## Собрать бинарник серверного демона Argon4 для Linux/Ubuntu
+	cd tunnel-server && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o argon-tunnel-server ./cmd/argon-tunnel-server
+
+test-tunnel: ## Запустить unit-тесты протокола шифрования Argon4 в Docker
+	docker run --rm -v "$(PWD)/tunnel-server:/src" -w /src golang:1.23-alpine go test -v ./...
+
+e2e-tunnel: ## Сквозной тест Argon4 туннеля в Docker (Ubuntu TUN + NAT + HTTP в Contact Sync)
+	@PASS=$$(grep -s '^ARGON_MASTER_PASSWORD=' .env | cut -d= -f2); \
+	PASS=$${PASS:-change-me-master-password}; \
+	echo "==> 1. Проверка рукопожатия, отправки материала и маршрутизации через TUN в Contact Sync (10.44.0.1:80 -> app:80)"; \
+	docker run --rm --network sync_default --cap-add NET_ADMIN --device /dev/net/tun:/dev/net/tun \
+		--entrypoint /usr/local/bin/argon-tunnel-client sync-tunnel \
+		-server tunnel:51820 -interface eth0 -tun argon-c0 \
+		-password "$$PASS" \
+		-send-material "argon4-encrypted-material" \
+		-probe-url http://10.44.0.1:80/admin/login
+
+install-ubuntu-tunnel: ## Установить демон Argon4 Tunnel как systemd-сервис на Ubuntu (требует sudo)
+	sudo ./tunnel-server/ubuntu/install-ubuntu.sh

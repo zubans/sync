@@ -3,9 +3,10 @@
 Клиент-серверное приложение для переезда на новый телефон. Android-клиент сохраняет на сервере (Symfony) контакты, пароли и установленные приложения, а на новом телефоне возвращает их обратно. Общие контакты семьи ставятся на новые устройства членов семьи. Администратор управляет пользователями и семьями через веб-админку.
 
 ```
-android/   Android-клиент (Kotlin, Jetpack Compose, WorkManager, OkHttp, Autofill Framework)
-server/    API и админка (PHP 8.4+, Symfony 7.4, Doctrine ORM, EasyAdmin 5)
-docs/      Проектные документы
+android/        Android-клиент Contact Sync и отдельное приложение-туннель Argon Tunnel (:app, :tunnel)
+server/         API и админка (PHP 8.4+, Symfony 7.4, Doctrine ORM, EasyAdmin 5)
+tunnel-server/  Серверный демон шифрованного туннеля Argon4 для Ubuntu (Go, Argon2id + AES-256-GCM, TUN/NAT)
+docs/           Проектные документы
 ```
 
 ## Возможности
@@ -267,4 +268,5 @@ Unit-тесты (сопоставление контактов, шифрован
 - [Файловый менеджер](docs/files.md)
 - [Новости](docs/news.md)
 - [Мосбиржа: анализ инструментов и покупки](docs/market.md)
+- [Надстройка протокола обмена данными Argon4 Tunnel (Argon2id + AES-256-GCM)](docs/argon-tunnel.md)
 - [История развития проекта: презентация по этапам](docs/history.md)
