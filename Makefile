@@ -12,7 +12,7 @@ TUNNEL_APK := android/tunnel/build/outputs/apk/debug/tunnel-debug.apk
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk install-apk install-tunnel-apk reverse release deploy
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk cep-engine install-apk install-tunnel-apk reverse release deploy
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -155,11 +155,20 @@ android/local.properties:
 	@test -d "$(ANDROID_SDK)" || { echo "Android SDK не найден в $(ANDROID_SDK) — укажите ANDROID_SDK=/путь/к/sdk"; exit 1; }
 	echo "sdk.dir=$(ANDROID_SDK)" > $@
 
-apk: android/local.properties ## Собрать debug APK (сервер по умолчанию — VPS); другой: make apk SERVER_URL=http://host:port
+CEP_AAR := android/app/libs/cepcore.aar
+
+apk: android/local.properties $(CEP_AAR) ## Собрать debug APK (сервер по умолчанию — VPS); другой: make apk SERVER_URL=http://host:port
 	cd android && ./gradlew assembleDebug $(if $(SERVER_URL),-PserverUrl=$(SERVER_URL))
 
 tunnel-apk: android/local.properties ## Собрать debug APK клиента Argon Tunnel
 	cd android && ./gradlew :tunnel:assembleDebug
+
+# Движок CEP пересобирается, только если менялись его исходники: сборка gomobile идёт минуты.
+$(CEP_AAR): $(wildcard android/cep-engine/*.go android/cep-engine/go.mod android/cep-engine/go.sum)
+	android/cep-engine/build.sh
+
+cep-engine: ## Пересобрать движок CEP (Go + sing-box → android/app/libs/cepcore.aar; нужны Go, NDK, gomobile)
+	android/cep-engine/build.sh
 
 install-apk: apk ## Поставить APK на подключённое устройство
 	adb install -r $(APK)
@@ -189,7 +198,7 @@ release: ## Собрать и опубликовать APK, если клиен�
 	docker run --rm --platform linux/amd64 --user "$$(id -u):$$(id -g)" \
 		-v "$(CURDIR):/src" -v "$(GRADLE_CACHE):/gradle" -v "$(KEYSTORE):/keystore/debug.keystore:ro" \
 		$(if $(wildcard android/local.properties),-v /dev/null:/src/android/local.properties:ro) \
-		$(BUILDER) ./gradlew --no-daemon --no-watch-fs -q assembleRelease -PversionCode=$$code -PsigningStoreFile=/keystore/debug.keystore && \
+		$(BUILDER) sh -c "cep-engine/build.sh && ./gradlew --no-daemon --no-watch-fs -q assembleRelease -PversionCode=$$code -PsigningStoreFile=/keystore/debug.keystore" && \
 	$(COMPOSE) cp android/app/build/outputs/apk/release/app-release.apk app:/tmp/contactsync.apk && \
 	$(APP_T) php bin/console app:release:publish /tmp/contactsync.apk --version-code=$$code --version-name=1.$$code --revision=$$rev && \
 	$(APP_T) rm -f /tmp/contactsync.apk
