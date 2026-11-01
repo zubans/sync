@@ -14,4 +14,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ContactSync"
-include(":app")
+include(":app", ":tunnel")

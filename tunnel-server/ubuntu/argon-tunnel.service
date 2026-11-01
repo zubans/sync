@@ -1,0 +1,16 @@
+[Unit]
+Description=Argon4 Encrypted Tunnel Server (Argon2id + AES-256-GCM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/argon-tunnel/server.env
+ExecStart=/usr/local/bin/argon-tunnel-server
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
