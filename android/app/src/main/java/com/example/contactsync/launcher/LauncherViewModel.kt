@@ -564,6 +564,7 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
             val self = getApplication<Application>().packageName
             val iconSize = (48 * getApplication<Application>().resources.displayMetrics.density).toInt()
             pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+                .filter { it.activityInfo.packageName !in HIDDEN_PACKAGES }
                 .map { info ->
                     LauncherApp(
                         // Главный экран приложения sync подписан понятнее, чем «Contact Sync»;
@@ -610,5 +611,11 @@ class LauncherViewModel(application: Application) : AndroidViewModel(application
         /** Анализ сервер пересчитывает не чаще раза в 5 минут — чаще спрашивать незачем. */
         const val INSIGHTS_TTL_MS = 5 * 60_000L
         const val INSTRUMENT_POLL_MS = 20_000L
+
+        /**
+         * Не показываем в шторке и доке. microG стоит на планшете только ради проверки лицензии
+         * купленных игр (Minecraft); его настройки открываются из «Настройки → Приложения».
+         */
+        val HIDDEN_PACKAGES = setOf("com.google.android.gms")
     }
 }

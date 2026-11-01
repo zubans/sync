@@ -3,6 +3,7 @@ package com.example.contactsync
 import android.app.Application
 import com.example.contactsync.apps.ApkBackup
 import com.example.contactsync.apps.ApkInstaller
+import com.example.contactsync.browsing.BrowsingStore
 import com.example.contactsync.calendar.CalendarAccount
 import com.example.contactsync.data.Api
 import com.example.contactsync.data.Session
@@ -82,5 +83,6 @@ class App : Application() {
         session.signOut()
         engine.clearLocalState()
         vault.clearLocal()
+        BrowsingStore(this).clear()
     }
 }

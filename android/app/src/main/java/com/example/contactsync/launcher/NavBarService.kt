@@ -1,6 +1,7 @@
 package com.example.contactsync.launcher
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
 import android.net.Uri
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -13,6 +14,8 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import com.example.contactsync.App
 import com.example.contactsync.R
+import com.example.contactsync.browsing.BrowserHistory
+import com.example.contactsync.browsing.BrowsingStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -30,13 +33,18 @@ import kotlinx.coroutines.withContext
  *
  * Ещё служба держит лампочку VPN в строке состояния — над всеми приложениями, как значки системы.
  * Значок уведомления для этого не годится: строка состояния красит его в один цвет.
+ *
+ * И служба ловит щипок тремя пальцами в любом приложении ([RootPinchWatcher]) — он открывает
+ * все приложения на главном экране, как Launchpad на macOS.
  */
 class NavBarService : AccessibilityService() {
 
     private var bar: View? = null
     private var lamp: View? = null
     private var placeJob: Job? = null
+    private var pinch: RootPinchWatcher? = null
     private val scope = MainScope()
+    private val browsing by lazy { BrowsingStore(this) }
 
     override fun onServiceConnected() {
         instance = this
@@ -54,6 +62,18 @@ class NavBarService : AccessibilityService() {
         lamp = dot
         placeLampSoon()
         scope.launch { watchVpn(dot) }
+
+        pinch = RootPinchWatcher(PinchDetector.MIN_SPREAD_DP * resources.displayMetrics.density) {
+            scope.launch { openApps() }
+        }.also { it.start() }
+    }
+
+    private fun openApps() {
+        startActivity(
+            Intent(this, LauncherActivity::class.java)
+                .setAction(LauncherActivity.ACTION_OPEN_APPS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
     }
 
     /**
@@ -135,6 +155,7 @@ class NavBarService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        captureBrowsing(event)
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) update()
         // Значки в строке состояния появляются и пропадают без смены окон — переставляем точку и по ним.
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || event.packageName == SYSTEM_UI) {
@@ -151,9 +172,22 @@ class NavBarService : AccessibilityService() {
         }
     }
 
+    /**
+     * Пишет адрес из строки браузера в очередь на выгрузку. Старую историю получить нельзя —
+     * пишутся только переходы, совершённые при включённой службе. Повторы отсекает [BrowsingStore].
+     */
+    private fun captureBrowsing(event: AccessibilityEvent) {
+        val pkg = event.packageName?.toString() ?: return
+        if (!BrowserHistory.isBrowser(pkg) || !(application as App).session.isLoggedIn) return
+        val url = BrowserHistory.urlFrom(rootInActiveWindow, pkg) ?: return
+        scope.launch(Dispatchers.IO) { browsing.record(url, null, pkg) }
+    }
+
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        pinch?.stop()
+        pinch = null
         bar?.let { getSystemService(WindowManager::class.java).removeView(it) }
         lamp?.let { getSystemService(WindowManager::class.java).removeView(it) }
         bar = null

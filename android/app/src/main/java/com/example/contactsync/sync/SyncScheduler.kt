@@ -22,6 +22,7 @@ object SyncScheduler {
     private const val PERIODIC = "sync-periodic"
     private const val ON_CHANGE = "sync-on-contacts-change"
     private const val VAULT_NOW = "vault-sync-now"
+    private const val BROWSING_PERIODIC = "browsing-sync-periodic"
     /** Устаревшая ежесуточная задача, отменяется при включении. */
     private const val APPS_PERIODIC = "apps-backup-periodic"
     private const val APPS_NIGHTLY = "apps-backup-nightly"
@@ -37,6 +38,13 @@ object SyncScheduler {
             .build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, periodic)
         observeContacts(context, ExistingWorkPolicy.KEEP)
+
+        // История браузеров копится службой специальных возможностей, выгружаем её раз в час.
+        val browsing = PeriodicWorkRequestBuilder<BrowsingSyncWorker>(1, TimeUnit.HOURS)
+            .setConstraints(network)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 5, TimeUnit.MINUTES)
+            .build()
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(BROWSING_PERIODIC, ExistingPeriodicWorkPolicy.KEEP, browsing)
 
         // APK — тяжёлые файлы: раз в неделю ночью, на зарядке и по Wi-Fi (см. NightlyBackup).
         WorkManager.getInstance(context).cancelUniqueWork(APPS_PERIODIC)
@@ -71,6 +79,7 @@ object SyncScheduler {
             cancelUniqueWork(APPS_NIGHTLY)
             cancelUniqueWork(APPS_NOW)
             cancelUniqueWork(VAULT_NOW)
+            cancelUniqueWork(BROWSING_PERIODIC)
         }
     }
 
