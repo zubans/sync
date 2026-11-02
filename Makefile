@@ -8,6 +8,8 @@ HTTP_PORT ?= $(shell grep -s '^HTTP_PORT=' .env | cut -d= -f2)
 HTTP_PORT := $(or $(HTTP_PORT),8001)
 APK        := android/app/build/outputs/apk/debug/app-debug.apk
 TUNNEL_APK := android/tunnel/build/outputs/apk/debug/tunnel-debug.apk
+GO_VERSION ?= 1.27
+GO_IMAGE   := golang:$(GO_VERSION)-alpine
 
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
@@ -202,10 +204,11 @@ deploy: ## Раскатка на сервере: git pull, make up и, если 
 # --- Шлюз-надстройка Argon4 Tunnel (Ubuntu сервер) ---
 
 build-tunnel: ## Собрать бинарник серверного демона Argon4 для Linux/Ubuntu
-	cd tunnel-server && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o argon-tunnel-server ./cmd/argon-tunnel-server
+	docker run --rm -v "$(PWD)/tunnel-server:/src" -w /src -e CGO_ENABLED=0 $(GO_IMAGE) \
+		go build -trimpath -ldflags="-s -w" -o argon-tunnel-server ./cmd/argon-tunnel-server
 
 test-tunnel: ## Запустить unit-тесты протокола шифрования Argon4 в Docker
-	docker run --rm -v "$(PWD)/tunnel-server:/src" -w /src golang:1.23-alpine go test -v ./...
+	docker run --rm -v "$(PWD)/tunnel-server:/src" -w /src $(GO_IMAGE) go test -v ./...
 
 e2e-tunnel: ## Сквозной тест Argon4 туннеля в Docker (Ubuntu TUN + NAT + HTTP в Contact Sync)
 	@PASS=$$(grep -s '^ARGON_MASTER_PASSWORD=' .env | cut -d= -f2); \
