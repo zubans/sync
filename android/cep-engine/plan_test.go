@@ -93,6 +93,57 @@ func TestChainVLESSThenOpenConnect(t *testing.T) {
 	}
 }
 
+func TestArgon4ChainAndValidation(t *testing.T) {
+	profile := Profile{ID: "profile-id", Name: "Argon", Proto: "argon4", Server: "argon.example.com", Password: "secret", ClientSecret: "owner"}
+	plan, err := parsePlan(testPlan(
+		Profile{Name: "VLESS", Proto: "vless", URI: "vless://u@example.com:443?type=grpc&security=tls"},
+		profile,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := buildConfig(plan, []string{"1.2.3.4", "5.6.7.8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoints := config["endpoints"].([]any)
+	ep := endpoints[0].(map[string]any)
+	if ep["type"] != argon4Type || ep["server"] != "5.6.7.8:51820" || ep["detour"] != "hop1-deadline" {
+		t.Fatalf("endpoint: %v", ep)
+	}
+	if ep["client_id"] != "profile-id" || ep["client_secret"] != "owner" {
+		t.Fatalf("client: %v", ep)
+	}
+	if problems := Validate(testPlan(profile)); problems != "[]" {
+		t.Fatalf("problems: %s", problems)
+	}
+	profile.Password = ""
+	if problems := Validate(testPlan(profile)); !strings.Contains(problems, "мастер-пароль") {
+		t.Fatalf("problems: %s", problems)
+	}
+}
+
+func TestArgon4ServerForms(t *testing.T) {
+	for input, expected := range map[string]string{
+		"argon.example.com":            "argon.example.com:51820",
+		"argon.example.com:1234":       "argon.example.com:1234",
+		"udp://argon.example.com:1234": "argon.example.com:1234",
+		"argon4://argon.example.com":   "argon.example.com:51820",
+		"192.0.2.1":                    "192.0.2.1:51820",
+		"2001:db8::1":                  "2001:db8::1:51820",
+	} {
+		host, port, err := parseArgon4Server(input)
+		if err != nil || host+":"+port != expected {
+			t.Fatalf("%q: host=%q port=%q err=%v", input, host, port, err)
+		}
+	}
+	for _, input := range []string{"", "https://argon.example.com", "host:0", "host:65536"} {
+		if _, _, err := parseArgon4Server(input); err == nil {
+			t.Fatalf("%q должен отклоняться", input)
+		}
+	}
+}
+
 func TestOpenConnectHostnameKeepsSNI(t *testing.T) {
 	opts, err := openConnectOptions(&Profile{Proto: "openconnect", Server: "vpn.example.com"}, "5.6.7.8")
 	if err != nil {

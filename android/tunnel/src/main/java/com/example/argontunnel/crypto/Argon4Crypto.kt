@@ -3,6 +3,8 @@ package com.example.argontunnel.crypto
 import kotlinx.serialization.Serializable
 import org.bouncycastle.crypto.generators.Argon2BytesGenerator
 import org.bouncycastle.crypto.params.Argon2Parameters
+import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
+import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import java.nio.ByteBuffer
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -154,6 +156,71 @@ object Argon4Crypto {
     fun derivePSK(masterPassword: String, params: Argon4Params = Argon4Params()): ByteArray {
         val sk = deriveKey(masterPassword, PSK_DOMAIN_SALT, params)
         return sk.encoded
+    }
+
+    /** Эфемерная пара X25519. Приватный ключ должен быть очищен после handshake. */
+    data class X25519KeyPair(val privateKey: ByteArray, val publicKey: ByteArray)
+
+    /** Раздельные ключи AES-256-GCM для двух направлений сессии. */
+    data class SessionKeys(val c2sKey: SecretKey, val s2cKey: SecretKey)
+
+    /** Генерирует эфемерную пару X25519 для одного handshake. */
+    fun generateX25519Keypair(): X25519KeyPair {
+        val privateKey = X25519PrivateKeyParameters(random)
+        return X25519KeyPair(privateKey.encoded, privateKey.generatePublicKey().encoded)
+    }
+
+    /** Вычисляет общий секрет X25519 и отклоняет все-нулевой результат, как crypto/ecdh в Go. */
+    fun computeX25519Shared(privateKey: ByteArray, peerPublicKey: ByteArray): ByteArray {
+        require(privateKey.size == KEY_BYTES) { "Некорректная длина приватного ключа X25519" }
+        require(peerPublicKey.size == KEY_BYTES) { "Некорректная длина публичного ключа X25519" }
+        val shared = ByteArray(KEY_BYTES)
+        X25519PrivateKeyParameters(privateKey, 0).generateSecret(
+            X25519PublicKeyParameters(peerPublicKey, 0),
+            shared,
+            0,
+        )
+        if (shared.all { it == 0.toByte() }) {
+            shared.fill(0)
+            throw SecurityException("Недопустимый общий секрет X25519")
+        }
+        return shared
+    }
+
+    /** Повторяет Go DeriveSessionKeys: HMAC-SHA256 и независимые ключи c2s/s2c. */
+    fun deriveSessionKeys(handshakeKey: SecretKey, sharedSecret: ByteArray, salt: ByteArray): SessionKeys {
+        require(salt.size == SALT_BYTES) { "Некорректная длина соли: ${salt.size}" }
+        val prkMac = Mac.getInstance("HmacSHA256")
+        prkMac.init(SecretKeySpec(handshakeKey.encoded, "HmacSHA256"))
+        prkMac.update(sharedSecret)
+        prkMac.update(salt)
+        val prk = prkMac.doFinal()
+        try {
+            return SessionKeys(
+                c2sKey = SecretKeySpec(hmacSha256(prk, "argon4-c2s-key\u0001".toByteArray(Charsets.UTF_8)), "AES"),
+                s2cKey = SecretKeySpec(hmacSha256(prk, "argon4-s2c-key\u0001".toByteArray(Charsets.UTF_8)), "AES"),
+            )
+        } finally {
+            prk.fill(0)
+        }
+    }
+
+    fun bytesToHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+    fun hexToBytes(hex: String): ByteArray {
+        require(hex.length % 2 == 0) { "Некорректная hex-строка" }
+        return ByteArray(hex.length / 2) { index ->
+            val high = Character.digit(hex[index * 2], 16)
+            val low = Character.digit(hex[index * 2 + 1], 16)
+            require(high >= 0 && low >= 0) { "Некорректная hex-строка" }
+            ((high shl 4) or low).toByte()
+        }
+    }
+
+    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(key, "HmacSHA256"))
+        return mac.doFinal(data)
     }
 
     /** Вычисляет 16-байтный токен привязки clientId к clientSecret через HMAC-SHA256(psk). */

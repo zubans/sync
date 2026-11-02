@@ -133,7 +133,7 @@ class ArgonVpnService : VpnService() {
                     emptyList()
                 }
 
-                val handshake = performHandshake(
+                val (handshake, sessionKeys) = performHandshake(
                     socket = socket,
                     serverAddr = serverAddr,
                     salt = salt,
@@ -158,7 +158,10 @@ class ArgonVpnService : VpnService() {
                 )
                 startForegroundWithNotification("Активен: ${handshake.assignedIp} → ${settings.serverHost}:${settings.serverPort}")
 
-                runPacketLoops(pfd, socket, serverAddr, salt, psk, key)
+                runPacketLoops(
+                    pfd, socket, serverAddr, salt, psk,
+                    sessionKeys.c2sKey, sessionKeys.s2cKey,
+                )
             }.onFailure { err ->
                 _status.value = _status.value.copy(
                     running = false,
@@ -231,44 +234,59 @@ class ArgonVpnService : VpnService() {
         clientId: String,
         clientSecret: String,
         apps: List<String>,
-    ): HandshakeResponse {
-        val clientAuth = Argon4Crypto.clientAuthToken(psk, clientId, clientSecret)
-        val req = HandshakeRequest(
-            clientId = clientId,
-            clientAuth = clientAuth,
-            apps = apps,
-            timestamp = System.currentTimeMillis() / 1000,
-        )
-        val reqJson = json.encodeToString(req).toByteArray(Charsets.UTF_8)
-        val wireReq = Argon4Crypto.sealPacketWithSeq(
-            frameType = Argon4Crypto.FRAME_HANDSHAKE_REQ,
-            salt = salt,
-            psk = psk,
-            key = key,
-            seq = 1L,
-            plaintext = reqJson,
-        )
+    ): Pair<HandshakeResponse, Argon4Crypto.SessionKeys> {
+        val keyPair = Argon4Crypto.generateX25519Keypair()
+        try {
+            val clientAuth = Argon4Crypto.clientAuthToken(psk, clientId, clientSecret)
+            val req = HandshakeRequest(
+                clientId = clientId,
+                clientAuth = clientAuth,
+                clientPub = Argon4Crypto.bytesToHex(keyPair.publicKey),
+                apps = apps,
+                timestamp = System.currentTimeMillis() / 1000,
+            )
+            val reqJson = json.encodeToString(req).toByteArray(Charsets.UTF_8)
+            val wireReq = Argon4Crypto.sealPacketWithSeq(
+                frameType = Argon4Crypto.FRAME_HANDSHAKE_REQ,
+                salt = salt,
+                psk = psk,
+                key = key,
+                seq = 1L,
+                plaintext = reqJson,
+            )
 
-        val recvBuf = ByteArray(4096)
-        var lastErr: Throwable? = null
-        repeat(3) {
-            try {
-                socket.send(DatagramPacket(wireReq, wireReq.size, serverAddr))
-                val dp = DatagramPacket(recvBuf, recvBuf.size)
-                socket.receive(dp)
-                val opened = Argon4Crypto.openPacket(dp.data, dp.length, psk, key)
-                if (opened.frameType == Argon4Crypto.FRAME_HANDSHAKE_RESP) {
-                    return json.decodeFromString<HandshakeResponse>(opened.plaintext.decodeToString())
+            val recvBuf = ByteArray(4096)
+            var lastErr: Throwable? = null
+            repeat(3) {
+                try {
+                    socket.send(DatagramPacket(wireReq, wireReq.size, serverAddr))
+                    val dp = DatagramPacket(recvBuf, recvBuf.size)
+                    socket.receive(dp)
+                    val opened = Argon4Crypto.openPacket(dp.data, dp.length, psk, key)
+                    if (opened.frameType == Argon4Crypto.FRAME_HANDSHAKE_RESP) {
+                        val response = json.decodeFromString<HandshakeResponse>(opened.plaintext.decodeToString())
+                        val sharedSecret = Argon4Crypto.computeX25519Shared(
+                            keyPair.privateKey,
+                            Argon4Crypto.hexToBytes(response.serverPub),
+                        )
+                        try {
+                            return response to Argon4Crypto.deriveSessionKeys(key, sharedSecret, salt)
+                        } finally {
+                            sharedSecret.fill(0)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    lastErr = t
                 }
-            } catch (t: Throwable) {
-                lastErr = t
             }
-        }
 
-        throw IllegalStateException(
-            "Сервер не ответил на рукопожатие туннеля (проверьте мастер-пароль, адрес и порт): ${lastErr?.message ?: "таймаут"}",
-            lastErr
-        )
+            throw IllegalStateException(
+                "Сервер не ответил на рукопожатие туннеля (проверьте мастер-пароль, адрес и порт): ${lastErr?.message ?: "таймаут"}",
+                lastErr
+            )
+        } finally {
+            keyPair.privateKey.fill(0)
+        }
     }
 
     private fun establishTun(settings: TunnelSettings, hs: HandshakeResponse): ParcelFileDescriptor {
@@ -314,10 +332,11 @@ class ArgonVpnService : VpnService() {
         serverAddr: InetSocketAddress,
         salt: ByteArray,
         psk: ByteArray,
-        key: SecretKey,
+        c2sKey: SecretKey,
+        s2cKey: SecretKey,
     ) {
         socket.soTimeout = 0
-        val seqCounter = AtomicLong(2L) // 1 занят рукопожатием
+        val seqCounter = AtomicLong(1L)
         val txPkts = AtomicLong(0)
         val rxPkts = AtomicLong(0)
         val txBytes = AtomicLong(0)
@@ -338,7 +357,7 @@ class ArgonVpnService : VpnService() {
                         frameType = Argon4Crypto.FRAME_DATA,
                         salt = salt,
                         psk = psk,
-                        key = key,
+                        key = c2sKey,
                         seq = seq,
                         plaintext = buf,
                         offset = 0,
@@ -362,7 +381,7 @@ class ArgonVpnService : VpnService() {
                     val dp = DatagramPacket(buf, buf.size)
                     socket.receive(dp)
                     val opened = runCatching {
-                        Argon4Crypto.openPacket(dp.data, dp.length, psk, key)
+                        Argon4Crypto.openPacket(dp.data, dp.length, psk, s2cKey)
                     }.getOrNull() ?: continue
 
                     if (!replayWindow.accept(opened.seq)) {
@@ -391,7 +410,7 @@ class ArgonVpnService : VpnService() {
                         frameType = Argon4Crypto.FRAME_KEEPALIVE,
                         salt = salt,
                         psk = psk,
-                        key = key,
+                        key = c2sKey,
                         seq = seq,
                         plaintext = "ping".toByteArray(Charsets.UTF_8),
                     )

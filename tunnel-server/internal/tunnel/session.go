@@ -102,17 +102,56 @@ func (w *ReplayWindow) Accept(seq uint64) bool {
 }
 
 // PeerSession хранит состояние аутентифицированного клиента, раздельные сессионные ключи направлений (PFS) и окно повторов.
+// При reconnect объект не изменяется: SessionManager подменяет его новым, поэтому читатели видят согласованные соль и ключи.
 type PeerSession struct {
 	ClientID   string
 	ClientAuth []byte
 	AssignedIP net.IP
-	RemoteAddr *net.UDPAddr
 	Salt       [SaltSize]byte
 	C2SKey     []byte
 	S2CKey     []byte
-	LastSeen   time.Time
+
+	stateMu    sync.RWMutex
+	remoteAddr *net.UDPAddr
+	lastSeen   time.Time
 	replay     ReplayWindow
 	s2cSeq     atomic.Uint64
+}
+
+// RemoteAddr возвращает копию текущего адреса для безопасного roaming без гонок с TouchSession.
+func (s *PeerSession) RemoteAddr() *net.UDPAddr {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return cloneUDPAddr(s.remoteAddr)
+}
+
+// LastSeen возвращает время последнего аутентифицированного пакета.
+func (s *PeerSession) LastSeen() time.Time {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.lastSeen
+}
+
+func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	clone := *addr
+	clone.IP = append(net.IP(nil), addr.IP...)
+	return &clone
+}
+
+func newPeerSession(clientID string, clientAuth []byte, assignedIP net.IP, salt [SaltSize]byte, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, now time.Time) *PeerSession {
+	return &PeerSession{
+		ClientID:   clientID,
+		ClientAuth: append([]byte(nil), clientAuth...),
+		AssignedIP: append(net.IP(nil), assignedIP...),
+		Salt:       salt,
+		C2SKey:     append([]byte(nil), c2sKey...),
+		S2CKey:     append([]byte(nil), s2cKey...),
+		remoteAddr: cloneUDPAddr(remoteAddr),
+		lastSeen:   now,
+	}
 }
 
 // NextS2CSeq возвращает следующий монотонный номер пакета в направлении сервер -> клиент (начиная с 1).
@@ -251,22 +290,21 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 	}
 	m.seenHandshakes[saltKey] = now.Add(HandshakeReplayTTL)
 
-	// Переиспользование существующего IP по clientID разрешено только при совпадении токена владения clientAuth
+	// Переиспользование существующего IP по clientID разрешено только при совпадении токена владения clientAuth.
+	// Старый объект не перезаписываем: пакетные циклы могут всё ещё безопасно читать его согласованные ключи.
 	if existing, ok := m.byClient[clientID]; ok && clientID != "" {
 		canReclaim := len(existing.ClientAuth) > 0 &&
 			len(clientAuth) == len(existing.ClientAuth) &&
 			subtle.ConstantTimeCompare(existing.ClientAuth, clientAuth) == 1
 		if canReclaim {
+			sess := newPeerSession(clientID, clientAuth, existing.AssignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now)
+			var ipKey [4]byte
+			copy(ipKey[:], sess.AssignedIP.To4())
 			delete(m.bySalt, existing.Salt)
-			existing.Salt = saltKey
-			existing.C2SKey = c2sKey
-			existing.S2CKey = s2cKey
-			existing.RemoteAddr = remoteAddr
-			existing.LastSeen = now
-			existing.replay = ReplayWindow{}
-			existing.s2cSeq.Store(0)
-			m.bySalt[saltKey] = existing
-			return existing, nil
+			m.bySalt[saltKey] = sess
+			m.byIP[ipKey] = sess
+			m.byClient[clientID] = sess
+			return sess, nil
 		}
 	}
 
@@ -277,16 +315,7 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 	var ipKey [4]byte
 	copy(ipKey[:], assignedIP.To4())
 
-	sess := &PeerSession{
-		ClientID:   clientID,
-		ClientAuth: append([]byte(nil), clientAuth...),
-		AssignedIP: assignedIP,
-		RemoteAddr: remoteAddr,
-		Salt:       saltKey,
-		C2SKey:     c2sKey,
-		S2CKey:     s2cKey,
-		LastSeen:   now,
-	}
+	sess := newPeerSession(clientID, clientAuth, assignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now)
 	m.bySalt[saltKey] = sess
 	m.byIP[ipKey] = sess
 	if clientID != "" && len(clientAuth) > 0 {
@@ -298,10 +327,10 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 }
 
 func (m *SessionManager) TouchSession(sess *PeerSession, remoteAddr *net.UDPAddr) {
-	m.mu.Lock()
-	sess.RemoteAddr = remoteAddr
-	sess.LastSeen = time.Now()
-	m.mu.Unlock()
+	sess.stateMu.Lock()
+	sess.remoteAddr = cloneUDPAddr(remoteAddr)
+	sess.lastSeen = time.Now()
+	sess.stateMu.Unlock()
 }
 
 func (m *SessionManager) LookupByDstIP(dstIP net.IP) *PeerSession {
@@ -325,7 +354,7 @@ func (m *SessionManager) purgeExpiredLocked(now time.Time) {
 		}
 	}
 	for saltKey, sess := range m.bySalt {
-		if now.Sub(sess.LastSeen) > SessionIdleTimeout {
+		if now.Sub(sess.LastSeen()) > SessionIdleTimeout {
 			delete(m.bySalt, saltKey)
 			if ip4 := sess.AssignedIP.To4(); ip4 != nil {
 				var ipKey [4]byte

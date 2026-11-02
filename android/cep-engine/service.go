@@ -157,7 +157,7 @@ func redact(v any) any {
 		out := map[string]any{}
 		for k, val := range t {
 			switch k {
-			case "password", "uuid", "client_key", "key", "auth_str", "public_key", "short_id":
+			case "password", "uuid", "client_key", "client_secret", "key", "auth_str", "public_key", "short_id":
 				out[k] = "***"
 			default:
 				out[k] = redact(val)

@@ -1,12 +1,14 @@
 package tunnel
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -26,13 +28,22 @@ type ServerConfig struct {
 	Routes          []string
 }
 
+type handshakeResponseCacheEntry struct {
+	remoteAddr string
+	request    []byte
+	response   []byte
+	expires    time.Time
+}
+
 // Server реализует шифрованный шлюз-надстройку Argon4 между UDP-интерфейсом и виртуальным TUN-интерфейсом Ubuntu.
 type Server struct {
-	cfg        ServerConfig
-	sessions   *SessionManager
-	udpConn    *net.UDPConn
-	tun        io.ReadWriteCloser
-	lastErrLog atomic.Int64
+	cfg            ServerConfig
+	sessions       *SessionManager
+	udpConn        *net.UDPConn
+	tun            io.ReadWriteCloser
+	lastErrLog     atomic.Int64
+	handshakeMu    sync.Mutex
+	handshakeCache map[[SaltSize]byte]handshakeResponseCacheEntry
 }
 
 func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
@@ -55,9 +66,10 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:      cfg,
-		sessions: sm,
-		tun:      tunDev,
+		cfg:            cfg,
+		sessions:       sm,
+		tun:            tunDev,
+		handshakeCache: make(map[[SaltSize]byte]handshakeResponseCacheEntry),
 	}, nil
 }
 
@@ -216,7 +228,53 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 	return nil
 }
 
+// cachedHandshakeResponse делает повторную UDP-передачу идемпотентной: тот же запрос
+// с того же адреса получает тот же ответ без новой сессии и нового расчёта Argon2id.
+func (s *Server) cachedHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAddr) []byte {
+	var saltKey [SaltSize]byte
+	copy(saltKey[:], salt)
+
+	s.handshakeMu.Lock()
+	defer s.handshakeMu.Unlock()
+	entry, ok := s.handshakeCache[saltKey]
+	if !ok {
+		return nil
+	}
+	if !time.Now().Before(entry.expires) {
+		delete(s.handshakeCache, saltKey)
+		return nil
+	}
+	if entry.remoteAddr != remoteAddr.String() || !bytes.Equal(entry.request, pkt) {
+		return nil
+	}
+	return append([]byte(nil), entry.response...)
+}
+
+func (s *Server) cacheHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAddr, response []byte) {
+	var saltKey [SaltSize]byte
+	copy(saltKey[:], salt)
+
+	now := time.Now()
+	s.handshakeMu.Lock()
+	for key, entry := range s.handshakeCache {
+		if !now.Before(entry.expires) {
+			delete(s.handshakeCache, key)
+		}
+	}
+	s.handshakeCache[saltKey] = handshakeResponseCacheEntry{
+		remoteAddr: remoteAddr.String(),
+		request:    append([]byte(nil), pkt...),
+		response:   append([]byte(nil), response...),
+		expires:    now.Add(HandshakeReplayTTL),
+	}
+	s.handshakeMu.Unlock()
+}
+
 func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) []byte {
+	if cached := s.cachedHandshakeResponse(pkt, salt, remoteAddr); cached != nil {
+		return cached
+	}
+
 	hsKey, err := s.sessions.DeriveHandshakeKey(salt)
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake derive", err)
@@ -291,6 +349,7 @@ func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr)
 	if err != nil {
 		return nil
 	}
+	s.cacheHandshakeResponse(pkt, salt, remoteAddr, wireResp)
 	log.Printf("[argon4-server] рукопожатие ОК: клиент=%q адрес=%s выдан=%s приложения=%v",
 		req.ClientID, remoteAddr, peer.AssignedIP, req.Apps)
 	return wireResp
@@ -310,7 +369,7 @@ func (s *Server) SealTunPacket(ipPkt []byte) ([]byte, *net.UDPAddr) {
 	if err != nil {
 		return nil, nil
 	}
-	return wirePkt, sess.RemoteAddr
+	return wirePkt, sess.RemoteAddr()
 }
 
 func (s *Server) handleUDPPacket(pkt []byte, remoteAddr *net.UDPAddr) {

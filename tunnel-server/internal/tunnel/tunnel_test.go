@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -174,6 +175,13 @@ func TestServerHandshakePFSAndSecurityChecks(t *testing.T) {
 		t.Fatalf("Expected handshake response packet, got nil")
 	}
 
+	// Если ответ потерялся в UDP, клиент повторяет тот же запрос с того же адреса.
+	// Сервер должен вернуть идентичный ответ, не создавая новую сессию и не считая это атакой.
+	retryResp := srv.HandlePacket(wireReq, clientAddr)
+	if !bytes.Equal(retryResp, respWire) {
+		t.Fatalf("Expected cached response for legitimate handshake retry")
+	}
+
 	// Повтор (replay) того же пакета рукопожатия с другого адреса отклоняется и не угоняет сессию
 	if replayResp := srv.HandlePacket(wireReq, attackerAddr); replayResp != nil {
 		t.Fatalf("Expected replayed handshake to be rejected, got response")
@@ -261,5 +269,120 @@ func TestServerHandshakePFSAndSecurityChecks(t *testing.T) {
 	}
 	if fType != FrameTypeData || replySeq != 1 || !bytes.Equal(gotReply, replyIPv4) {
 		t.Fatalf("Client received reply mismatch")
+	}
+}
+
+func TestServerConcurrentReconnectAndTraffic(t *testing.T) {
+	params := ArgonParams{Time: 1, Memory: 64, Threads: 1}
+	srv, err := NewServer(ServerConfig{
+		SubnetCIDR:     "10.44.0.1/24",
+		MasterPassword: "concurrent-reconnect-password",
+		ArgonParams:    params,
+		MTU:            1380,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer srv.Close()
+
+	const clientID = "concurrent-client"
+	clientAuth := bytes.Repeat([]byte{0x42}, 16)
+	initialSalt := bytes.Repeat([]byte{0x11}, SaltSize)
+	initial, err := srv.sessions.RegisterSession(
+		clientID,
+		clientAuth,
+		initialSalt,
+		bytes.Repeat([]byte{0x21}, KeySize),
+		bytes.Repeat([]byte{0x22}, KeySize),
+		&net.UDPAddr{IP: net.IPv4(192, 168, 1, 50), Port: 40000},
+	)
+	if err != nil {
+		t.Fatalf("initial RegisterSession: %v", err)
+	}
+
+	replyIPv4 := make([]byte, 20)
+	replyIPv4[0] = 0x45
+	copy(replyIPv4[12:16], net.IPv4(10, 44, 0, 1).To4())
+	copy(replyIPv4[16:20], initial.AssignedIP.To4())
+
+	const rounds = 200
+	start := make(chan struct{})
+	errCh := make(chan string, 1)
+	reportError := func(message string) {
+		select {
+		case errCh <- message:
+		default:
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < rounds; i++ {
+			salt := bytes.Repeat([]byte{0xa5}, SaltSize)
+			salt[0] = byte(i + 1)
+			salt[1] = byte((i + 1) >> 8)
+			sess, err := srv.sessions.RegisterSession(
+				clientID,
+				clientAuth,
+				salt,
+				bytes.Repeat([]byte{byte(i + 1)}, KeySize),
+				bytes.Repeat([]byte{byte(i + 2)}, KeySize),
+				&net.UDPAddr{IP: net.IPv4(192, 168, 1, 50), Port: 41000 + i},
+			)
+			if err != nil {
+				reportError("concurrent RegisterSession failed: " + err.Error())
+				return
+			}
+			if !sess.AssignedIP.Equal(initial.AssignedIP) {
+				reportError("client IP changed during reconnect")
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < rounds; i++ {
+			wirePkt, addr := srv.SealTunPacket(replyIPv4)
+			if wirePkt == nil || addr == nil {
+				reportError("SealTunPacket lost the active session")
+				return
+			}
+			// Старая сессия может использоваться текущим пакетом, но её ключи не должны перезаписываться.
+			_ = initial.C2SKey[0]
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < rounds; i++ {
+			srv.sessions.TouchSession(initial, &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 42000 + i})
+			_ = initial.RemoteAddr()
+			_ = initial.LastSeen()
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for message := range errCh {
+		t.Fatal(message)
+	}
+
+	final := srv.sessions.byClient[clientID]
+	if final == nil || final == initial {
+		t.Fatal("reconnect must replace PeerSession instead of mutating the old object")
+	}
+	if !final.AssignedIP.Equal(initial.AssignedIP) {
+		t.Fatal("client IP was not preserved")
+	}
+	if old := srv.sessions.LookupBySalt(initialSalt); old != nil {
+		t.Fatal("old salt remained in the session index")
+	}
+	if got := final.RemoteAddr(); got == nil || got.Port != 41000+rounds-1 {
+		t.Fatalf("unexpected final remote address: %v", got)
 	}
 }

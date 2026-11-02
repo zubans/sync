@@ -392,6 +392,13 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
                     item { Field("Пароль", p.password, secret = true) { save(p.copy(password = it)) } }
                 }
             }
+            proto == VpnProtocol.ARGON4 -> {
+                item { Field("Сервер", p.server, hint = "host:51820; без порта используется 51820") { save(p.copy(server = it.trim())) } }
+                item { Field("Мастер-пароль", p.password, secret = true) { save(p.copy(password = it)) } }
+                item { Field("ID клиента", p.clientID, hint = "Если пусто, используется ID профиля") { save(p.copy(clientID = it.trim())) } }
+                item { Field("Секрет клиента", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
+                item { Text("Туннель переносит IPv4. Argon4 может быть отдельным узлом или основой для следующего узла цепочки.", style = MaterialTheme.typography.bodySmall) }
+            }
             else -> {
                 item { Field("Сервер", p.server, hint = "host, host:port или https://host:port") { save(p.copy(server = it.trim())) } }
                 item { Field("Логин", p.username) { save(p.copy(username = it)) } }

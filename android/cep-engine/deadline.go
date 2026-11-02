@@ -33,7 +33,7 @@ type deadlineOptions struct {
 func engineContext(ctx context.Context) context.Context {
 	outbounds := include.OutboundRegistry()
 	outbound.Register[deadlineOptions](outbounds, deadlineType, newDeadlineOutbound)
-	return box.Context(ctx, include.InboundRegistry(), outbounds, include.EndpointRegistry(),
+	return box.Context(ctx, include.InboundRegistry(), outbounds, withArgon4Endpoint(include.EndpointRegistry()),
 		include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
 }
 

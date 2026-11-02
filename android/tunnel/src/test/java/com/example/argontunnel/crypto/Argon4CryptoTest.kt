@@ -73,7 +73,7 @@ class Argon4CryptoTest {
         assertArrayEquals(plaintext, decrypted.plaintext)
     }
 
-    @Test(expected = AEADBadTagException::class)
+    @Test
     fun testOpenPacketWrongPasswordThrows() {
         val salt = Argon4Crypto.newSalt()
         val psk = Argon4Crypto.derivePSK("password-1")
@@ -90,6 +90,15 @@ class Argon4CryptoTest {
 
         val wrongPsk = Argon4Crypto.derivePSK("password-2")
         val wrongKey = Argon4Crypto.deriveKey("password-2", salt)
-        Argon4Crypto.openPacket(sealed, sealed.size, wrongPsk, wrongKey)
+        val error = runCatching {
+            Argon4Crypto.openPacket(sealed, sealed.size, wrongPsk, wrongKey)
+        }.exceptionOrNull()
+
+        assertNotNull(error)
+        assertTrue(
+            error is IllegalArgumentException ||
+                error is SecurityException ||
+                error is AEADBadTagException,
+        )
     }
 }

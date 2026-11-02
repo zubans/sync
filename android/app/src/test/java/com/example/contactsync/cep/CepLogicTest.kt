@@ -52,6 +52,23 @@ class CepLogicTest {
     }
 
     @Test
+    fun `argon profile survives json round trip`() {
+        val profile = CepProfile(
+            id = "A4",
+            name = "Argon",
+            proto = "argon4",
+            server = "argon.example.com:51820",
+            password = "master",
+            clientID = "phone",
+            clientSecret = "owner",
+        )
+        val store = CepStore(profiles = listOf(profile), chains = listOf(CepChain(name = "chain", hops = listOf("A4"))))
+
+        assertEquals(store, CepLogic.decode(CepLogic.encode(store)))
+        assertEquals(VpnProtocol.ARGON4, CepLogic.decode(CepLogic.encode(store)).profiles.single().protocol)
+    }
+
+    @Test
     fun `merge replaces items with the same id and appends new ones`() {
         val current = CepStore(
             profiles = listOf(CepProfile(id = "A1", name = "старый", proto = "vless"), CepProfile(id = "L", name = "свой", proto = "hysteria2")),

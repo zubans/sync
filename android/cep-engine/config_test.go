@@ -27,11 +27,12 @@ func TestConfigAcceptedBySingBox(t *testing.T) {
 		Profile{Name: "OVPN", Proto: "openvpn", Config: testOVPN, Username: "u", Password: "p"},
 		Profile{Name: "OC", Proto: "openconnect", Server: "https://94.103.9.172:4443", Username: "u", Password: "p",
 			ServerCert: "pin-sha256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=", Routes: "192.168.1.0/24"},
+		Profile{ID: "A4", Name: "Argon", Proto: "argon4", Server: "argon.example.com:51820", Password: "secret", ClientSecret: "owner"},
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	config, err := buildConfig(plan, []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "94.103.9.172"})
+	config, err := buildConfig(plan, []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "94.103.9.172", "5.5.5.5"})
 	if err != nil {
 		t.Fatal(err)
 	}

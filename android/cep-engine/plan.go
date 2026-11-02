@@ -20,6 +20,8 @@ type Profile struct {
 	Server            string `json:"server"`
 	Username          string `json:"username"`
 	Password          string `json:"password"`
+	ClientID          string `json:"clientID"`
+	ClientSecret      string `json:"clientSecret"`
 	OpenConnectFlavor string `json:"openconnectFlavor"`
 	ServerCert        string `json:"serverCert"`
 	AuthGroup         string `json:"authGroup"`
@@ -48,7 +50,7 @@ func parsePlan(planJSON string) (*Plan, error) {
 // Supported — поддерживается ли протокол на Android (пусто) или почему нет.
 func Supported(proto string) string {
 	switch proto {
-	case "vless", "hysteria2", "hysteria", "openconnect", "openvpn":
+	case "vless", "hysteria2", "hysteria", "openconnect", "openvpn", "argon4":
 		return ""
 	case "amneziawg":
 		return "AmneziaWG на Android пока не поддерживается"
@@ -112,6 +114,9 @@ func endpointHost(p *Profile) (string, error) {
 			return "", err
 		}
 		return ovpn.remoteHost, nil
+	case "argon4":
+		host, _, err := parseArgon4Server(p.Server)
+		return host, err
 	}
 	return "", fmt.Errorf("%s", Supported(p.Proto))
 }
@@ -130,6 +135,39 @@ func openConnectURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("неверный адрес сервера «%s»", raw)
 	}
 	return u, nil
+}
+
+// parseArgon4Server принимает host, host:port, udp://host:port или argon4://host:port.
+func parseArgon4Server(raw string) (host, port string, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", fmt.Errorf("Argon4: не указан сервер")
+	}
+	if !strings.Contains(s, "://") {
+		if address, addrErr := netip.ParseAddr(s); addrErr == nil {
+			if address.Is6() {
+				s = "[" + s + "]"
+			}
+			s = "udp://" + s
+		} else if _, _, splitErr := net.SplitHostPort(s); splitErr == nil || !strings.Contains(s, ":") {
+			s = "udp://" + s
+		} else {
+			return "", "", fmt.Errorf("Argon4: неверный адрес сервера «%s»", raw)
+		}
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Hostname() == "" || u.User != nil || (u.Scheme != "udp" && u.Scheme != "argon4") {
+		return "", "", fmt.Errorf("Argon4: неверный адрес сервера «%s»", raw)
+	}
+	port = u.Port()
+	if port == "" {
+		port = "51820"
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return "", "", fmt.Errorf("Argon4: порт должен быть от 1 до 65535")
+	}
+	return u.Hostname(), port, nil
 }
 
 // Validate — ошибки, из-за которых цепочку не запустить (JSON-массив строк).
@@ -210,7 +248,7 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
 		}
-		isEndpoint := opts["type"] == "openconnect" || opts["type"] == "openvpn-client"
+		isEndpoint := opts["type"] == "openconnect" || opts["type"] == "openvpn-client" || opts["type"] == argon4Type
 		switch {
 		case i > 0 && isEndpoint && previousIsProxy:
 			// до прокси-узла — через обёртку с таймаутами (см. deadline.go);
@@ -284,11 +322,40 @@ func hopOptions(hop *Profile, tag, server string) (map[string]any, error) {
 		if opts, err = ovpn.options(hop, server); err != nil {
 			return nil, err
 		}
+	case "argon4":
+		var err error
+		if opts, err = argon4HopOptions(hop, server); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("%s", Supported(hop.Proto))
 	}
 	opts["tag"] = tag
 	return opts, nil
+}
+
+func argon4HopOptions(hop *Profile, resolvedIP string) (map[string]any, error) {
+	host, port, err := parseArgon4Server(hop.Server)
+	if err != nil {
+		return nil, err
+	}
+	if hop.Password == "" {
+		return nil, fmt.Errorf("Argon4: не задан мастер-пароль")
+	}
+	if resolvedIP != "" {
+		host = resolvedIP
+	}
+	clientID := strings.TrimSpace(hop.ClientID)
+	if clientID == "" {
+		clientID = hop.ID
+	}
+	return map[string]any{
+		"type":          argon4Type,
+		"server":        net.JoinHostPort(host, port),
+		"password":      hop.Password,
+		"client_id":     clientID,
+		"client_secret": hop.ClientSecret,
+	}, nil
 }
 
 func openConnectOptions(hop *Profile, server string) (map[string]any, error) {

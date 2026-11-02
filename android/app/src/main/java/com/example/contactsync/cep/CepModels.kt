@@ -3,7 +3,7 @@ package com.example.contactsync.cep
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
-/** Протоколы узлов — те же, что в CEP для macOS: значения совпадают с полем proto в profiles.json. */
+/** Протоколы узлов — значения совпадают с полем proto в profiles.json. */
 enum class VpnProtocol(val raw: String, val title: String) {
     VLESS("vless", "VLESS"),
     HYSTERIA2("hysteria2", "Hysteria 2"),
@@ -11,12 +11,13 @@ enum class VpnProtocol(val raw: String, val title: String) {
     AMNEZIAWG("amneziawg", "AmneziaWG"),
     OPENVPN("openvpn", "OpenVPN"),
     OPENCONNECT("openconnect", "OpenConnect"),
+    ARGON4("argon4", "Argon4"),
     SSTP("sstp", "SSTP");
 
     /** Профиль задаётся ссылкой vless:// hysteria2:// hysteria://. */
     val isLink: Boolean get() = this == VLESS || this == HYSTERIA2 || this == HYSTERIA
 
-    /** Почему протокол не работает на Android, или null. Совпадает с cepcore.Supported: в sing-box этих протоколов нет. */
+    /** Почему протокол не работает на Android, или null. Совпадает с cepcore.Supported. */
     val unsupportedReason: String?
         get() = when (this) {
             AMNEZIAWG -> "AmneziaWG на Android пока не поддерживается"
@@ -38,7 +39,7 @@ enum class OpenConnectFlavor(val raw: String, val title: String) {
     ARRAY("array", "Array Networks"),
 }
 
-/** Профиль узла. Поля — как в profiles.json CEP для macOS, файл переносится между Mac и телефоном как есть. */
+/** Профиль узла. Общие поля совместимы с profiles.json CEP для macOS. */
 @Serializable
 data class CepProfile(
     val id: String = newCepId(),
@@ -48,10 +49,14 @@ data class CepProfile(
     val uri: String = "",
     /** Текст .ovpn или .conf AmneziaWG. */
     val config: String = "",
-    /** host, host:port или https://host:port — для OpenConnect и SSTP. */
+    /** host:port — для Argon4; host, host:port или URL — для OpenConnect и SSTP. */
     val server: String = "",
     val username: String = "",
+    /** Для Argon4 — мастер-пароль протокола. */
     val password: String = "",
+    /** Идентификатор владельца Argon4-сессии; пустой значит id профиля. */
+    val clientID: String = "",
+    val clientSecret: String = "",
     val openconnectFlavor: String = "anyconnect",
     /** pin-sha256:… или sha1/sha256-отпечаток сертификата сервера OpenConnect. */
     val serverCert: String = "",
