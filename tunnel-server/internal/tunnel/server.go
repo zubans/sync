@@ -180,12 +180,14 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 	}
 
 	if frameType == FrameTypeHandshakeReq {
+		log.Printf("[argon4-server] получен handshake от %s", remoteAddr)
 		return s.handleHandshake(pkt, psk, salt, remoteAddr)
 	}
 
 	sess := s.sessions.LookupBySalt(salt)
 	if sess == nil {
 		// Сессия не установлена рукопожатием — пакеты данных и keepalive без рукопожатия отбрасываются без запуска Argon2id.
+		s.logDrop(remoteAddr, "no session", fmt.Errorf("frame type %d", frameType))
 		return nil
 	}
 	if !sess.CheckReplay(seq) {
