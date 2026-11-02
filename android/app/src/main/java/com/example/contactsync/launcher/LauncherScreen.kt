@@ -97,6 +97,7 @@ import com.example.contactsync.kb.KbViewModel
 import com.example.contactsync.kb.KbWebPage
 import com.example.contactsync.kb.openUrl
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
 import java.time.Instant
@@ -118,8 +119,10 @@ fun LauncherScreen(
     kbVm: KbViewModel,
     kbCookies: () -> List<String>,
     pager: PagerState,
+    openApps: Flow<Unit>,
 ) {
     var drawerOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { openApps.collect { drawerOpen = true } }
     var cityDialog by remember { mutableStateOf(false) }
     var instrumentDialog by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf<LauncherWidget?>(null) }
@@ -140,7 +143,7 @@ fun LauncherScreen(
     }
 
     MaterialTheme(colorScheme = LauncherColors) {
-      Box(Modifier.fillMaxSize().background(Background)) {
+      Box(Modifier.fillMaxSize().background(Background).pinch { drawerOpen = true }) {
         Column(
             Modifier
                 .fillMaxSize()
@@ -228,6 +231,22 @@ private fun Modifier.pageSwipe(onSwipe: (forward: Boolean) -> Unit) = pointerInp
 }
 
 private const val SWIPE_MAX_MILLIS = 400L
+
+/**
+ * Щипок тремя и более пальцами в любом месте главного экрана, в том числе на веб-страницах.
+ * Касания смотрим раньше всех (проход Initial) и не забираем. В других приложениях этот же жест
+ * ловит служба «Панель навигации» ([RootPinchWatcher]); здесь он работает и без неё.
+ */
+private fun Modifier.pinch(onPinch: () -> Unit) = pointerInput(Unit) {
+    val detector = PinchDetector(PinchDetector.MIN_SPREAD_DP.dp.toPx())
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            val touches = event.changes.filter { it.pressed }.map { Touch(it.id.value, it.position.x, it.position.y) }
+            if (detector.onFrame(touches)) onPinch()
+        }
+    }
+}
 
 @Composable
 private fun Dashboard(

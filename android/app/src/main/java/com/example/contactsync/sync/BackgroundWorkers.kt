@@ -4,7 +4,12 @@ import android.content.Context
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import android.os.Build
 import com.example.contactsync.App
+import com.example.contactsync.browsing.BrowsingStore
+import com.example.contactsync.data.BrowsingRequest
+import com.example.contactsync.data.BrowsingVisitUpload
+import com.example.contactsync.data.DeviceDto
 import com.example.contactsync.data.UnauthorizedException
 import androidx.work.workDataOf
 import java.io.IOException
@@ -26,6 +31,33 @@ class VaultSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
             Result.failure()
         } catch (e: IOException) {
             Log.w("VaultSyncWorker", "Не удалось синхронизировать хранилище", e)
+            Result.retry()
+        }
+    }
+}
+
+/** Выгрузка истории браузеров, собранной службой специальных возможностей, раз в час. */
+class BrowsingSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+
+    override suspend fun doWork(): Result {
+        val app = applicationContext as App
+        if (!app.session.isLoggedIn) return Result.success()
+        val store = BrowsingStore(app)
+        val visits = store.snapshot()
+        if (visits.isEmpty()) return Result.success()
+        return try {
+            app.api.uploadBrowsing(
+                BrowsingRequest(
+                    device = DeviceDto(app.session.installId, "${Build.MANUFACTURER} ${Build.MODEL}"),
+                    visits = visits.map { BrowsingVisitUpload(it.url, it.title, it.browser, it.visitedAt) },
+                ),
+            )
+            store.remove(visits)
+            Result.success()
+        } catch (e: UnauthorizedException) {
+            Result.failure()
+        } catch (e: IOException) {
+            Log.w("BrowsingSyncWorker", "Не удалось выгрузить историю браузеров", e)
             Result.retry()
         }
     }
