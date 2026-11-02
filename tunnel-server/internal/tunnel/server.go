@@ -175,6 +175,7 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 	psk := s.sessions.PSK()
 	_, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(pkt, psk)
 	if err != nil {
+		s.logDrop(remoteAddr, "header", err)
 		return nil
 	}
 
