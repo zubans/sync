@@ -34,6 +34,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- CEP: служба VPN цепочки и слежение за основной сетью (Wi-Fi ↔ мобильная). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- Запись созвона: микрофон, пока звонок держит другое приложение, и голоса собеседников.
          Привилегированные права — выдаются, только когда приложение встроено в прошивку (priv-app). -->
     <uses-permission
@@ -178,6 +182,35 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Отдельная иконка «CEP»: цепочки VPN-узлов (Android-версия CEP для macOS). -->
+        <activity
+            android:name=".cep.CepActivity"
+            android:exported="true"
+            android:icon="@mipmap/ic_cep"
+            android:roundIcon="@mipmap/ic_cep"
+            android:label="CEP"
+            android:taskAffinity="com.example.contactsync.cep"
+            android:theme="@style/Theme.ContactSync.Launcher"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".cep.CepVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+        </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"

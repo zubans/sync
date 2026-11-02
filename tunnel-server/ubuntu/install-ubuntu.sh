@@ -11,11 +11,30 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_PATH="/usr/local/bin/argon-tunnel-server"
+GO_IMAGE="${GO_IMAGE:-golang:1.27-alpine}"
 
-echo "==> Сборка argon-tunnel-server..."
-cd "${SCRIPT_DIR}"
-go build -trimpath -ldflags="-s -w" -o /usr/local/bin/argon-tunnel-server ./cmd/argon-tunnel-server
-chmod 0755 /usr/local/bin/argon-tunnel-server
+# Если бинарник уже собран в tunnel-server (например, через docker в make build-tunnel), копируем его.
+# Иначе пробуем собрать локально установленным go, а при его отсутствии — в docker-контейнере.
+if [[ -f "${SCRIPT_DIR}/argon-tunnel-server" ]]; then
+    echo "==> Используем ранее собранный бинарник ${SCRIPT_DIR}/argon-tunnel-server..."
+    cp "${SCRIPT_DIR}/argon-tunnel-server" "${BIN_PATH}"
+elif command -v go >/dev/null 2>&1; then
+    echo "==> Сборка argon-tunnel-server через локальный go в ${SCRIPT_DIR}..."
+    (
+        cd "${SCRIPT_DIR}"
+        CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${BIN_PATH}" ./cmd/argon-tunnel-server
+    )
+elif command -v docker >/dev/null 2>&1; then
+    echo "==> Сборка argon-tunnel-server в Docker (${GO_IMAGE})..."
+    docker run --rm -v "${SCRIPT_DIR}:/src" -w /src -e CGO_ENABLED=0 "${GO_IMAGE}" \
+        go build -trimpath -ldflags="-s -w" -o /src/argon-tunnel-server ./cmd/argon-tunnel-server
+    cp "${SCRIPT_DIR}/argon-tunnel-server" "${BIN_PATH}"
+else
+    echo "Ошибка: не найден ни локальный 'go', ни 'docker' для сборки ${BIN_PATH}" >&2
+    exit 1
+fi
+chmod 0755 "${BIN_PATH}"
 
 mkdir -p /etc/argon-tunnel
 if [[ ! -f /etc/argon-tunnel/server.env ]]; then

@@ -38,6 +38,10 @@ class TunnelSettings(private val context: Context) {
     val clientId: String = prefs.getString(KEY_CLIENT_ID, null)
         ?: UUID.randomUUID().toString().also { prefs.edit().putString(KEY_CLIENT_ID, it).apply() }
 
+    /** Постоянный секрет установки клиента для подтверждения владения clientId при переподключении. */
+    val clientSecret: String = prefs.getString(KEY_CLIENT_SECRET, null)
+        ?: UUID.randomUUID().toString().also { prefs.edit().putString(KEY_CLIENT_SECRET, it).apply() }
+
     var serverHost: String
         get() = prefs.getString(KEY_SERVER_HOST, null) ?: BuildConfig.DEFAULT_SERVER_HOST
         set(value) = prefs.edit().putString(KEY_SERVER_HOST, value.trim()).apply()
@@ -143,6 +147,7 @@ class TunnelSettings(private val context: Context) {
 
     private companion object {
         const val KEY_CLIENT_ID = "client_id"
+        const val KEY_CLIENT_SECRET = "client_secret"
         const val KEY_SERVER_HOST = "server_host"
         const val KEY_SERVER_PORT = "server_port"
         const val KEY_BIND_INTERFACE = "bind_interface"

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/example/contactsync/tunnel-server/internal/tunnel"
@@ -51,21 +54,32 @@ func main() {
 	defer conn.Close()
 
 	salt := make([]byte, tunnel.SaltSize)
-	copy(salt, []byte("e2e-client-salt!"))
-	key := tunnel.DeriveKey(*masterPass, salt, tunnel.DefaultParams)
+	if _, err := rand.Read(salt); err != nil {
+		log.Fatalf("rand.Read salt failed: %v", err)
+	}
+	psk := tunnel.DerivePSK(*masterPass, tunnel.DefaultParams)
+	hsKey := tunnel.DeriveKey(*masterPass, salt, tunnel.DefaultParams)
+
+	clientPriv, clientPub, err := tunnel.GenerateX25519Keypair()
+	if err != nil {
+		log.Fatalf("GenerateX25519Keypair failed: %v", err)
+	}
 
 	log.Printf("[argon4-client] привязан к %s (интерфейс=%q) -> отправка на %s", conn.LocalAddr(), *bindIface, remoteUDP)
 
-	// 1. Выполнение зашифрованного рукопожатия (Handshake)
+	// 1. Выполнение зашифрованного рукопожатия (Handshake) с эфемерным X25519
+	clientAuth := tunnel.ClientAuthToken(psk, *clientID, *clientID)
 	hsReq := tunnel.HandshakeRequest{
-		ClientID:  *clientID,
-		Apps:      []string{"com.example.contactsync", "kb", "cep"},
-		Timestamp: time.Now().Unix(),
+		ClientID:   *clientID,
+		ClientAuth: hex.EncodeToString(clientAuth),
+		ClientPub:  hex.EncodeToString(clientPub),
+		Apps:       []string{"com.example.contactsync", "kb", "cep"},
+		Timestamp:  time.Now().Unix(),
 	}
 	reqBytes, _ := json.Marshal(hsReq)
-	wireReq, err := tunnel.SealPacket(tunnel.FrameTypeHandshakeReq, salt, key, reqBytes)
+	wireReq, err := tunnel.SealPacketWithSeq(tunnel.FrameTypeHandshakeReq, salt, psk, hsKey, 1, reqBytes)
 	if err != nil {
-		log.Fatalf("SealPacket handshake failed: %v", err)
+		log.Fatalf("SealPacketWithSeq handshake failed: %v", err)
 	}
 
 	if _, err := conn.Write(wireReq); err != nil {
@@ -79,22 +93,38 @@ func main() {
 		log.Fatalf("Read handshake response failed: %v", err)
 	}
 
-	fType, _, plainResp, err := tunnel.OpenPacket(buf[:n], key)
+	fType, _, _, plainResp, err := tunnel.OpenPacketWithKey(buf[:n], psk, hsKey)
 	if err != nil || fType != tunnel.FrameTypeHandshakeResp {
-		log.Fatalf("OpenPacket handshake response failed: type=%d err=%v", fType, err)
+		log.Fatalf("OpenPacketWithKey handshake response failed: type=%d err=%v", fType, err)
 	}
 
 	var hsResp tunnel.HandshakeResponse
 	if err := json.Unmarshal(plainResp, &hsResp); err != nil {
 		log.Fatalf("Unmarshal handshake response failed: %v", err)
 	}
+	srvPub, err := hex.DecodeString(hsResp.ServerPub)
+	if err != nil || len(srvPub) != tunnel.X25519KeySize {
+		log.Fatalf("Invalid server X25519 public key in handshake response")
+	}
+	sharedSecret, err := tunnel.ComputeX25519Shared(clientPriv, srvPub)
+	for i := range clientPriv {
+		clientPriv[i] = 0
+	}
+	if err != nil {
+		log.Fatalf("ComputeX25519Shared failed: %v", err)
+	}
+	c2sKey, s2cKey := tunnel.DeriveSessionKeys(hsKey, sharedSecret, salt)
+
 	log.Printf("[argon4-client] рукопожатие ОК: assignedIP=%s/%d serverIP=%s mtu=%d routes=%v",
 		hsResp.AssignedIP, hsResp.SubnetCidr, hsResp.ServerIP, hsResp.MTU, hsResp.Routes)
 
+	var c2sSeq atomic.Uint64
+	var replay tunnel.ReplayWindow
+
 	if *sendPayload != "" {
-		pkt, err := tunnel.SealPacket(tunnel.FrameTypeKeepalive, salt, key, []byte(*sendPayload))
+		pkt, err := tunnel.SealPacketWithSeq(tunnel.FrameTypeKeepalive, salt, psk, c2sKey, c2sSeq.Add(1), []byte(*sendPayload))
 		if err != nil {
-			log.Fatalf("SealPacket material failed: %v", err)
+			log.Fatalf("SealPacketWithSeq material failed: %v", err)
 		}
 		if _, err := conn.Write(pkt); err != nil {
 			log.Fatalf("Write material failed: %v", err)
@@ -104,9 +134,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("Read keepalive pong failed: %v", err)
 		}
-		_, _, pong, err := tunnel.OpenPacket(buf[:n], key)
-		if err != nil {
-			log.Fatalf("OpenPacket keepalive pong failed: %v", err)
+		_, _, seq, pong, err := tunnel.OpenPacketWithKey(buf[:n], psk, s2cKey)
+		if err != nil || !replay.Accept(seq) {
+			log.Fatalf("OpenPacketWithKey keepalive pong failed: %v", err)
 		}
 		log.Printf("[argon4-client] зашифрованный материал доставлен и подтверждён сервером: %q", string(pong))
 	}
@@ -138,7 +168,7 @@ func main() {
 			if rerr != nil {
 				return
 			}
-			wire, serr := tunnel.SealPacket(tunnel.FrameTypeData, salt, key, tunBuf[:rn])
+			wire, serr := tunnel.SealPacketWithSeq(tunnel.FrameTypeData, salt, psk, c2sKey, c2sSeq.Add(1), tunBuf[:rn])
 			if serr == nil {
 				_, _ = conn.Write(wire)
 			}
@@ -152,8 +182,8 @@ func main() {
 			if rerr != nil {
 				return
 			}
-			ft, _, pt, oerr := tunnel.OpenPacket(udpBuf[:rn], key)
-			if oerr == nil && ft == tunnel.FrameTypeData && len(pt) > 0 {
+			ft, _, seq, pt, oerr := tunnel.OpenPacketWithKey(udpBuf[:rn], psk, s2cKey)
+			if oerr == nil && ft == tunnel.FrameTypeData && replay.Accept(seq) && len(pt) > 0 {
 				_, _ = tunDev.Write(pt)
 			}
 		}

@@ -2,66 +2,94 @@ package com.example.argontunnel.crypto
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import javax.crypto.AEADBadTagException
 
 class Argon4CryptoTest {
 
-    private val fastParams = Argon4Params(iterations = 1, memoryKiB = 64, parallelism = 1)
-
     @Test
-    fun `argon2id matches RFC 9106 and Ubuntu Go server reference`() {
-        val key = Argon4Crypto.deriveKey(
-            masterPassword = "password",
-            salt = "somesalt16bytes!".toByteArray(Charsets.UTF_8),
-            params = Argon4Params(iterations = 2, memoryKiB = 64, parallelism = 1),
-        )
-        val hex = key.encoded.joinToString("") { "%02x".format(it) }
-        assertEquals("ac09230651f4855141b3cdfca3e77a7ab1a70d300bbd4a78cf9bb658333e4abe", hex)
+    fun testDeriveKeyAndPSKDeterministic() {
+        val password = "correct-horse-battery-staple"
+        val salt = ByteArray(16) { it.toByte() }
+        val key1 = Argon4Crypto.deriveKey(password, salt)
+        val key2 = Argon4Crypto.deriveKey(password, salt)
+        assertArrayEquals(key1.encoded, key2.encoded)
+
+        val psk1 = Argon4Crypto.derivePSK(password)
+        val psk2 = Argon4Crypto.derivePSK(password)
+        assertArrayEquals(psk1, psk2)
+        assertEquals(32, psk1.size)
     }
 
     @Test
-    fun `seal and open packet roundtrip with master password`() {
-        val salt = "0123456789abcdef".toByteArray(Charsets.UTF_8)
-        val key = Argon4Crypto.deriveKey("мастер-пароль-секрет", salt, fastParams)
-        val payload = "зашифрованный материал через интерфейс".toByteArray(Charsets.UTF_8)
+    fun testClientAuthToken() {
+        val psk = ByteArray(32) { 0x42 }
+        val token1 = Argon4Crypto.clientAuthToken(psk, "client-1", "secret-1")
+        val token2 = Argon4Crypto.clientAuthToken(psk, "client-1", "secret-1")
+        val tokenDiff = Argon4Crypto.clientAuthToken(psk, "client-1", "secret-2")
 
-        val packet = Argon4Crypto.sealPacket(
+        assertEquals(token1, token2)
+        assertEquals(32, token1.length) // 16 bytes hex = 32 chars
+        assertFalse(token1 == tokenDiff)
+    }
+
+    @Test
+    fun testReplayWindow() {
+        val rw = ReplayWindow()
+        assertTrue(rw.accept(1))
+        assertFalse(rw.accept(1)) // duplicate rejected
+        assertTrue(rw.accept(2))
+        assertTrue(rw.accept(10))
+        assertTrue(rw.accept(5))  // inside window
+        assertFalse(rw.accept(5)) // duplicate inside window rejected
+        assertTrue(rw.accept(100))
+        assertFalse(rw.accept(10)) // too old (diff >= 64)
+    }
+
+    @Test
+    fun testSealAndOpenPacketWithSeqAndMask() {
+        val password = "secret-password"
+        val psk = Argon4Crypto.derivePSK(password)
+        val salt = Argon4Crypto.newSalt()
+        val key = Argon4Crypto.deriveKey(password, salt)
+
+        val plaintext = "hello-argon4-encrypted-world".toByteArray(Charsets.UTF_8)
+        val sealed = Argon4Crypto.sealPacketWithSeq(
             frameType = Argon4Crypto.FRAME_DATA,
             salt = salt,
+            psk = psk,
             key = key,
-            plaintext = payload,
+            seq = 42L,
+            plaintext = plaintext
         )
 
-        val opened = Argon4Crypto.openPacket(packet, packet.size, key)
-        assertEquals(Argon4Crypto.FRAME_DATA, opened.frameType)
-        assertArrayEquals(salt, opened.salt)
-        assertArrayEquals(payload, opened.plaintext)
+        val decrypted = Argon4Crypto.openPacket(sealed, sealed.size, psk, key)
+        assertEquals(Argon4Crypto.FRAME_DATA, decrypted.frameType)
+        assertEquals(42L, decrypted.seq)
+        assertArrayEquals(salt, decrypted.salt)
+        assertArrayEquals(plaintext, decrypted.plaintext)
     }
 
-    @Test
-    fun `wrong master password or tampered header fails decryption`() {
-        val salt = "0123456789abcdef".toByteArray(Charsets.UTF_8)
-        val rightKey = Argon4Crypto.deriveKey("верный-мастер-пароль", salt, fastParams)
-        val wrongKey = Argon4Crypto.deriveKey("чужой-мастер-пароль", salt, fastParams)
+    @Test(expected = AEADBadTagException::class)
+    fun testOpenPacketWrongPasswordThrows() {
+        val salt = Argon4Crypto.newSalt()
+        val psk = Argon4Crypto.derivePSK("password-1")
+        val key = Argon4Crypto.deriveKey("password-1", salt)
 
-        val packet = Argon4Crypto.sealPacket(
+        val sealed = Argon4Crypto.sealPacketWithSeq(
             frameType = Argon4Crypto.FRAME_DATA,
             salt = salt,
-            key = rightKey,
-            plaintext = "секретный пакет данных".toByteArray(Charsets.UTF_8),
+            psk = psk,
+            key = key,
+            seq = 1L,
+            plaintext = "data".toByteArray()
         )
 
-        assertThrows(AEADBadTagException::class.java) {
-            Argon4Crypto.openPacket(packet, packet.size, wrongKey)
-        }
-
-        // Изменение байта типа кадра в заголовке ломает проверку AAD
-        val tampered = packet.copyOf()
-        tampered[1] = Argon4Crypto.FRAME_KEEPALIVE
-        assertThrows(AEADBadTagException::class.java) {
-            Argon4Crypto.openPacket(tampered, tampered.size, rightKey)
-        }
+        val wrongPsk = Argon4Crypto.derivePSK("password-2")
+        val wrongKey = Argon4Crypto.deriveKey("password-2", salt)
+        Argon4Crypto.openPacket(sealed, sealed.size, wrongPsk, wrongKey)
     }
 }

@@ -1,46 +1,38 @@
 package tunnel
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
 // ServerConfig описывает конфигурацию серверного демона Argon4 на Ubuntu.
 type ServerConfig struct {
-	// ListenInterface — имя сетевого интерфейса Ubuntu для приёма пакетов (например, "eth0", "ens3" или "" для всех).
 	ListenInterface string
-	// ListenAddr — UDP-адрес и порт приёма зашифрованных пакетов (например, "0.0.0.0:51820").
-	ListenAddr string
-	// TunName — имя создаваемого или оборачиваемого виртуального TUN-интерфейса на Ubuntu (например, "argon0").
-	TunName string
-	// SubnetCIDR — виртуальная подсеть туннеля (например, "10.44.0.1/24").
-	SubnetCIDR string
-	// OutInterface — существующий сетевой интерфейс Ubuntu для оборачивания/маршрутизации через NAT (например, "eth0").
-	OutInterface string
-	// EnableNAT включает автоматическую настройку IPv4 forwarding и правил iptables MASQUERADE/DNAT.
-	EnableNAT bool
-	// MasterPassword — общий мастер-пароль для вывода ключа через Argon2id.
-	MasterPassword string
-	// ArgonParams — параметры времени, памяти и параллелизма Argon2id.
-	ArgonParams ArgonParams
-	// MTU виртуального TUN-интерфейса (по умолчанию 1380).
-	MTU int
-	// DNS-серверы, передаваемые клиенту в ответе рукопожатия.
-	DNS []string
-	// Маршруты CIDR, передаваемые клиенту в ответе рукопожатия (например, ["0.0.0.0/0"] или ["10.44.0.0/24"]).
-	Routes []string
+	ListenAddr      string
+	TunName         string
+	SubnetCIDR      string
+	OutInterface    string
+	EnableNAT       bool
+	MasterPassword  string
+	ArgonParams     ArgonParams
+	MTU             int
+	DNS             []string
+	Routes          []string
 }
 
 // Server реализует шифрованный шлюз-надстройку Argon4 между UDP-интерфейсом и виртуальным TUN-интерфейсом Ubuntu.
 type Server struct {
-	cfg      ServerConfig
-	sessions *SessionManager
-	udpConn  *net.UDPConn
-	tun      io.ReadWriteCloser
+	cfg        ServerConfig
+	sessions   *SessionManager
+	udpConn    *net.UDPConn
+	tun        io.ReadWriteCloser
+	lastErrLog atomic.Int64
 }
 
 func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
@@ -146,6 +138,14 @@ func (s *Server) Close() error {
 	return nil
 }
 
+func (s *Server) logDrop(remoteAddr *net.UDPAddr, msg string, err error) {
+	now := time.Now().UnixNano()
+	prev := s.lastErrLog.Load()
+	if now-prev >= int64(2*time.Second) && s.lastErrLog.CompareAndSwap(prev, now) {
+		log.Printf("[argon4-server] пакет от %s отброшен (%s): %v", remoteAddr, msg, err)
+	}
+}
+
 func (s *Server) udpToTunLoop() error {
 	buf := make([]byte, 65535)
 	for {
@@ -160,65 +160,54 @@ func (s *Server) udpToTunLoop() error {
 
 // HandlePacket обрабатывает один входящий зашифрованный кадр от remoteAddr и при необходимости возвращает зашифрованный ответ.
 func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
-	_, _, salt, _, _, err := ParseHeader(pkt)
+	psk := s.sessions.PSK()
+	_, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(pkt, psk)
 	if err != nil {
 		return nil
 	}
 
-	key, sess := s.sessions.GetOrDeriveKey(salt)
-	frameType, _, plaintext, err := OpenPacket(pkt, key)
-	if err != nil {
-		log.Printf("[argon4-server] пакет от %s отброшен: %v", remoteAddr, err)
+	if frameType == FrameTypeHandshakeReq {
+		return s.handleHandshake(pkt, psk, salt, remoteAddr)
+	}
+
+	sess := s.sessions.LookupBySalt(salt)
+	if sess == nil {
+		// Сессия не установлена рукопожатием — пакеты данных и keepalive без рукопожатия отбрасываются без запуска Argon2id.
 		return nil
 	}
+	if !sess.CheckReplay(seq) {
+		s.logDrop(remoteAddr, "replay pre-check", ErrReplayPacket)
+		return nil
+	}
+	_, _, _, plaintext, err := OpenPacketWithKey(pkt, psk, sess.C2SKey)
+	if err != nil {
+		s.logDrop(remoteAddr, "c2s auth", err)
+		return nil
+	}
+	if !sess.AcceptReplay(seq) {
+		s.logDrop(remoteAddr, "replay commit", ErrReplayPacket)
+		return nil
+	}
+
+	// Обновляем адрес клиента только после успешной проверки GCM-тега и защиты от повтора (невозможно угнать сессию повтором пакета).
+	s.sessions.TouchSession(sess, remoteAddr)
 
 	switch frameType {
-	case FrameTypeHandshakeReq:
-		var req HandshakeRequest
-		if err := json.Unmarshal(plaintext, &req); err != nil {
-			log.Printf("[argon4-server] некорректный JSON рукопожатия от %s: %v", remoteAddr, err)
-			return nil
-		}
-		peer := s.sessions.RegisterSession(req.ClientID, salt, key, remoteAddr)
-		resp := HandshakeResponse{
-			AssignedIP: peer.AssignedIP.String(),
-			ServerIP:   s.sessions.ServerIP().String(),
-			SubnetCidr: s.sessions.SubnetPrefixLen(),
-			MTU:        s.cfg.MTU,
-			DNS:        s.cfg.DNS,
-			Routes:     s.cfg.Routes,
-			ServerTime: time.Now().Unix(),
-		}
-		respBytes, _ := json.Marshal(resp)
-		wireResp, err := SealPacket(FrameTypeHandshakeResp, salt, key, respBytes)
-		if err == nil {
-			log.Printf("[argon4-server] рукопожатие ОК: клиент=%q адрес=%s выдан=%s приложения=%v",
-				req.ClientID, remoteAddr, peer.AssignedIP, req.Apps)
-			return wireResp
-		}
-
 	case FrameTypeKeepalive:
-		if sess == nil {
-			sess = s.sessions.RegisterSession("", salt, key, remoteAddr)
-		} else {
-			s.sessions.TouchSession(sess, remoteAddr)
-		}
-		wirePong, err := SealPacket(FrameTypeKeepalive, salt, key, []byte("pong"))
+		wirePong, err := SealPacketWithSeq(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte("pong"))
 		if err == nil {
 			return wirePong
 		}
 
 	case FrameTypeData:
-		if sess == nil {
-			// Неявная регистрация сессии при прямом приёме зашифрованных IP-пакетов без предварительного рукопожатия
-			srcIP, _, ok := ParseIPv4Addrs(plaintext)
-			clientID := ""
-			if ok {
-				clientID = srcIP.String()
-			}
-			sess = s.sessions.RegisterSession(clientID, salt, key, remoteAddr)
-		} else {
-			s.sessions.TouchSession(sess, remoteAddr)
+		srcIP, _, ok := ParseIPv4Addrs(plaintext)
+		if !ok {
+			return nil
+		}
+		// Запрещаем подмену внутреннего адреса отправителя (IP spoofing между клиентами туннеля).
+		if !srcIP.Equal(sess.AssignedIP) {
+			s.logDrop(remoteAddr, "inner src IP mismatch", fmt.Errorf("got %s want %s", srcIP, sess.AssignedIP))
+			return nil
 		}
 		if s.tun != nil && len(plaintext) > 0 {
 			_, _ = s.tun.Write(plaintext)
@@ -227,7 +216,87 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 	return nil
 }
 
-// SealTunPacket шифрует исходящий IPv4-пакет из интерфейса TUN ключом соответствующей клиентской сессии.
+func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) []byte {
+	hsKey, err := s.sessions.DeriveHandshakeKey(salt)
+	if err != nil {
+		s.logDrop(remoteAddr, "handshake derive", err)
+		return nil
+	}
+	_, _, _, plaintext, err := OpenPacketWithKey(pkt, psk, hsKey)
+	if err != nil {
+		s.logDrop(remoteAddr, "handshake open", err)
+		return nil
+	}
+
+	var req HandshakeRequest
+	if err := json.Unmarshal(plaintext, &req); err != nil {
+		s.logDrop(remoteAddr, "handshake json", err)
+		return nil
+	}
+
+	now := time.Now()
+	reqTime := time.Unix(req.Timestamp, 0)
+	if now.Sub(reqTime).Abs() > HandshakeClockSkew {
+		s.logDrop(remoteAddr, "handshake timestamp", ErrClockSkew)
+		return nil
+	}
+
+	clientPub, err := hex.DecodeString(req.ClientPub)
+	if err != nil || len(clientPub) != X25519KeySize {
+		s.logDrop(remoteAddr, "handshake clientPub", fmt.Errorf("некорректный ключ X25519"))
+		return nil
+	}
+
+	var clientAuth []byte
+	if req.ClientAuth != "" {
+		clientAuth, _ = hex.DecodeString(req.ClientAuth)
+	}
+
+	srvPriv, srvPub, err := GenerateX25519Keypair()
+	if err != nil {
+		return nil
+	}
+	sharedSecret, err := ComputeX25519Shared(srvPriv, clientPub)
+	for i := range srvPriv {
+		srvPriv[i] = 0
+	}
+	if err != nil {
+		s.logDrop(remoteAddr, "handshake ecdh", err)
+		return nil
+	}
+
+	c2sKey, s2cKey := DeriveSessionKeys(hsKey, sharedSecret, salt)
+	for i := range sharedSecret {
+		sharedSecret[i] = 0
+	}
+
+	peer, err := s.sessions.RegisterSession(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr)
+	if err != nil {
+		s.logDrop(remoteAddr, "handshake register", err)
+		return nil
+	}
+
+	resp := HandshakeResponse{
+		AssignedIP: peer.AssignedIP.String(),
+		ServerIP:   s.sessions.ServerIP().String(),
+		SubnetCidr: s.sessions.SubnetPrefixLen(),
+		MTU:        s.cfg.MTU,
+		DNS:        s.cfg.DNS,
+		Routes:     s.cfg.Routes,
+		ServerTime: now.Unix(),
+		ServerPub:  hex.EncodeToString(srvPub),
+	}
+	respBytes, _ := json.Marshal(resp)
+	wireResp, err := SealPacketWithSeq(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes)
+	if err != nil {
+		return nil
+	}
+	log.Printf("[argon4-server] рукопожатие ОК: клиент=%q адрес=%s выдан=%s приложения=%v",
+		req.ClientID, remoteAddr, peer.AssignedIP, req.Apps)
+	return wireResp
+}
+
+// SealTunPacket шифрует исходящий IPv4-пакет из интерфейса TUN ключом s2c соответствующей клиентской сессии.
 func (s *Server) SealTunPacket(ipPkt []byte) ([]byte, *net.UDPAddr) {
 	_, dstIP, ok := ParseIPv4Addrs(ipPkt)
 	if !ok {
@@ -237,7 +306,7 @@ func (s *Server) SealTunPacket(ipPkt []byte) ([]byte, *net.UDPAddr) {
 	if sess == nil {
 		return nil, nil
 	}
-	wirePkt, err := SealPacket(FrameTypeData, sess.Salt[:], sess.Key, ipPkt)
+	wirePkt, err := SealPacketWithSeq(FrameTypeData, sess.Salt[:], s.sessions.PSK(), sess.S2CKey, sess.NextS2CSeq(), ipPkt)
 	if err != nil {
 		return nil, nil
 	}
