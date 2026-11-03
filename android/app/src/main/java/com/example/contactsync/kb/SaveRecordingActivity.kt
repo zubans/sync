@@ -165,18 +165,26 @@ private fun SaveRecordingDialog(id: String, onDone: () -> Unit) {
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 TextButton(onClick = { confirmDelete = true }) { Text("Не сохранять", color = Down) }
-                Box(Modifier.weight(1f))
                 TextButton(onClick = {
                     RecordingStore.keep(context, id, title)
                     done()
                 }) { Text("Сохранить без проекта", color = TextMain) }
-                val target = list?.firstOrNull { it.slug == project }
-                TextButton(enabled = target != null, onClick = {
+            }
+            val target = list?.firstOrNull { it.slug == project }
+            TextButton(
+                enabled = target != null,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
                     RecordingStore.sendToProject(context, id, target!!.slug, title)
                     done()
-                }) { Text(target?.let { "В «${it.name}»" } ?: "В проект", color = if (target != null) Accent else TextMuted) }
+                },
+            ) {
+                Text(
+                    target?.let { "Сохранить в «${it.name}»" } ?: "Сохранить в проект",
+                    color = if (target != null) Accent else TextMuted,
+                )
             }
         }
     }
