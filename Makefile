@@ -10,11 +10,21 @@ APK        := android/app/build/outputs/apk/debug/app-debug.apk
 TUNNEL_APK := android/tunnel/build/outputs/apk/debug/tunnel-debug.apk
 GO_VERSION ?= 1.27
 GO_IMAGE   := golang:$(GO_VERSION)-alpine
+GO         ?= go
+GOOS       ?= $(shell $(GO) env GOOS 2>/dev/null || uname -s | tr '[:upper:]' '[:lower:]')
+GOARCH     ?= $(shell $(GO) env GOARCH 2>/dev/null || uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/arm64/' -e 's/^armv7l$$/arm/')
+CEP_BUILD_DIR := $(CURDIR)/cep/build/$(GOOS)-$(GOARCH)
+CEP_GO_DEPS_STAMP := $(CURDIR)/cep/build/.go-modules.stamp
+CEP_GO_MOD_FILES := $(wildcard cep/argon4/go.mod cep/argon4/go.sum)
+CEP_SOURCE_FILES := $(wildcard cep/argon4/*.go cep/argon4/cmd/cep-cli/*.go cep/argon4/cmd/cep-argon4/*.go)
+SING_BOX_VERSION ?= 1.14.3
+XRAY_VERSION ?= 26.3.27
+CEP_INSTALL_DEPS ?= 1
 
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk cep-engine install-apk install-tunnel-apk reverse release deploy
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk cep-engine cep-linux cep-linux-deps test-cep-linux install-apk install-tunnel-apk reverse release deploy
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -209,6 +219,63 @@ deploy: ## Раскатка на сервере: git pull, make up и, если 
 	git pull --ff-only
 	$(MAKE) up
 	$(MAKE) release
+
+# --- Терминальный CEP для Linux: сборка из исходников под выбранную платформу ---
+
+cep-linux: cep-linux-deps $(CEP_BUILD_DIR)/cep-argon4 $(CEP_BUILD_DIR)/cep-cli ## Собрать терминальный CEP и подтянуть недостающие зависимости
+	@test "$(GOOS)" = "linux" || { echo "Для Linux укажите GOOS=linux или запускайте на Linux"; exit 1; }
+	@echo "Готово: $(CEP_BUILD_DIR)"
+
+cep-linux-deps: ## Установить только отсутствующие системные зависимости CEP
+	@if [ "$(CEP_INSTALL_DEPS)" = "1" ]; then \
+		SING_BOX_VERSION="$(SING_BOX_VERSION)" XRAY_VERSION="$(XRAY_VERSION)" \
+			cep/scripts/ensure-linux-deps.sh; \
+	fi
+
+$(CEP_BUILD_DIR):
+	@mkdir -p "$@"
+
+# Go-модули скачиваются повторно только после изменения go.mod/go.sum.
+$(CEP_GO_DEPS_STAMP): $(CEP_GO_MOD_FILES) | cep-linux-deps
+	@mkdir -p "$(dir $@)"
+	cd cep/argon4 && $(GO) mod download
+	@touch "$@"
+
+$(CEP_BUILD_DIR)/cep-argon4: $(CEP_SOURCE_FILES) $(CEP_GO_DEPS_STAMP) | $(CEP_BUILD_DIR)
+	cd cep/argon4 && CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" \
+		$(GO) build -trimpath -ldflags="-s -w" -o "$@" ./cmd/cep-argon4
+
+$(CEP_BUILD_DIR)/cep-cli: $(CEP_SOURCE_FILES) $(CEP_GO_DEPS_STAMP) | $(CEP_BUILD_DIR)
+	cd cep/argon4 && CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" \
+		$(GO) build -trimpath -ldflags="-s -w" -o "$@" ./cmd/cep-cli
+
+test-cep-linux: $(CEP_GO_DEPS_STAMP) ## Проверить терминальный CEP и Argon4
+	cd cep/argon4 && $(GO) test -race ./...
+	cd cep/argon4 && $(GO) vet ./...
+	bash cep/scripts/test-linux-service.sh
+
+.PHONY: install-cep-linux configure-cep-linux cep-service-start cep-service-stop cep-service-restart cep-service-status cep-service-logs
+
+install-cep-linux: cep-linux ## Собрать, настроить цепочку и установить CEP как systemd-сервис
+	CEP_BUILD_DIR="$(CEP_BUILD_DIR)" cep/scripts/linux-service.sh install
+
+configure-cep-linux: ## Интерактивно создать цепочку или добавить узлы в установленный CEP
+	cep/scripts/linux-service.sh configure
+
+cep-service-start: ## Запустить CEP и проверить состояние сервиса
+	cep/scripts/linux-service.sh start
+
+cep-service-stop: ## Остановить CEP и очистить его маршруты
+	cep/scripts/linux-service.sh stop
+
+cep-service-restart: ## Перезапустить CEP и проверить состояние сервиса
+	cep/scripts/linux-service.sh restart
+
+cep-service-status: ## Показать состояние CEP systemd-сервиса
+	cep/scripts/linux-service.sh status
+
+cep-service-logs: ## Показать журнал CEP (выход — Ctrl-C)
+	cep/scripts/linux-service.sh logs
 
 # --- Шлюз-надстройка Argon4 Tunnel (Ubuntu сервер) ---
 
