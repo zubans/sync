@@ -1,0 +1,27 @@
+--- a/src/tlslib.c	2026-11-04 09:23:41.000810615 +0000
++++ b/src/tlslib.c	2026-11-04 09:23:41.002074740 +0000
+@@ -38,6 +38,7 @@
+ #include <ccan/hash/hash.h>
+ #include <vpn.h>
+ #include <main.h>
++extern char secmod_socket_file_name_socket_file[_POSIX_PATH_MAX];
+ #include <worker.h>
+ #include <common.h>
+ #include <sys/un.h>
+@@ -697,6 +698,16 @@
+ 
+ 	/* This can be called early during server load when sec-mod is not
+ 	 * yet available. Thus it is only a debug message. */
++	/* The sec-mod socket path baked into cdata at config-load time lacks
++	 * the per-instance suffix (e.g. ".0") that the actual socket file gets
++	 * in run_sec_mod(). The worker process restores the correct, suffixed
++	 * path into secmod_socket_file_name_socket_file at startup, so resolve
++	 * the path here at connect time instead of using the baked value. */
++	if (secmod_socket_file_name_socket_file[0] != 0) {
++		strlcpy(cdata->sa.sun_path, secmod_socket_file_name_socket_file, sizeof(cdata->sa.sun_path));
++		cdata->sa_len = SUN_LEN(&cdata->sa);
++	}
++
+ 	ret = connect(sd, (struct sockaddr *)&cdata->sa, cdata->sa_len);
+ 	if (ret == -1) {
+ 		e = errno;

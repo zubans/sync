@@ -24,7 +24,7 @@ CEP_INSTALL_DEPS ?= 1
 .DEFAULT_GOAL := help
 # Домашняя папка agy: основной аккаунт — /app/var/agy, запасные (при лимите основного) — /app/var/agy/account2…
 AGY_HOME = /app/var/agy$(if $(filter-out 1,$(or $(ACCOUNT),1)),/account$(ACCOUNT))
-.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk cep-engine cep-linux cep-linux-deps test-cep-linux install-apk install-tunnel-apk reverse release deploy
+.PHONY: help init build up down restart logs ps sh psql migrate admin user apk-cleanup news articles translate translate-requested analyze storyline-tune embedding-compare market advice digest digest-preview agy-login agy-status test test-tunnel e2e-tunnel build-tunnel install-ubuntu-tunnel clean backup-env backup backup-db backup-status restore-db restore-files decrypt-secrets apk tunnel-apk cep-engine cep-linux cep-linux-deps test-cep-linux install-apk install-tunnel-apk reverse release deploy ocserv-up ocserv-down ocserv-logs ocserv-status ocserv-ip ocserv-add-user ocserv-rm-user
 
 help: ## Список команд
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -299,3 +299,41 @@ e2e-tunnel: ## Сквозной тест Argon4 туннеля в Docker (Ubuntu
 
 install-ubuntu-tunnel: ## Установить демон Argon4 Tunnel как systemd-сервис на Ubuntu (требует sudo)
 	sudo ./tunnel-server/ubuntu/install-ubuntu.sh
+
+# --- OpenConnect VPN-сервер (ocserv) ---
+
+ocserv-up: ## Собрать и запустить OpenConnect VPN-сервер (ocserv)
+	$(COMPOSE) up -d --build ocserv
+
+ocserv-down: ## Остановить ocserv (данные и сертификаты сохраняются)
+	$(COMPOSE) stop ocserv
+
+ocserv-logs: ## Логи ocserv
+	$(COMPOSE) logs -f --tail=100 ocserv
+
+ocserv-status: ## Подключённые клиенты ocserv
+	$(COMPOSE) exec -T ocserv occtl show users
+
+ocserv-ip: ## VPN-IP подключённого клиента (для OCSERV_FORWARD_TARGET): make ocserv-ip OCSERV_USER=имя
+	@test -n "$(OCSERV_USER)" || { echo "Укажите OCSERV_USER=..."; exit 1; }
+	$(COMPOSE) exec -T ocserv occtl show user "$(OCSERV_USER)" | grep -i 'IP:' || echo "Пользователь $(OCSERV_USER) не подключён"
+
+# Пользователи хранятся в OCSERV_USERS в .env (пересоздаются при каждом старте контейнера),
+# поэтому добавление/удаление правит .env и перезапускает сервис.
+
+ocserv-add-user: ## Добавить пользователя: make ocserv-add-user OCSERV_USER=имя OCSERV_PASS=пароль
+	@test -n "$(OCSERV_USER)" || { echo "Укажите OCSERV_USER=..."; exit 1; }
+	@test -n "$(OCSERV_PASS)" || { echo "Укажите OCSERV_PASS=..."; exit 1; }
+	@if grep -q '^OCSERV_USERS=' .env; then \
+		sed -i.bak "s|^OCSERV_USERS=.*|OCSERV_USERS=$$(grep '^OCSERV_USERS=' .env | cut -d= -f2-),$(OCSERV_USER):$(OCSERV_PASS)|" .env && rm -f .env.bak; \
+	else echo "OCSERV_USERS=$(OCSERV_USER):$(OCSERV_PASS)" >> .env; fi
+	$(COMPOSE) up -d ocserv
+
+ocserv-rm-user: ## Удалить пользователя: make ocserv-rm-user OCSERV_USER=имя
+	@test -n "$(OCSERV_USER)" || { echo "Укажите OCSERV_USER=..."; exit 1; }
+	@if grep -q '^OCSERV_USERS=' .env; then \
+		cur=$$(grep '^OCSERV_USERS=' .env | cut -d= -f2-); \
+		rest=$$(printf '%s' "$$cur" | tr ',' '\n' | grep -v "^$(OCSERV_USER):" | paste -sd, -); \
+		sed -i.bak "s|^OCSERV_USERS=.*|OCSERV_USERS=$$rest|" .env && rm -f .env.bak; \
+	fi
+	$(COMPOSE) up -d ocserv

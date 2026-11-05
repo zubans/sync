@@ -175,6 +175,10 @@ make admin EMAIL=admin@example.com
 
 Для продакшена сервер нужно поставить за обратный прокси с HTTPS: release-сборка клиента ходит только по HTTPS.
 
+### OpenConnect VPN
+
+В стеке есть OpenConnect VPN-сервер (`ocserv`): `make ocserv-up`, пользователи — `make ocserv-add-user OCSERV_USER=… OCSERV_PASS=…`. Подробнее — `docs/ocserv.md`.
+
 ### Резервные копии
 
 Бекап в две копии с одинаковой раскладкой — Яндекс.Диск `backup/sync` и шара `D:` компьютера 192.168.1.133 (`D:\backup\sync`, на хосте смонтирована в `/media/share`) — по той же схеме, что у KB: контейнер `backup` (`docker/backup/backup.sh`, rclone и `pg_dump`), слоты по кругу. Дамп снимается один раз и заливается в обе копии; недоступная копия (компьютер выключен, токен Яндекса истёк) пропускается, другая пишется, а запуск завершается с ошибкой. Remote `yandex` берётся из `rclone.conf` пользователя хоста — тот же, что у бекапов KB и trash.
