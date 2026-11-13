@@ -399,6 +399,15 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
                 item { Field("Секрет клиента", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
                 item { Text("Туннель переносит IPv4. Argon4 может быть отдельным узлом или основой для следующего узла цепочки.", style = MaterialTheme.typography.bodySmall) }
             }
+            proto == VpnProtocol.TRANSIT -> {
+                item { Field("Сервер", p.server, hint = "host:51820; без порта используется 51820") { save(p.copy(server = it.trim())) } }
+                item { Field("Мастер-пароль", p.password, secret = true, hint = "Пусто — слепой passthrough-транзит к следующему узлу Argon4") { save(p.copy(password = it)) } }
+                if (p.password.trim().isNotEmpty()) {
+                    item { Field("ID клиента", p.clientID, hint = "Если пусто, используется ID профиля") { save(p.copy(clientID = it.trim())) } }
+                    item { Field("Секрет клиента", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
+                }
+                item { Text("L4-транзит (TCP/UDP) для следующего узла цепочки или слепой ретранслятор для Argon4 без пароля.", style = MaterialTheme.typography.bodySmall) }
+            }
             else -> {
                 item { Field("Сервер", p.server, hint = "host, host:port или https://host:port") { save(p.copy(server = it.trim())) } }
                 item { Field("Логин", p.username) { save(p.copy(username = it)) } }
@@ -411,11 +420,23 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
                 item { LabeledSwitch("Не проверять сертификат", p.ignoreCertErrors) { save(p.copy(ignoreCertErrors = it)) } }
             }
         }
-        item {
-            Field(
-                "Сети через этот узел", p.routes,
-                hint = "Например 192.168.1.119, 10.0.0.0/8 — пойдут через этот узел, а не дальше по цепочке",
-            ) { save(p.copy(routes = it)) }
+        if (proto != VpnProtocol.ARGON4 && proto != VpnProtocol.TRANSIT && proto.unsupportedReason == null) {
+            item {
+                LabeledSwitch("Шифровать через Argon4", p.useArgon) { save(p.copy(useArgon = it)) }
+            }
+            if (p.useArgon) {
+                item { Field("Мастер-пароль Argon4", p.argonPassword, secret = true) { save(p.copy(argonPassword = it)) } }
+                item { Field("ID клиента Argon4", p.clientID, hint = "Если пусто, используется ID профиля") { save(p.copy(clientID = it.trim())) } }
+                item { Field("Секрет клиента Argon4", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
+            }
+        }
+        if (proto != VpnProtocol.TRANSIT) {
+            item {
+                Field(
+                    "Сети через этот узел", p.routes,
+                    hint = "Например 192.168.1.119, 10.0.0.0/8 — пойдут через этот узел, а не дальше по цепочке",
+                ) { save(p.copy(routes = it)) }
+            }
         }
         item {
             OutlinedButton(onClick = { model.deleteProfile(id); onClose() }, modifier = Modifier.padding(vertical = 12.dp)) { Text("Удалить профиль") }

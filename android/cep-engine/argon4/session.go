@@ -18,6 +18,15 @@ const (
 	SessionIdleTimeout = 10 * time.Minute
 	// Максимальное число одновременных вычислений Argon2id на сервере (защита от CPU/RAM DoS).
 	MaxConcurrentArgon2 = 4
+
+	// Режимы работы рукопожатия Argon4.
+	ModeTunnel  = "tunnel"
+	ModeTransit = "transit"
+	ModeAuto    = "auto"
+
+	// Транспортные протоколы L4-транзита.
+	ProtoUDP = "udp"
+	ProtoTCP = "tcp"
 )
 
 var (
@@ -34,18 +43,23 @@ type HandshakeRequest struct {
 	Requested  string   `json:"requestedIp,omitempty"`
 	Apps       []string `json:"apps,omitempty"`
 	Timestamp  int64    `json:"timestamp"`
+	Mode       string   `json:"mode,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	Proto      string   `json:"proto,omitempty"`
 }
 
 // HandshakeResponse возвращается сервером зашифрованным внутри кадра FrameTypeHandshakeResp.
 type HandshakeResponse struct {
-	AssignedIP string   `json:"assignedIp"`
-	ServerIP   string   `json:"serverIp"`
-	SubnetCidr int      `json:"subnetCidr"`
-	MTU        int      `json:"mtu"`
+	AssignedIP string   `json:"assignedIp,omitempty"`
+	ServerIP   string   `json:"serverIp,omitempty"`
+	SubnetCidr int      `json:"subnetCidr,omitempty"`
+	MTU        int      `json:"mtu,omitempty"`
 	DNS        []string `json:"dns,omitempty"`
 	Routes     []string `json:"routes,omitempty"`
 	ServerTime int64    `json:"serverTime"`
 	ServerPub  string   `json:"serverPub"`
+	Mode       string   `json:"mode,omitempty"`
+	Target     string   `json:"target,omitempty"`
 }
 
 // ReplayWindow реализует 64-пакетное скользящее окно защиты от повтора (anti-replay) по принципу RFC 6479 / WireGuard.

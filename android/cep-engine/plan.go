@@ -27,6 +27,8 @@ type Profile struct {
 	AuthGroup         string `json:"authGroup"`
 	IgnoreCertErrors  bool   `json:"ignoreCertErrors"`
 	Routes            string `json:"routes"`
+	UseArgon          bool   `json:"useArgon"`
+	ArgonPassword     string `json:"argonPassword"`
 }
 
 type Plan struct {
@@ -50,7 +52,7 @@ func parsePlan(planJSON string) (*Plan, error) {
 // Supported — поддерживается ли протокол на Android (пусто) или почему нет.
 func Supported(proto string) string {
 	switch proto {
-	case "vless", "hysteria2", "hysteria", "openconnect", "openvpn", "argon4":
+	case "vless", "hysteria2", "hysteria", "openconnect", "openvpn", "argon4", "transit":
 		return ""
 	case "amneziawg":
 		return "AmneziaWG на Android пока не поддерживается"
@@ -114,7 +116,7 @@ func endpointHost(p *Profile) (string, error) {
 			return "", err
 		}
 		return ovpn.remoteHost, nil
-	case "argon4":
+	case "argon4", "transit":
 		host, _, err := parseArgon4Server(p.Server)
 		return host, err
 	}
@@ -177,14 +179,33 @@ func Validate(planJSON string) string {
 		return mustJSON([]string{err.Error()})
 	}
 	problems := []string{}
-	for _, hop := range plan.Hops {
+	for i, hop := range plan.Hops {
 		if reason := Supported(hop.Proto); reason != "" {
 			problems = append(problems, fmt.Sprintf("«%s»: %s", hop.Name, reason))
 			continue
 		}
-		if _, err := hopOptions(&hop, hop.Name, ""); err != nil {
+		if hop.Proto == "transit" {
+			if _, _, err := parseArgon4Server(hop.Server); err != nil {
+				problems = append(problems, fmt.Sprintf("«%s»: %s", hop.Name, err))
+			}
+			if i == len(plan.Hops)-1 {
+				problems = append(problems, fmt.Sprintf("«%s»: транзитный шлюз не может быть последним узлом цепочки", hop.Name))
+			} else if strings.TrimSpace(hop.Password) == "" {
+				next := plan.Hops[i+1]
+				if next.Proto != "argon4" && !next.UseArgon {
+					problems = append(problems, fmt.Sprintf("«%s»: слепой транзит без пароля поддерживает только следующий узел Argon4", hop.Name))
+				}
+			}
+		} else if _, err := hopOptions(&hop, hop.Name, ""); err != nil {
 			problems = append(problems, fmt.Sprintf("«%s»: %s", hop.Name, err))
 			continue
+		}
+		if hop.UseArgon {
+			if hop.Proto == "argon4" || hop.Proto == "transit" {
+				problems = append(problems, fmt.Sprintf("«%s»: Argon4-надстройка не используется с %s", hop.Name, hop.Proto))
+			} else if strings.TrimSpace(hop.ArgonPassword) == "" {
+				problems = append(problems, fmt.Sprintf("«%s»: не задан пароль Argon4-надстройки", hop.Name))
+			}
 		}
 		if _, err := parseRoutes(hop.Routes); err != nil {
 			problems = append(problems, fmt.Sprintf("«%s»: %s", hop.Name, err))
@@ -230,6 +251,59 @@ const tunMTU = 1400
 
 // buildConfig собирает конфиг sing-box: узел N выходит в сеть через узел N-1 (detour),
 // весь трафик TUN уходит в последний узел, «сети через этот узел» — в свой узел.
+func hopClientID(hop *Profile) string {
+	if clientID := strings.TrimSpace(hop.ClientID); clientID != "" {
+		return clientID
+	}
+	return hop.ID
+}
+
+func argon4BaseOptions(hop *Profile, serverAddr, password, clientID string) map[string]any {
+	return map[string]any{
+		"type":          argon4Type,
+		"server":        serverAddr,
+		"password":      password,
+		"client_id":     clientID,
+		"client_secret": hop.ClientSecret,
+	}
+}
+
+func hopTargetPortAndProto(hop *Profile) (port, proto string, err error) {
+	switch hop.Proto {
+	case "vless":
+		l, err := parseLink(hop.URI)
+		if err != nil {
+			return "", "", err
+		}
+		return strconv.Itoa(l.Port), "tcp", nil
+	case "hysteria2", "hysteria":
+		l, err := parseLink(hop.URI)
+		if err != nil {
+			return "", "", err
+		}
+		return strconv.Itoa(l.Port), "udp", nil
+	case "openconnect":
+		u, err := openConnectURL(hop.Server)
+		if err != nil {
+			return "", "", err
+		}
+		return portOr(u.Port(), "443"), "tcp", nil
+	case "openvpn":
+		ovpn, err := parseOVPN(hop.Config)
+		if err != nil {
+			return "", "", err
+		}
+		return strconv.Itoa(ovpn.remotePort), ovpn.network, nil
+	case "argon4", "transit":
+		_, port, err := parseArgon4Server(hop.Server)
+		if err != nil {
+			return "", "", err
+		}
+		return port, "udp", nil
+	}
+	return "", "", fmt.Errorf("%s", Supported(hop.Proto))
+}
+
 func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 	inbounds := []any{map[string]any{
 		"type":       "tun",
@@ -240,34 +314,109 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 		"stack":      "gvisor",
 	}}
 	var outbounds, endpoints, rules []any
+	previousTag := ""
 	previousIsProxy := false
-	for i := range plan.Hops {
-		hop := &plan.Hops[i]
-		tag := fmt.Sprintf("hop%d", i+1)
-		opts, err := hopOptions(hop, tag, serverIPs[i])
-		if err != nil {
-			return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
-		}
-		isEndpoint := opts["type"] == "openconnect" || opts["type"] == "openvpn-client" || opts["type"] == argon4Type
-		switch {
-		case i > 0 && isEndpoint && previousIsProxy:
-			// до прокси-узла — через обёртку с таймаутами (см. deadline.go);
-			// UDP (DTLS) поверх прокси не используем: тоже требует таймаутов, туннель идёт по TLS
-			wrap := fmt.Sprintf("hop%d-deadline", i)
-			outbounds = append(outbounds, map[string]any{"type": deadlineType, "tag": wrap, "detour": fmt.Sprintf("hop%d", i)})
-			opts["detour"] = wrap
-			if opts["type"] == "openconnect" {
+	previousUsesTransit := false
+	blindRelayAddr := ""
+
+	appendHop := func(opts map[string]any, tag string, isEndpoint bool) {
+		if previousTag != "" {
+			if isEndpoint && previousIsProxy {
+				// до прокси-узла — через обёртку с таймаутами (см. deadline.go);
+				// UDP (DTLS) поверх прокси не используем: тоже требует таймаутов, туннель идёт по TLS
+				wrap := previousTag + "-deadline"
+				outbounds = append(outbounds, map[string]any{"type": deadlineType, "tag": wrap, "detour": previousTag})
+				opts["detour"] = wrap
+			} else {
+				opts["detour"] = previousTag
+			}
+			if opts["type"] == "openconnect" && (previousIsProxy || previousUsesTransit) {
 				opts["no_udp"] = true
 			}
-		case i > 0:
-			opts["detour"] = fmt.Sprintf("hop%d", i)
 		}
 		if isEndpoint {
 			endpoints = append(endpoints, opts)
 		} else {
 			outbounds = append(outbounds, opts)
 		}
+		previousTag = tag
 		previousIsProxy = !isEndpoint
+	}
+
+	for i := range plan.Hops {
+		hop := &plan.Hops[i]
+		tag := fmt.Sprintf("hop%d", i+1)
+		if hop.Proto == "transit" {
+			_, transitPort, err := parseArgon4Server(hop.Server)
+			if err != nil {
+				return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
+			}
+			serverAddr := net.JoinHostPort(serverIPs[i], transitPort)
+			if blindRelayAddr != "" {
+				serverAddr = blindRelayAddr
+				blindRelayAddr = ""
+			}
+			if strings.TrimSpace(hop.Password) == "" {
+				blindRelayAddr = serverAddr
+				continue
+			}
+			if i+1 >= len(plan.Hops) {
+				return nil, fmt.Errorf("узел %d «%s»: транзитный шлюз не может быть последним", i+1, hop.Name)
+			}
+			nextHop := &plan.Hops[i+1]
+			nextPort, nextProto := "51820", "udp"
+			if !nextHop.UseArgon {
+				var targetErr error
+				nextPort, nextProto, targetErr = hopTargetPortAndProto(nextHop)
+				if targetErr != nil {
+					return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, targetErr)
+				}
+			}
+			transitOpts := argon4BaseOptions(hop, serverAddr, hop.Password, hopClientID(hop))
+			transitOpts["tag"] = tag
+			transitOpts["mode"] = "transit"
+			transitOpts["target"] = net.JoinHostPort(serverIPs[i+1], nextPort)
+			transitOpts["proto"] = nextProto
+			appendHop(transitOpts, tag, true)
+			previousUsesTransit = true
+			continue
+		}
+
+		if hop.UseArgon {
+			if strings.TrimSpace(hop.ArgonPassword) == "" {
+				return nil, fmt.Errorf("узел %d «%s»: не задан пароль Argon4-надстройки", i+1, hop.Name)
+			}
+			hopPort, hopProto, err := hopTargetPortAndProto(hop)
+			if err != nil {
+				return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
+			}
+			argonAddr := net.JoinHostPort(serverIPs[i], "51820")
+			if blindRelayAddr != "" {
+				argonAddr = blindRelayAddr
+				blindRelayAddr = ""
+			}
+			underlayTag := tag + "-argon"
+			underlayOpts := argon4BaseOptions(hop, argonAddr, hop.ArgonPassword, hopClientID(hop)+"-underlay")
+			underlayOpts["tag"] = underlayTag
+			underlayOpts["mode"] = "auto"
+			underlayOpts["target"] = net.JoinHostPort(serverIPs[i], hopPort)
+			underlayOpts["proto"] = hopProto
+			appendHop(underlayOpts, underlayTag, true)
+			previousUsesTransit = true
+		}
+
+		opts, err := hopOptions(hop, tag, serverIPs[i])
+		if err != nil {
+			return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
+		}
+		isEndpoint := opts["type"] == "openconnect" || opts["type"] == "openvpn-client" || opts["type"] == argon4Type
+		if opts["type"] == argon4Type && blindRelayAddr != "" {
+			opts["server"] = blindRelayAddr
+			blindRelayAddr = ""
+		}
+		appendHop(opts, tag, isEndpoint)
+		previousUsesTransit = false
+
 		routes, err := parseRoutes(hop.Routes)
 		if err != nil {
 			return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)

@@ -213,3 +213,85 @@ func TestRoutes(t *testing.T) {
 		t.Fatal("IPv6 должен отклоняться")
 	}
 }
+
+func TestTransitValidationAndConfig(t *testing.T) {
+	var problems []string
+	_ = json.Unmarshal([]byte(Validate(testPlan(Profile{Name: "T", Proto: "transit", Server: "relay.example.com", Password: "p"}))), &problems)
+	if len(problems) == 0 {
+		t.Fatal("последний узел transit должен отклоняться")
+	}
+
+	problems = nil
+	_ = json.Unmarshal([]byte(Validate(testPlan(
+		Profile{Name: "Blind", Proto: "transit", Server: "relay.example.com"},
+		Profile{Name: "V", Proto: "vless", URI: "vless://uuid@example.com:443?security=tls"},
+	))), &problems)
+	if len(problems) == 0 {
+		t.Fatal("слепой транзит перед простым VLESS должен отклоняться")
+	}
+
+	problems = nil
+	_ = json.Unmarshal([]byte(Validate(testPlan(
+		Profile{Name: "T", Proto: "transit", Server: "relay.example.com", Password: "p", UseArgon: true, ArgonPassword: "x"},
+		Profile{Name: "A", Proto: "argon4", Server: "vpn.example.com", Password: "p"},
+	))), &problems)
+	if len(problems) == 0 {
+		t.Fatal("useArgon на transit должен отклоняться")
+	}
+
+	// Слепой транзит + VLESS с useArgon (без argonServer)
+	blindPlanJSON := testPlan(
+		Profile{Name: "Blind", Proto: "transit", Server: "relay.example.com"},
+		Profile{Name: "V", Proto: "vless", URI: "vless://11111111-2222-3333-4444-555555555555@example.com:8443?security=tls", UseArgon: true, ArgonPassword: "overlay-secret"},
+	)
+	problems = nil
+	_ = json.Unmarshal([]byte(Validate(blindPlanJSON)), &problems)
+	if len(problems) > 0 {
+		t.Fatalf("слепой транзит + useArgon должен быть валидным: %v", problems)
+	}
+	plan, err := parsePlan(blindPlanJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := buildConfig(plan, []string{"1.1.1.1", "2.2.2.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eps := cfg["endpoints"].([]any)
+	underlay := eps[0].(map[string]any)
+	if underlay["tag"] != "hop2-argon" || underlay["server"] != "1.1.1.1:51820" || underlay["mode"] != "auto" || underlay["target"] != "2.2.2.2:8443" || underlay["proto"] != "tcp" {
+		t.Fatalf("неожиданный underlay: %v", underlay)
+	}
+	vlessOut := cfg["outbounds"].([]any)[0].(map[string]any)
+	if vlessOut["detour"] != "hop2-argon" {
+		t.Fatalf("VLESS должен идти через hop2-argon: %v", vlessOut)
+	}
+
+	// Авторизованный транзит + OpenConnect
+	ocPlanJSON := testPlan(
+		Profile{ID: "tr1", Name: "AuthT", Proto: "transit", Server: "relay.example.com:55182", Password: "tpass"},
+		Profile{Name: "OC", Proto: "openconnect", Server: "https://vpn.example.com:4443", Username: "u", Password: "p"},
+	)
+	plan, err = parsePlan(ocPlanJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = buildConfig(plan, []string{"1.1.1.1", "3.3.3.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eps = cfg["endpoints"].([]any)
+	tEp := eps[0].(map[string]any)
+	ocEp := eps[1].(map[string]any)
+	if tEp["mode"] != "transit" || tEp["target"] != "3.3.3.3:4443" || tEp["proto"] != "tcp" || tEp["server"] != "1.1.1.1:55182" {
+		t.Fatalf("неожиданный transit endpoint: %v", tEp)
+	}
+	if ocEp["detour"] != "hop1" || ocEp["no_udp"] != true {
+		t.Fatalf("неожиданный OpenConnect endpoint: %v", ocEp)
+	}
+
+	redacted := redact(map[string]any{"argonPassword": "secret", "password": "p"}).(map[string]any)
+	if redacted["argonPassword"] != "***" || redacted["password"] != "***" {
+		t.Fatalf("redact не скрыл пароль: %v", redacted)
+	}
+}

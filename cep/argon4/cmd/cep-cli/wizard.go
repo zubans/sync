@@ -329,12 +329,12 @@ func (w *wizard) chooseChain(store *Store) (*Chain, error) {
 }
 
 func (w *wizard) promptProfile(position int) (*Profile, error) {
-	w.printf("\nТип узла %d:\n1. Argon4\n2. VLESS\n3. Hysteria 2\n4. Hysteria v1\n5. OpenConnect\n6. OpenVPN\n0. Назад\n", position)
-	choice, err := w.choice("Выбор: ", 6)
+	w.printf("\nТип узла %d:\n1. Argon4\n2. VLESS\n3. Hysteria 2\n4. Hysteria v1\n5. OpenConnect\n6. OpenVPN\n7. Транзитный шлюз\n0. Назад\n", position)
+	choice, err := w.choice("Выбор: ", 7)
 	if err != nil || choice == 0 {
 		return nil, err
 	}
-	protocols := []string{"", "argon4", "vless", "hysteria2", "hysteria", "openconnect", "openvpn"}
+	protocols := []string{"", "argon4", "vless", "hysteria2", "hysteria", "openconnect", "openvpn", "transit"}
 	profile := &Profile{Proto: protocols[choice]}
 	profile.ID, err = newUUID()
 	if err != nil {
@@ -350,6 +350,10 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 		if err := w.fillArgon(profile); err != nil {
 			return nil, err
 		}
+	case "transit":
+		if err := w.fillTransit(profile); err != nil {
+			return nil, err
+		}
 	case "vless", "hysteria2", "hysteria":
 		if err := w.fillProxyLink(profile); err != nil {
 			return nil, err
@@ -363,7 +367,7 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 			return nil, err
 		}
 	}
-	if profile.Proto != "argon4" {
+	if profile.Proto != "argon4" && profile.Proto != "transit" {
 		for {
 			profile.Routes, err = w.ask("Сети через этот узел, через запятую (необязательно): ")
 			if err != nil {
@@ -381,17 +385,6 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 		}
 		if overlay {
 			profile.UseArgon = true
-			for {
-				profile.ArgonServer, err = w.ask("Argon4-сервер host[:port]: ")
-				if err != nil {
-					return nil, err
-				}
-				if _, err := parseArgonEndpoint(profile.ArgonServer); err != nil {
-					w.printf("Ошибка: %v\n", err)
-					continue
-				}
-				break
-			}
 			for profile.ArgonPassword == "" {
 				profile.ArgonPassword, err = w.secret("Argon4 мастер-пароль (обязательно): ")
 				if err != nil {
@@ -400,11 +393,41 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 			}
 		}
 	}
-	plan := &Plan{ChainName: "Проверка узла", Hops: []Profile{*profile}, DNS: []string{"1.1.1.1"}}
+	hops := []Profile{*profile}
+	if profile.Proto == "transit" {
+		hops = append(hops, Profile{ID: "probe", Name: "probe", Proto: "argon4", Server: "127.0.0.1:51820", Password: "probe"})
+	}
+	plan := &Plan{ChainName: "Проверка узла", Hops: hops, DNS: []string{"1.1.1.1"}}
 	if err := validatePlan(plan); err != nil {
 		return nil, fmt.Errorf("узел не сохранён: %w", err)
 	}
 	return profile, nil
+}
+
+func (w *wizard) fillTransit(profile *Profile) error {
+	for {
+		server, err := w.askDefault("Сервер host[:port] (порт по умолчанию 51820): ", "")
+		if err != nil {
+			return err
+		}
+		if _, err := parseArgonEndpoint(server); err != nil {
+			w.printf("Ошибка: %v\n", err)
+			continue
+		}
+		profile.Server = server
+		break
+	}
+	var err error
+	profile.Password, err = w.secret("Мастер-пароль (пусто — слепой транзит): ")
+	if err != nil || strings.TrimSpace(profile.Password) == "" {
+		return err
+	}
+	profile.ClientID, err = w.askDefault("Client ID (пусто — UUID профиля): ", profile.ID)
+	if err != nil {
+		return err
+	}
+	profile.ClientSecret, err = w.secret("Client Secret (необязательно): ")
+	return err
 }
 
 func (w *wizard) fillArgon(profile *Profile) error {

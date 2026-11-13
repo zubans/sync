@@ -112,4 +112,22 @@ class CepLogicTest {
         assertEquals("VLESS 2", CepLogic.newProfileName(VpnProtocol.VLESS, profiles))
         assertEquals(listOf("1.1.1.1", "8.8.8.8"), CepLogic.parseDns("1.1.1.1, 8.8.8.8;"))
     }
+
+    @Test
+    fun `transit and useArgon fields survive json round trip and ignore legacy argonServer`() {
+        val legacyJson = """
+            {
+              "profiles": [
+                {"id":"T1","name":"Транзит","proto":"transit","server":"relay.example.com:51820"},
+                {"id":"V1","name":"VLESS","proto":"vless","uri":"vless://u@h:443","useArgon":true,"argonServer":"old.example.com","argonPassword":"pw"}
+              ],
+              "chains": [{"id":"C1","name":"Цепочка","hops":["T1","V1"]}]
+            }
+        """.trimIndent()
+        val decoded = CepLogic.decode(legacyJson)
+        assertEquals(listOf(VpnProtocol.TRANSIT, VpnProtocol.VLESS), decoded.profiles.map { it.protocol })
+        assertTrue(decoded.profiles[1].useArgon)
+        assertEquals("pw", decoded.profiles[1].argonPassword)
+        assertEquals(decoded, CepLogic.decode(CepLogic.encode(decoded)))
+    }
 }

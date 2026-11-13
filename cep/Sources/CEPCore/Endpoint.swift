@@ -26,9 +26,37 @@ public struct Endpoint: Equatable, Sendable {
             return conf.endpoint
         case .openconnect, .sstp:
             return try parseHostPort(p.server)
-        case .argon4:
+        case .argon4, .transit:
             return try argon4(p.server)
         }
+    }
+
+    /// Дефолтный порт подключения для профиля (нужен при передаче цели L4-транзиту).
+    public static func resolvedPort(for p: Profile) throws -> Int {
+        let ep = try of(p)
+        if let port = ep.port { return port }
+        switch p.proto {
+        case .openconnect, .sstp: return 443
+        case .openvpn: return 1194
+        case .argon4, .transit, .amneziawg: return 51820
+        case .vless, .hysteria2, .hysteria: return 443
+        }
+    }
+
+    /// Подменяет порт в URL/строке сервера OpenConnect, сохраняя схему, хост и путь для SNI/HTTP Host.
+    public static func rewritePort(_ raw: String, port: Int) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let ep = try? parseHostPort(trimmed) else { return "127.0.0.1:\(port)" }
+        let formattedHost = ep.host.contains(":") ? "[\(ep.host)]" : ep.host
+        if trimmed.contains("://") {
+            if let schemeEnd = trimmed.range(of: "://") {
+                let scheme = String(trimmed[..<schemeEnd.upperBound])
+                let afterScheme = trimmed[schemeEnd.upperBound...]
+                let pathPart = afterScheme.firstIndex(of: "/").map { String(afterScheme[$0...]) } ?? ""
+                return "\(scheme)\(formattedHost):\(port)\(pathPart)"
+            }
+        }
+        return "\(formattedHost):\(port)"
     }
 
     /// UDP-адрес Argon4: host, host:port, udp://host:port или argon4://host:port.

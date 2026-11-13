@@ -26,6 +26,10 @@ type ServerConfig struct {
 	MTU             int
 	DNS             []string
 	Routes          []string
+	Mode            string
+	TransitTarget   string
+	TransitAllow    []string
+	TransitBlind    bool
 }
 
 type handshakeResponseCacheEntry struct {
@@ -35,21 +39,38 @@ type handshakeResponseCacheEntry struct {
 	expires    time.Time
 }
 
-// Server реализует шифрованный шлюз-надстройку Argon4 между UDP-интерфейсом и виртуальным TUN-интерфейсом Ubuntu.
+// Server реализует шифрованный шлюз Argon4 (режим tunnel поверх TUN и режим L4 transit поверх UDP/TCP).
 type Server struct {
 	cfg            ServerConfig
 	sessions       *SessionManager
 	udpConn        *net.UDPConn
+	tcpListener    *net.TCPListener
 	tun            io.ReadWriteCloser
 	lastErrLog     atomic.Int64
 	handshakeMu    sync.Mutex
 	handshakeCache map[[SaltSize]byte]handshakeResponseCacheEntry
+	blindMu        sync.Mutex
+	blindUDP       map[string]*blindUDPPeer
 }
 
 func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
-	if cfg.MasterPassword == "" {
+	if cfg.Mode == "" {
+		cfg.Mode = ModeTunnel
+	}
+	if cfg.Mode != ModeTunnel && cfg.Mode != ModeTransit {
+		return nil, fmt.Errorf("неизвестный режим сервера %q (ожидается %q или %q)", cfg.Mode, ModeTunnel, ModeTransit)
+	}
+	if cfg.TransitBlind {
+		if cfg.Mode != ModeTransit {
+			return nil, fmt.Errorf("режим -transit-blind поддерживается только при -mode %s", ModeTransit)
+		}
+		if cfg.TransitTarget == "" {
+			return nil, fmt.Errorf("для -transit-blind требуется указать -transit-target")
+		}
+	} else if cfg.MasterPassword == "" {
 		return nil, fmt.Errorf("не задан мастер-пароль")
 	}
+
 	if cfg.MTU <= 0 {
 		cfg.MTU = 1380
 	}
@@ -60,9 +81,13 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 		cfg.Routes = []string{"0.0.0.0/0"}
 	}
 
-	sm, err := NewSessionManager(cfg.MasterPassword, cfg.ArgonParams, cfg.SubnetCIDR, cfg.MTU, cfg.DNS, cfg.Routes)
-	if err != nil {
-		return nil, err
+	var sm *SessionManager
+	if cfg.MasterPassword != "" {
+		var err error
+		sm, err = NewSessionManager(cfg.MasterPassword, cfg.ArgonParams, cfg.SubnetCIDR, cfg.MTU, cfg.DNS, cfg.Routes)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &Server{
@@ -70,6 +95,7 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 		sessions:       sm,
 		tun:            tunDev,
 		handshakeCache: make(map[[SaltSize]byte]handshakeResponseCacheEntry),
+		blindUDP:       make(map[string]*blindUDPPeer),
 	}, nil
 }
 
@@ -128,15 +154,29 @@ func (s *Server) LocalAddr() net.Addr {
 	return s.udpConn.LocalAddr()
 }
 
-// Run запускает двунаправленную пересылку пакетов между UDP-сокетом и виртуальным TUN-интерфейсом.
+// Start запускает сетевые слушатели сервера согласно настроенному режиму (tunnel или transit).
+func (s *Server) Start() error {
+	if s.cfg.Mode == ModeTransit {
+		return s.StartTransit()
+	}
+	return s.StartUDP()
+}
+
+// Run запускает циклы обработки пакетов согласно режиму сервера.
 func (s *Server) Run() error {
 	errCh := make(chan error, 2)
 	go func() {
 		errCh <- s.udpToTunLoop()
 	}()
-	go func() {
-		errCh <- s.tunToUdpLoop()
-	}()
+	if s.cfg.Mode == ModeTransit {
+		go func() {
+			errCh <- s.tcpAcceptLoop()
+		}()
+	} else {
+		go func() {
+			errCh <- s.tunToUdpLoop()
+		}()
+	}
 	return <-errCh
 }
 
@@ -144,9 +184,14 @@ func (s *Server) Close() error {
 	if s.udpConn != nil {
 		_ = s.udpConn.Close()
 	}
+	if s.tcpListener != nil {
+		_ = s.tcpListener.Close()
+	}
 	if s.tun != nil {
 		_ = s.tun.Close()
 	}
+	s.sessions.CloseAll()
+	s.closeAllBlindUDP()
 	return nil
 }
 
@@ -170,8 +215,16 @@ func (s *Server) udpToTunLoop() error {
 	}
 }
 
-// HandlePacket обрабатывает один входящий зашифрованный кадр от remoteAddr и при необходимости возвращает зашифрованный ответ.
+// HandlePacket обрабатывает один входящий кадр от remoteAddr и при необходимости возвращает зашифрованный ответ.
 func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
+	if s.cfg.Mode == ModeTransit && s.cfg.TransitBlind {
+		s.handleBlindUDP(pkt, remoteAddr)
+		return nil
+	}
+	if s.sessions == nil {
+		return nil
+	}
+
 	psk := s.sessions.PSK()
 	_, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(pkt, psk)
 	if err != nil {
@@ -215,6 +268,12 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 		}
 
 	case FrameTypeData:
+		if sess.Mode == ModeTransit {
+			if sess.TargetConn != nil && len(plaintext) > 0 {
+				_, _ = sess.TargetConn.Write(plaintext)
+			}
+			return nil
+		}
 		srcIP, _, ok := ParseIPv4Addrs(plaintext)
 		if !ok {
 			return nil
@@ -273,49 +332,52 @@ func (s *Server) cacheHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAdd
 	s.handshakeMu.Unlock()
 }
 
-func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) []byte {
-	if cached := s.cachedHandshakeResponse(pkt, salt, remoteAddr); cached != nil {
-		return cached
-	}
-
+func (s *Server) authenticateHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) (
+	hsKey []byte,
+	req HandshakeRequest,
+	clientAuth []byte,
+	srvPub []byte,
+	c2sKey []byte,
+	s2cKey []byte,
+	now time.Time,
+	ok bool,
+) {
 	hsKey, err := s.sessions.DeriveHandshakeKey(salt)
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake derive", err)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
 	}
 	_, _, _, plaintext, err := OpenPacketWithKey(pkt, psk, hsKey)
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake open", err)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
 	}
 
-	var req HandshakeRequest
 	if err := json.Unmarshal(plaintext, &req); err != nil {
 		s.logDrop(remoteAddr, "handshake json", err)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
 	}
 
-	now := time.Now()
+	now = time.Now()
 	reqTime := time.Unix(req.Timestamp, 0)
 	if now.Sub(reqTime).Abs() > HandshakeClockSkew {
 		s.logDrop(remoteAddr, "handshake timestamp", ErrClockSkew)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
 	}
 
 	clientPub, err := hex.DecodeString(req.ClientPub)
 	if err != nil || len(clientPub) != X25519KeySize {
 		s.logDrop(remoteAddr, "handshake clientPub", fmt.Errorf("некорректный ключ X25519"))
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
 	}
 
-	var clientAuth []byte
 	if req.ClientAuth != "" {
 		clientAuth, _ = hex.DecodeString(req.ClientAuth)
 	}
 
 	srvPriv, srvPub, err := GenerateX25519Keypair()
 	if err != nil {
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
 	}
 	sharedSecret, err := ComputeX25519Shared(srvPriv, clientPub)
 	for i := range srvPriv {
@@ -323,12 +385,32 @@ func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr)
 	}
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake ecdh", err)
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+	}
+
+	c2sKey, s2cKey = DeriveSessionKeys(hsKey, sharedSecret, salt)
+	for i := range sharedSecret {
+		sharedSecret[i] = 0
+	}
+	return hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, now, true
+}
+
+func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) []byte {
+	if cached := s.cachedHandshakeResponse(pkt, salt, remoteAddr); cached != nil {
+		return cached
+	}
+
+	hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, now, ok := s.authenticateHandshake(pkt, psk, salt, remoteAddr)
+	if !ok {
 		return nil
 	}
 
-	c2sKey, s2cKey := DeriveSessionKeys(hsKey, sharedSecret, salt)
-	for i := range sharedSecret {
-		sharedSecret[i] = 0
+	if s.cfg.Mode == ModeTransit {
+		return s.handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPub, c2sKey, s2cKey, req, now, remoteAddr)
+	}
+	if req.Mode != "" && req.Mode != ModeTunnel && req.Mode != ModeAuto {
+		s.logDrop(remoteAddr, "tunnel mode mismatch", ErrTransitDenied)
+		return nil
 	}
 
 	peer, err := s.sessions.RegisterSession(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr)
@@ -346,6 +428,7 @@ func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr)
 		Routes:     s.cfg.Routes,
 		ServerTime: now.Unix(),
 		ServerPub:  hex.EncodeToString(srvPub),
+		Mode:       ModeTunnel,
 	}
 	respBytes, _ := json.Marshal(resp)
 	wireResp, err := SealPacketWithSeq(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes)

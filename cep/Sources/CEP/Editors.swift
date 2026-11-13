@@ -52,6 +52,13 @@ struct ProfileEditor: View {
                     TextField("Client ID (необязательно)", text: p.clientID)
                     SecureField("Client Secret (необязательно)", text: p.clientSecret)
                 }
+            case .transit:
+                Section("Транзитный шлюз (L4 без TUN)") {
+                    TextField("Адрес", text: p.server, prompt: Text("relay.example.com:51820"))
+                    SecureField("Мастер-пароль (пусто — слепой режим)", text: p.password)
+                    TextField("Client ID (необязательно)", text: p.clientID)
+                    SecureField("Client Secret (необязательно)", text: p.clientSecret)
+                }
             case .sstp:
                 Section("Сервер") {
                     TextField("Адрес", text: p.server, prompt: Text("vpn.example.com[:443]"))
@@ -59,11 +66,10 @@ struct ProfileEditor: View {
                 }
                 credentials(p, optional: false)
             }
-            if p.wrappedValue.proto != .argon4 {
+            if p.wrappedValue.proto != .argon4 && p.wrappedValue.proto != .transit {
                 Section {
                     Toggle("Шифровать подключение через Argon4", isOn: p.useArgon)
                     if p.wrappedValue.useArgon {
-                        TextField("Сервер Argon4", text: p.argonServer, prompt: Text("vpn.example.com:51820"))
                         SecureField("Мастер-пароль Argon4", text: p.argonPassword)
                         TextField("Client ID (необязательно)", text: p.clientID)
                         SecureField("Client Secret (необязательно)", text: p.clientSecret)
@@ -71,18 +77,20 @@ struct ProfileEditor: View {
                 } header: {
                     Text("Argon4-надстройка")
                 } footer: {
-                    Text("Сначала поднимается отдельный Argon4-туннель, затем сервер этого профиля подключается через него. Для пустого Client ID используется идентификатор профиля.")
+                    Text("Трафик к этому узлу (порт 51820) или через предыдущий транзитный шлюз дополнительно шифруется Argon4 (туннель или L4-транзит). Для пустого Client ID используется идентификатор профиля.")
                 }
             }
-            Section {
-                TextField("Сети", text: p.routes, prompt: Text("192.168.1.119, 10.0.0.0/8"))
-                if let error = Result(catching: { try RouteList.parse(p.wrappedValue.routes) }).failureMessage {
-                    Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            if p.wrappedValue.proto != .transit {
+                Section {
+                    TextField("Сети", text: p.routes, prompt: Text("192.168.1.119, 10.0.0.0/8"))
+                    if let error = Result(catching: { try RouteList.parse(p.wrappedValue.routes) }).failureMessage {
+                        Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("Сети через этот узел")
+                } footer: {
+                    Text("Эти адреса пойдут через узел, а не дальше по цепочке и не в локальную сеть. Сети, которые присылает сервер OpenConnect или OpenVPN, добавляются сами. Адрес из своей локальной подсети указывайте отдельно (/32): всю подсеть забрать у локальной сети нельзя.")
                 }
-            } header: {
-                Text("Сети через этот узел")
-            } footer: {
-                Text("Эти адреса пойдут через узел, а не дальше по цепочке и не в локальную сеть. Сети, которые присылает сервер OpenConnect или OpenVPN, добавляются сами. Адрес из своей локальной подсети указывайте отдельно (/32): всю подсеть забрать у локальной сети нельзя.")
             }
             Section("Проверка") {
                 switch Result(catching: { try Endpoint.of(p.wrappedValue) }) {

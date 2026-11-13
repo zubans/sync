@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,13 +24,21 @@ type configuration struct {
 	ClientSecret string `json:"client_secret"`
 	ReadyFile    string `json:"ready_file"`
 	TunName      string `json:"tun_name"`
+	Mode         string `json:"mode,omitempty"`
+	Target       string `json:"target,omitempty"`
+	Proto        string `json:"proto,omitempty"`
+	Listen       string `json:"listen,omitempty"`
 }
 
 type readyStatus struct {
-	Interface string   `json:"interface"`
-	Address   string   `json:"address"`
-	ServerIP  string   `json:"server_ip"`
-	MTU       int      `json:"mtu"`
+	Mode      string   `json:"mode,omitempty"`
+	Listen    string   `json:"listen,omitempty"`
+	Port      int      `json:"port,omitempty"`
+	Target    string   `json:"target,omitempty"`
+	Interface string   `json:"interface,omitempty"`
+	Address   string   `json:"address,omitempty"`
+	ServerIP  string   `json:"server_ip,omitempty"`
+	MTU       int      `json:"mtu,omitempty"`
 	DNS       []string `json:"dns,omitempty"`
 	Routes    []string `json:"routes,omitempty"`
 }
@@ -65,22 +74,71 @@ func run(configPath string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer stop()
-	connectContext, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
-	client, err := argon4.NewClient(argon4.ClientConfig{
+
+	mode := strings.ToLower(strings.TrimSpace(config.Mode))
+	if mode == "" {
+		mode = argon4.ModeTunnel
+	}
+	clientCfg := argon4.ClientConfig{
 		Server:         config.Server,
 		MasterPassword: config.Password,
 		ClientID:       config.ClientID,
 		ClientSecret:   config.ClientSecret,
-	})
-	if err != nil {
-		cancelConnect()
-		return err
+		Mode:           mode,
+		Target:         config.Target,
+		Proto:          config.Proto,
 	}
-	if err := client.Connect(connectContext); err != nil {
+
+	var proxy *argon4.TransitProxy
+	var client *argon4.Client
+	switch mode {
+	case argon4.ModeTransit:
+		proxy, err = argon4.StartTransitProxy(ctx, clientCfg, config.Listen)
+		if err != nil {
+			return err
+		}
+	case argon4.ModeAuto:
+		proxy, client, err = argon4.ConnectAuto(ctx, clientCfg, config.Listen)
+		if err != nil {
+			return err
+		}
+	default:
+		connectContext, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
+		client, err = argon4.NewClient(clientCfg)
+		if err != nil {
+			cancelConnect()
+			return err
+		}
+		if err := client.Connect(connectContext); err != nil {
+			cancelConnect()
+			return err
+		}
 		cancelConnect()
-		return err
 	}
-	cancelConnect()
+
+	if proxy != nil {
+		defer proxy.Close()
+		if err := writeReady(config.ReadyFile, readyStatus{
+			Mode:   argon4.ModeTransit,
+			Listen: proxy.ListenAddr(),
+			Port:   proxy.Port(),
+			Target: proxy.Target(),
+			MTU:    proxy.MTU(),
+		}); err != nil {
+			return err
+		}
+		log.Printf("Argon4: L4-транзит слушает %s -> %s", proxy.ListenAddr(), proxy.Target())
+		select {
+		case <-ctx.Done():
+			log.Print("Argon4: остановка транзита")
+		case <-proxy.Done():
+		}
+		stop()
+		_ = proxy.Close()
+		_ = os.Remove(config.ReadyFile)
+		return nil
+	}
+
 	defer client.Close()
 	response := client.Response()
 	log.Printf("Argon4: handshake выполнен, адрес %s/%d", response.AssignedIP, response.SubnetCidr)
@@ -102,6 +160,7 @@ func run(configPath string) error {
 		return err
 	}
 	if err := writeReady(config.ReadyFile, readyStatus{
+		Mode:      argon4.ModeTunnel,
 		Interface: interfaceName,
 		Address:   response.AssignedIP,
 		ServerIP:  response.ServerIP,

@@ -12,6 +12,7 @@ enum class VpnProtocol(val raw: String, val title: String) {
     OPENVPN("openvpn", "OpenVPN"),
     OPENCONNECT("openconnect", "OpenConnect"),
     ARGON4("argon4", "Argon4"),
+    TRANSIT("transit", "Транзитный шлюз"),
     SSTP("sstp", "SSTP");
 
     /** Профиль задаётся ссылкой vless:// hysteria2:// hysteria://. */
@@ -64,6 +65,9 @@ data class CepProfile(
     val ignoreCertErrors: Boolean = false,
     /** Сети, которые идут через этот узел, а не дальше по цепочке: «192.168.1.119, 10.0.0.0/8». */
     val routes: String = "",
+    /** Подключаться к узлу внутри обфускации Argon4 (без отдельного поля сервера). */
+    val useArgon: Boolean = false,
+    val argonPassword: String = "",
 ) {
     val protocol: VpnProtocol? get() = VpnProtocol.of(proto)
 }

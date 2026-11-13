@@ -108,3 +108,24 @@ func TestWizardCancelLeavesStoreUnchanged(t *testing.T) {
 		t.Fatalf("отмена изменила хранилище: %+v", store)
 	}
 }
+
+func TestWizardCreatesTransitPlusUseArgonChainWithoutArgonServer(t *testing.T) {
+	store := &Store{}
+	// Цепочка "Транзит", узел 1: 7=transit ("Шлюз", relay.example.com, пустой пароль=слепой), "y" -> узел 2:
+	// 2=vless ("Выход", vless://..., routes="", useArgon="y", argonPassword="pass"), далее "n" и "0".
+	input := strings.NewReader("Транзит\n7\nШлюз\nrelay.example.com\n\ny\n2\nВыход\nvless://uuid@vpn.example.com:443?security=tls\n\ny\npass\nn\n0\n")
+	var output bytes.Buffer
+	changed, err := runWizard(store, input, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || len(store.Chains) != 1 || len(store.Profiles) != 2 {
+		t.Fatalf("неожиданный store: %+v\nвывод:\n%s", store, output.String())
+	}
+	if store.Profiles[0].Proto != "transit" || store.Profiles[0].Password != "" {
+		t.Fatalf("неверный transit: %+v", store.Profiles[0])
+	}
+	if !store.Profiles[1].UseArgon || store.Profiles[1].ArgonPassword != "pass" {
+		t.Fatalf("неверный VLESS+UseArgon: %+v", store.Profiles[1])
+	}
+}

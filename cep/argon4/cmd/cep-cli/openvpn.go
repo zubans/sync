@@ -58,6 +58,10 @@ func firstOpenVPNRemote(config string) (Endpoint, error) {
 }
 
 func pinOpenVPNRemote(config, ip, interfaceName string) (string, error) {
+	return pinOpenVPNRemoteWithPort(config, ip, 0, interfaceName)
+}
+
+func pinOpenVPNRemoteWithPort(config, ip string, portOverride int, interfaceName string) (string, error) {
 	if _, err := firstOpenVPNRemote(config); err != nil {
 		return "", err
 	}
@@ -65,6 +69,10 @@ func pinOpenVPNRemote(config, ip, interfaceName string) (string, error) {
 		return "", fmt.Errorf("блоки <connection> не поддерживаются")
 	}
 	remote, _ := firstOpenVPNRemote(config)
+	targetPort := remote.Port
+	if portOverride > 0 {
+		targetPort = portOverride
+	}
 	protocol := ""
 	for _, line := range openVPNDirectives(config) {
 		fields := strings.Fields(line)
@@ -97,7 +105,7 @@ func pinOpenVPNRemote(config, ip, interfaceName string) (string, error) {
 		}
 		lines = append(lines, raw)
 	}
-	pinned := fmt.Sprintf("remote %s %d%s", ip, remote.Port, protocol)
+	pinned := fmt.Sprintf("remote %s %d%s", ip, targetPort, protocol)
 	lines = append([]string{pinned}, lines...)
 	lines = append(lines, "dev "+interfaceName, "dev-type tun")
 	return strings.Join(lines, "\n"), nil

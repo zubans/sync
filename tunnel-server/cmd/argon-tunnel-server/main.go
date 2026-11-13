@@ -44,19 +44,27 @@ func main() {
 		argonTime   = flag.Int("argon-time", envIntOr("ARGON_TIME", int(tunnel.DefaultArgonTime)), "Число итераций Argon2id (time cost)")
 		argonMem    = flag.Int("argon-memory", envIntOr("ARGON_MEMORY_KIB", int(tunnel.DefaultArgonMemory)), "Объём памяти Argon2id в КиБ")
 		argonLanes  = flag.Int("argon-parallelism", envIntOr("ARGON_PARALLELISM", int(tunnel.DefaultArgonThreads)), "Параллелизм Argon2id (число потоков)")
-		mtu         = flag.Int("mtu", envIntOr("ARGON_MTU", 1380), "MTU виртуального интерфейса TUN")
-		dnsList     = flag.String("dns", envOr("ARGON_DNS", "1.1.1.1,8.8.8.8"), "DNS-серверы через запятую для передачи клиентам")
-		routesList  = flag.String("routes", envOr("ARGON_ROUTES", "0.0.0.0/0"), "Маршруты CIDR через запятую для передачи клиентам")
+		mtu          = flag.Int("mtu", envIntOr("ARGON_MTU", 1380), "MTU виртуального интерфейса TUN")
+		dnsList      = flag.String("dns", envOr("ARGON_DNS", "1.1.1.1,8.8.8.8"), "DNS-серверы через запятую для передачи клиентам")
+		routesList   = flag.String("routes", envOr("ARGON_ROUTES", "0.0.0.0/0"), "Маршруты CIDR через запятую для передачи клиентам")
+		mode         = flag.String("mode", envOr("ARGON_MODE", tunnel.ModeTunnel), "Режим сервера: tunnel (L3 TUN) или transit (L4 UDP/TCP-ретранслятор без TUN)")
+		transitDest  = flag.String("transit-target", envOr("ARGON_TRANSIT_TARGET", ""), "Фиксированная цель транзита host:port (используется по умолчанию и обязательна для -transit-blind)")
+		transitAllow = flag.String("transit-allow", envOr("ARGON_TRANSIT_ALLOW", ""), "Список разрешённых целей транзита через запятую (CIDR, host, host:port, *:port или *)")
+		transitBlind = flag.Bool("transit-blind", envOr("ARGON_TRANSIT_BLIND", "0") == "1", "Слепой L4-транзит к -transit-target без расшифровки Argon4 (не требует пароля)")
 	)
 	flag.Parse()
 
-	if *masterPass == "" {
+	serverMode := strings.ToLower(strings.TrimSpace(*mode))
+	if serverMode == "" {
+		serverMode = tunnel.ModeTunnel
+	}
+	if !*transitBlind && *masterPass == "" {
 		log.Fatal("Не задан мастер-пароль: укажите флаг -password или переменную окружения ARGON_MASTER_PASSWORD")
 	}
 
 	var tunDev *tunnel.TunDevice
 	var err error
-	if !*noTun {
+	if serverMode != tunnel.ModeTransit && !*noTun {
 		tunDev, err = tunnel.OpenTun(*tunName)
 		if err != nil {
 			log.Fatalf("Не удалось открыть TUN-интерфейс %q: %v (запустите от root или с CAP_NET_ADMIN на Ubuntu)", *tunName, err)
@@ -83,15 +91,18 @@ func main() {
 			Memory:  uint32(*argonMem),
 			Threads: uint8(*argonLanes),
 		},
-		MTU:    *mtu,
-		DNS:    splitTrim(*dnsList),
-		Routes: splitTrim(*routesList),
+		MTU:           *mtu,
+		DNS:           splitTrim(*dnsList),
+		Routes:        splitTrim(*routesList),
+		Mode:          serverMode,
+		TransitTarget: strings.TrimSpace(*transitDest),
+		TransitAllow:  splitTrim(*transitAllow),
+		TransitBlind:  *transitBlind,
 	}
 
-	var rwc = func() *tunnel.TunDevice { return tunDev }()
 	var srv *tunnel.Server
-	if rwc != nil {
-		srv, err = tunnel.NewServer(cfg, rwc)
+	if tunDev != nil {
+		srv, err = tunnel.NewServer(cfg, tunDev)
 	} else {
 		srv, err = tunnel.NewServer(cfg, nil)
 	}
@@ -99,8 +110,8 @@ func main() {
 		log.Fatalf("Failed to create server: %v", err)
 	}
 
-	if err := srv.StartUDP(); err != nil {
-		log.Fatalf("Failed to start UDP listener: %v", err)
+	if err := srv.Start(); err != nil {
+		log.Fatalf("Failed to start listener: %v", err)
 	}
 
 	sigCh := make(chan os.Signal, 1)

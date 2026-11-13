@@ -74,20 +74,11 @@ final class Engine {
 
         // Все адреса разрешаем заранее системным DNS, пока цепочка не изменила маршруты.
         var serverIPs: [[String]] = []
-        var argonServerIPs: [[String]?] = []
         for hop in plan.hops {
             let host = try Endpoint.of(hop).host
             let ips = try Net.resolveAllIPv4(host)
             log("\(hop.name): \(host) → \(ips.joined(separator: ", "))")
             serverIPs.append(ips)
-            if hop.useArgon {
-                let argonHost = try Endpoint.argon4(hop.argonServer).host
-                let argonIPs = try Net.resolveAllIPv4(argonHost)
-                log("\(hop.name), Argon4: \(argonHost) → \(argonIPs.joined(separator: ", "))")
-                argonServerIPs.append(argonIPs)
-            } else {
-                argonServerIPs.append(nil)
-            }
         }
 
         let addRoutes = { (ips: [String], interface: String?) throws in
@@ -104,19 +95,124 @@ final class Engine {
 
         status.phase = .connecting
         var previousInterface: String?
+        var pendingRedirect: Int?
+        var blindRelay: (ip: String, port: Int)?
         for (i, hop) in plan.hops.enumerated() {
             try checkStop()
             setHop(i) { $0.state = .connecting; $0.serverIP = serverIPs[i][0] }
             do {
-                var nextInterface = previousInterface
-                if hop.useArgon {
-                    try addRoutes(argonServerIPs[i] ?? [], nextInterface)
-                    let (argonInterface, argonAddress) = try startArgon(i, hop, ip: (argonServerIPs[i] ?? [])[0], underlay: true)
-                    log("узел \(i + 1) «\(hop.name)»: Argon4-надстройка поднята на \(argonInterface) (\(argonAddress))")
-                    nextInterface = argonInterface
+                if hop.proto == .transit {
+                    let transitEP = try Endpoint.argon4(hop.server)
+                    let transitPort = transitEP.port ?? 51820
+                    if hop.password.isEmpty {
+                        let connectIP: String
+                        let connectPort: Int
+                        if let redirPort = pendingRedirect {
+                            pendingRedirect = nil
+                            connectIP = "127.0.0.1"
+                            connectPort = redirPort
+                        } else {
+                            try addRoutes(serverIPs[i], previousInterface)
+                            connectIP = serverIPs[i][0]
+                            connectPort = transitPort
+                        }
+                        blindRelay = (connectIP, connectPort)
+                        setHop(i) {
+                            $0.state = .up
+                            $0.interface = previousInterface ?? original.interface
+                            $0.localAddress = "\(connectIP):\(connectPort)"
+                            $0.message = "слепой транзит к узлу \(i + 2)"
+                        }
+                        log("узел \(i + 1) «\(hop.name)»: слепой транзит → \(connectIP):\(connectPort)")
+                    } else {
+                        let nextHop = plan.hops[i + 1]
+                        let nextPort = nextHop.useArgon ? 51820 : (try Endpoint.resolvedPort(for: nextHop))
+                        let target = "\(serverIPs[i + 1][0]):\(nextPort)"
+                        let targetProto = nextHop.useArgon ? "" : ArgonTransportProto.of(nextHop)
+
+                        let connectIP: String
+                        let connectPort: Int
+                        if let redirPort = pendingRedirect {
+                            pendingRedirect = nil
+                            connectIP = "127.0.0.1"
+                            connectPort = redirPort
+                        } else {
+                            try addRoutes(serverIPs[i], previousInterface)
+                            connectIP = serverIPs[i][0]
+                            connectPort = transitPort
+                        }
+                        let ready = try runArgonHelper(
+                            i, hop, ip: connectIP, underlay: false,
+                            mode: "transit", target: target, proto: targetProto,
+                            listen: "127.0.0.1:0", portOverride: connectPort
+                        )
+                        guard ready.mode == "transit", ready.port > 0 else {
+                            throw EngineError("Транзитный узел вернул неожиданный режим \(ready.mode)")
+                        }
+                        pendingRedirect = ready.port
+                        setHop(i) {
+                            $0.state = .up
+                            $0.interface = previousInterface ?? original.interface
+                            $0.localAddress = "127.0.0.1:\(ready.port)"
+                            $0.message = "L4-транзит → \(target)"
+                        }
+                        log("узел \(i + 1) «\(hop.name)»: транзит слушает 127.0.0.1:\(ready.port) → \(target)")
+                    }
+                    continue
                 }
-                try addRoutes(serverIPs[i], nextInterface)
-                let (iface, address) = try startHop(i, hop, ip: serverIPs[i][0])
+
+                var routeInterface = previousInterface
+                var hopDialIP = serverIPs[i][0]
+                var hopPortOverride: Int?
+
+                if hop.useArgon {
+                    let hopPort = try Endpoint.resolvedPort(for: hop)
+                    let argonIP: String
+                    let argonPort: Int
+                    if let relay = blindRelay {
+                        blindRelay = nil
+                        argonIP = relay.ip
+                        argonPort = relay.port
+                    } else if let redirPort = pendingRedirect {
+                        pendingRedirect = nil
+                        argonIP = "127.0.0.1"
+                        argonPort = redirPort
+                    } else {
+                        try addRoutes(serverIPs[i], routeInterface)
+                        argonIP = serverIPs[i][0]
+                        argonPort = 51820
+                    }
+
+                    let ready = try runArgonHelper(
+                        i, hop, ip: argonIP, underlay: true,
+                        mode: "auto", target: "\(serverIPs[i][0]):\(hopPort)",
+                        proto: ArgonTransportProto.of(hop), listen: "127.0.0.1:0", portOverride: argonPort
+                    )
+                    if ready.mode == "transit", ready.port > 0 {
+                        hopDialIP = "127.0.0.1"
+                        hopPortOverride = ready.port
+                        log("узел \(i + 1) «\(hop.name)»: Argon4-надстройка работает в режиме L4-транзита на 127.0.0.1:\(ready.port)")
+                    } else {
+                        guard !ready.interface.isEmpty, !ready.address.isEmpty else {
+                            throw EngineError("Argon4: помощник вернул пустой интерфейс или адрес")
+                        }
+                        log("узел \(i + 1) «\(hop.name)»: Argon4-надстройка поднята на \(ready.interface) (\(ready.address))")
+                        routeInterface = ready.interface
+                        try addRoutes(serverIPs[i], routeInterface)
+                    }
+                } else if let relay = blindRelay {
+                    blindRelay = nil
+                    hopDialIP = relay.ip
+                    hopPortOverride = relay.port
+                } else if let redirPort = pendingRedirect {
+                    pendingRedirect = nil
+                    hopDialIP = "127.0.0.1"
+                    hopPortOverride = redirPort
+                } else {
+                    try addRoutes(serverIPs[i], routeInterface)
+                }
+
+                let (iface, address) = try startHop(i, hop, ip: hopDialIP, portOverride: hopPortOverride)
                 setHop(i) { $0.state = .up; $0.interface = iface; $0.localAddress = address; $0.message = nil }
                 log("узел \(i + 1) «\(hop.name)» поднят на \(iface) (\(address))")
                 try routeInner(i, hop, iface: iface)
@@ -250,39 +346,64 @@ final class Engine {
         }
     }
 
-    private func startHop(_ i: Int, _ hop: Profile, ip: String) throws -> (String, String) {
+    private func startHop(_ i: Int, _ hop: Profile, ip: String, portOverride: Int?) throws -> (String, String) {
         let before = Set(Net.interfaces().keys)
         switch hop.proto {
         case .vless, .hysteria2, .hysteria:
-            return try startProxy(i, hop, ip: ip)
+            return try startProxy(i, hop, ip: ip, portOverride: portOverride)
         case .openvpn:
-            return try startOpenVPN(i, hop, ip: ip, before: before)
+            return try startOpenVPN(i, hop, ip: ip, portOverride: portOverride, before: before)
         case .openconnect:
-            return try startOpenConnect(i, hop, ip: ip, before: before)
+            return try startOpenConnect(i, hop, ip: ip, portOverride: portOverride, before: before)
         case .argon4:
-            return try startArgon(i, hop, ip: ip, underlay: false)
+            return try startArgon(i, hop, ip: ip, portOverride: portOverride, underlay: false)
+        case .transit:
+            throw EngineError("Внутренняя ошибка: .transit обрабатывается до startHop")
         case .sstp:
-            return try startSSTP(i, hop, ip: ip, before: before)
+            return try startSSTP(i, hop, ip: ip, portOverride: portOverride, before: before)
         case .amneziawg:
-            return try startAWG(i, hop, ip: ip)
+            return try startAWG(i, hop, ip: ip, portOverride: portOverride)
         }
     }
 
-    /// Запускает настоящий Argon4 UDP/TUN-клиент. В режиме underlay его интерфейс
-    /// используется только для host-маршрута до сервера основного профиля.
-    private func startArgon(_ i: Int, _ hop: Profile, ip: String, underlay: Bool) throws -> (String, String) {
+    private func runArgonHelper(
+        _ i: Int,
+        _ hop: Profile,
+        ip: String,
+        underlay: Bool,
+        mode: String? = nil,
+        target: String? = nil,
+        proto: String? = nil,
+        listen: String? = nil,
+        portOverride: Int? = nil
+    ) throws -> Argon4Ready {
         let readyFile = privateFile(i, "argon4-ready.json")
         try? FileManager.default.removeItem(at: readyFile)
-        let configuration = try Argon4Configuration(profile: hop, resolvedIP: ip, readyFile: readyFile.path, underlay: underlay)
+        let configuration = try Argon4Configuration(
+            profile: hop,
+            resolvedIP: ip,
+            readyFile: readyFile.path,
+            underlay: underlay,
+            mode: mode,
+            target: target,
+            proto: proto,
+            listen: listen,
+            portOverride: portOverride
+        )
         let configFile = privateFile(i, "argon4.json")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         try writeSecret(try encoder.encode(configuration), to: configFile)
         try spawn(i, tool: .cepArgon4, ["--config", configFile.path])
-        let data = try waitUntil(hop: i, "Argon4 handshake и TUN", timeout: hopTimeout) {
+        let data = try waitUntil(hop: i, "Argon4 handshake", timeout: hopTimeout) {
             try? Data(contentsOf: readyFile)
         }
-        let ready = try JSONDecoder().decode(Argon4Ready.self, from: data)
+        return try JSONDecoder().decode(Argon4Ready.self, from: data)
+    }
+
+    /// Запускает Argon4 TUN-клиент.
+    private func startArgon(_ i: Int, _ hop: Profile, ip: String, portOverride: Int?, underlay: Bool) throws -> (String, String) {
+        let ready = try runArgonHelper(i, hop, ip: ip, underlay: underlay, portOverride: portOverride)
         guard !ready.interface.isEmpty, !ready.address.isEmpty else {
             throw EngineError("Argon4: помощник вернул пустой интерфейс или адрес")
         }
@@ -290,19 +411,19 @@ final class Engine {
         return (ready.interface, ready.address)
     }
 
-    private func startProxy(_ i: Int, _ hop: Profile, ip: String) throws -> (String, String) {
+    private func startProxy(_ i: Int, _ hop: Profile, ip: String, portOverride: Int?) throws -> (String, String) {
         let link = try ProxyLink.parse(hop.uri)
         let outbound: [String: Any]
         if link.scheme == "vless" {
             let port = 20800 + i
-            let xray = try XrayConfig.make(link: link, server: ip, socksPort: port)
+            let xray = try XrayConfig.make(link: link, server: ip, portOverride: portOverride, socksPort: port)
             let cfg = privateFile(i, "xray.json")
             try writeSecret(JSON.data(xray), to: cfg)
             try spawn(i, tool: .xray, ["run", "-c", cfg.path])
             try waitForPort(port, hop: i)
             outbound = SingBoxConfig.socksOutbound(port: port)
         } else {
-            outbound = try SingBoxConfig.outbound(for: link, server: ip)
+            outbound = try SingBoxConfig.outbound(for: link, server: ip, portOverride: portOverride)
         }
         let address = "172.19.\(i).1"
         let cfg = privateFile(i, "config")
@@ -312,9 +433,9 @@ final class Engine {
         return (iface.name, address)
     }
 
-    private func startOpenVPN(_ i: Int, _ hop: Profile, ip: String, before: Set<String>) throws -> (String, String) {
+    private func startOpenVPN(_ i: Int, _ hop: Profile, ip: String, portOverride: Int?, before: Set<String>) throws -> (String, String) {
         let cfg = privateFile(i, "config")
-        try writeSecret(Data(OpenVPNConfig.pinRemote(hop.config, ip: ip).utf8), to: cfg)
+        try writeSecret(Data(OpenVPNConfig.pinRemote(hop.config, ip: ip, portOverride: portOverride).utf8), to: cfg)
         var args = [
             "--config", cfg.path,
             "--route-noexec",
@@ -336,7 +457,7 @@ final class Engine {
         return (iface.name, iface.address)
     }
 
-    private func startOpenConnect(_ i: Int, _ hop: Profile, ip: String, before: Set<String>) throws -> (String, String) {
+    private func startOpenConnect(_ i: Int, _ hop: Profile, ip: String, portOverride: Int?, before: Set<String>) throws -> (String, String) {
         // Вместо vpnc-script: только поднимаем интерфейс, маршрутами и DNS управляет движок.
         let script = privateFile(i, "script")
         try writeSecret(Data("""
@@ -369,29 +490,34 @@ final class Engine {
             "--script=\(script.path)",
             "--no-dtls",
         ]
-        if endpoint.host != ip { args.append("--resolve=\(endpoint.host):\(ip)") }
+        if portOverride != nil {
+            args.append("--resolve=\(endpoint.host):127.0.0.1")
+        } else if endpoint.host != ip {
+            args.append("--resolve=\(endpoint.host):\(ip)")
+        }
         if !hop.username.isEmpty { args.append("--user=\(hop.username)") }
         if !hop.serverCert.isEmpty { args.append("--servercert=\(hop.serverCert)") }
         if let ca = Tool.bundledCAFile { args.append("--cafile=\(ca)") }
         if !hop.authGroup.isEmpty { args.append("--authgroup=\(hop.authGroup)") }
-        args.append(hop.server.trimmingCharacters(in: .whitespaces))
+        args.append(portOverride.map { Endpoint.rewritePort(hop.server, port: $0) } ?? hop.server.trimmingCharacters(in: .whitespaces))
         try spawn(i, tool: .openconnect, args, stdin: hop.password + "\n", env: ["CEP_INNER_FILE": privateFile(i, "inner").path])
         let iface = try waitForInterface(hop: i) { name, addrs in !before.contains(name) && name.hasPrefix("utun") && !addrs.isEmpty }
         return (iface.name, iface.address)
     }
 
-    private func startSSTP(_ i: Int, _ hop: Profile, ip: String, before: Set<String>) throws -> (String, String) {
+    private func startSSTP(_ i: Int, _ hop: Profile, ip: String, portOverride: Int?, before: Set<String>) throws -> (String, String) {
         var args = ["--log-stderr", "--log-level", "3", "--user", hop.username, "--password", hop.password]
         if hop.ignoreCertErrors { args.append("--cert-warn") }
         if let ca = Tool.bundledCAFile { args += ["--ca-cert", ca] }
-        args += [hop.server.trimmingCharacters(in: .whitespaces),
+        let serverArg = portOverride.map { "127.0.0.1:\($0)" } ?? hop.server.trimmingCharacters(in: .whitespaces)
+        args += [serverArg,
                  "noauth", "nodefaultroute", "noipdefault", "refuse-eap", "refuse-pap", "nodetach"]
         try spawn(i, tool: .sstpc, args)
         let iface = try waitForInterface(hop: i) { name, addrs in !before.contains(name) && name.hasPrefix("ppp") && !addrs.isEmpty }
         return (iface.name, iface.address)
     }
 
-    private func startAWG(_ i: Int, _ hop: Profile, ip: String) throws -> (String, String) {
+    private func startAWG(_ i: Int, _ hop: Profile, ip: String, portOverride: Int?) throws -> (String, String) {
         let conf = try AWGConfig.parse(hop.config)
         guard let address = conf.ipv4Address else { throw EngineError("в [Interface] нет IPv4 Address") }
         guard let awg = Tool.awg.locate() else { throw EngineError("не найден awg (\(Tool.awg.installHint))") }
@@ -404,7 +530,7 @@ final class Engine {
         }
 
         let setconf = privateFile(i, "awg.conf")
-        try writeSecret(Data(conf.setconfText(endpointIP: ip).utf8), to: setconf)
+        try writeSecret(Data(conf.setconfText(endpointIP: ip, portOverride: portOverride).utf8), to: setconf)
         try check(Shell.run(awg, ["setconf", iface, setconf.path]), "awg setconf")
         try check(Shell.run("/sbin/ifconfig", [iface, "inet", address, address, "netmask", "255.255.255.255",
                                                 "mtu", String(conf.mtu ?? 1376), "up"]), "ifconfig")

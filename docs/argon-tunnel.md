@@ -88,3 +88,13 @@ make up
 make tunnel-apk
 make install-tunnel-apk
 ```
+
+---
+
+## 4. Режим L4-транзита (`-mode transit` и `-transit-blind`)
+
+Сервер `argon-tunnel-server` умеет работать не только как IPv4 TUN-шлюз (`-mode tunnel`, по умолчанию), но и как L4-транзитный узел (`-mode transit` / `ARGON_MODE=transit`) без создания TUN-интерфейса и выделения виртуальной подсети:
+
+1. **Аутентифицированный TCP/UDP транзит**: клиент подключается к тому же порту (UDP или TCP с 2-байтным префиксом длины кадра), проходит X25519-рукопожатие и указывает целевой `host:port` и транспорт (`udp` / `tcp`), а также пересылает keepalive/`"fin"` для корректного полузакрытия TCP (`CloseWrite`). Цели ограничиваются `-transit-target` (`ARGON_TRANSIT_TARGET`) или списком `-transit-allow` (`ARGON_TRANSIT_ALLOW`).
+2. **Слепой passthrough (`-transit-blind` / `ARGON_TRANSIT_BLIND=1`)**: сервер не расшифровывает пакеты (мастер-пароль не обязателен) и прозрачно пересылает UDP/TCP-поток на фиксированный `-transit-target`. В CEP такой узел задаётся с типом `transit` и пустым паролем перед следующим узлом `Argon4` или узлом с `useArgon`.
+3. **Согласование `auto`**: клиентская надстройка `useArgon` отправляет запрос с `mode="auto"`, автоматически выбирая L4-транзит перед сервером с `-mode transit` или TUN-туннель перед `-mode tunnel`.

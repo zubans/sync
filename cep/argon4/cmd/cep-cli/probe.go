@@ -42,6 +42,34 @@ func probeProfile(profile Profile) string {
 		if openVPNUsesUDP(profile.Config) {
 			return fmt.Sprintf("ПРЕДУПРЕЖДЕНИЕ: UDP %s не проверяется простым подключением; доступность подтвердит handshake при запуске", endpointText(endpoint))
 		}
+	case "transit":
+		if profile.Password == "" {
+			connection, err := net.DialTimeout("tcp", endpointText(endpoint), probeTimeout)
+			if err != nil {
+				return fmt.Sprintf("слепой транзит %s (TCP недоступен или работает только по UDP: %v)", endpointText(endpoint), err)
+			}
+			_ = connection.Close()
+			return fmt.Sprintf("слепой транзит %s (TCP доступен)", endpointText(endpoint))
+		}
+		client, err := argon4.NewClient(argon4.ClientConfig{
+			Server:         endpointText(endpoint),
+			MasterPassword: profile.Password,
+			ClientID:       valueOr(profile.ClientID, profile.ID),
+			ClientSecret:   profile.ClientSecret,
+			Mode:           argon4.ModeTransit,
+			Proto:          argon4.ProtoUDP,
+		})
+		if err != nil {
+			return "ОШИБКА: " + err.Error()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		defer cancel()
+		err = client.Connect(ctx)
+		_ = client.Close()
+		if err != nil {
+			return unavailableWarning(endpoint, err)
+		}
+		return "Argon4-транзит handshake успешен"
 	case "argon4":
 		client, err := argon4.NewClient(argon4.ClientConfig{
 			Server:         endpointText(endpoint),

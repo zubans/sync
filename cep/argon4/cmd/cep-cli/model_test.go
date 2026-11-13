@@ -47,3 +47,42 @@ func TestValidatePlanRejectsUnsupportedProtocol(t *testing.T) {
 		t.Fatal("ожидалась ошибка неподдерживаемого протокола")
 	}
 }
+
+func TestValidatePlanTransitRulesAndUseArgonWithoutServer(t *testing.T) {
+	lastTransit := &Plan{Hops: []Profile{{Name: "T", Proto: "transit", Server: "relay.example.com", Password: "p"}}}
+	if err := validatePlan(lastTransit); err == nil {
+		t.Fatal("ожидалась ошибка: транзит не может быть последним узлом")
+	}
+
+	blindWithoutArgonNext := &Plan{Hops: []Profile{
+		{Name: "Blind", Proto: "transit", Server: "relay.example.com"},
+		{Name: "VLESS", Proto: "vless", URI: "vless://uuid@example.com:443?security=tls"},
+	}}
+	if err := validatePlan(blindWithoutArgonNext); err == nil {
+		t.Fatal("ожидалась ошибка: слепой транзит без Argon4 на следующем узле")
+	}
+
+	blindWithUseArgon := &Plan{Hops: []Profile{
+		{Name: "Blind", Proto: "transit", Server: "relay.example.com"},
+		{Name: "VLESS", Proto: "vless", URI: "vless://uuid@example.com:443?security=tls", UseArgon: true, ArgonPassword: "secret"},
+	}}
+	if err := validatePlan(blindWithUseArgon); err != nil {
+		t.Fatalf("ожидался успех слепого транзита + UseArgon без ArgonServer: %v", err)
+	}
+
+	authTransitWithVLESS := &Plan{Hops: []Profile{
+		{Name: "T", Proto: "transit", Server: "relay.example.com:51820", Password: "secret"},
+		{Name: "VLESS", Proto: "vless", URI: "vless://uuid@example.com:443?security=tls"},
+	}}
+	if err := validatePlan(authTransitWithVLESS); err != nil {
+		t.Fatalf("ожидался успех авторизованного транзита к любому узлу: %v", err)
+	}
+
+	useArgonOnTransit := &Plan{Hops: []Profile{
+		{Name: "T", Proto: "transit", Server: "relay.example.com", Password: "p", UseArgon: true, ArgonPassword: "x"},
+		{Name: "A", Proto: "argon4", Server: "vpn.example.com", Password: "p"},
+	}}
+	if err := validatePlan(useArgonOnTransit); err == nil {
+		t.Fatal("ожидалась ошибка: UseArgon на transit запрещён")
+	}
+}

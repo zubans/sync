@@ -49,4 +49,25 @@ func TestPinOpenVPNRemotePreservesInlineCertificates(t *testing.T) {
 	if !strings.HasSuffix(pinned, "dev cepo0\ndev-type tun") {
 		t.Fatalf("не задан интерфейс: %s", pinned)
 	}
+
+	pinnedPort, err := pinOpenVPNRemoteWithPort(config, "127.0.0.1", 45678, "cepo1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(pinnedPort, "remote 127.0.0.1 45678 udp\n") {
+		t.Fatalf("portOverride не применён: %s", pinnedPort)
+	}
+}
+
+func TestRewriteServerPortAndDefaults(t *testing.T) {
+	if got := rewriteServerPort("https://vpn.example.com/group", 43210); got != "https://vpn.example.com:43210/group" {
+		t.Fatalf("rewriteServerPort(https) = %q", got)
+	}
+	if got := rewriteServerPort("vpn.example.com:4443", 43210); got != "vpn.example.com:43210" {
+		t.Fatalf("rewriteServerPort(host:port) = %q", got)
+	}
+	port, err := resolvedPortFor(Profile{Proto: "transit", Server: "relay.example.com"})
+	if err != nil || port != 51820 {
+		t.Fatalf("resolvedPortFor(transit) = %d, %v", port, err)
+	}
 }

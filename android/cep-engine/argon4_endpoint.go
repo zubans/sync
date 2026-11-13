@@ -39,19 +39,24 @@ type argon4Options struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
 	Detour       string `json:"detour"`
+	Mode         string `json:"mode,omitempty"`
+	Target       string `json:"target,omitempty"`
+	Proto        string `json:"proto,omitempty"`
 }
 
-// argon4Endpoint передаёт сырые IPv4-пакеты Argon4 через packet-device sing-box.
-// Наружу endpoint предоставляет обычные TCP/UDP Dialer, поэтому может быть как
-// конечным узлом TUN, так и underlay для следующего узла цепочки.
+// argon4Endpoint передаёт сырые IPv4-пакеты Argon4 через packet-device sing-box
+// или пробрасывает L4 TCP/UDP потоки в режиме транзита.
 type argon4Endpoint struct {
 	endpoint.Adapter
+	options     argon4Options
+	dialer      N.Dialer
 	loopContext context.Context
 	cancelLoop  context.CancelFunc
 	dnsRouter   adapter.DNSRouter
 	logger      log.ContextLogger
 	device      packetdevice.Device
 	client      *argon4.Client
+	transit     atomic.Bool
 	ready       atomic.Bool
 	readGroup   sync.WaitGroup
 }
@@ -67,11 +72,35 @@ func newArgon4Endpoint(ctx context.Context, _ adapter.Router, logger log.Context
 		cancelLoop()
 		return nil, err
 	}
+	var dependencies []string
+	if options.Detour != "" {
+		dependencies = append(dependencies, options.Detour)
+	}
+	if options.Mode == argon4.ModeTransit {
+		if options.Server == "" || options.Password == "" {
+			cancelLoop()
+			return nil, fmt.Errorf("Argon4 транзит: не указан сервер или мастер-пароль")
+		}
+		ep := &argon4Endpoint{
+			Adapter:     endpoint.NewAdapter(argon4Type, tag, []string{N.NetworkTCP, N.NetworkUDP}, dependencies),
+			options:     options,
+			dialer:      outboundDialer,
+			loopContext: loopContext,
+			cancelLoop:  cancelLoop,
+			dnsRouter:   service.FromContext[adapter.DNSRouter](ctx),
+			logger:      logger,
+		}
+		ep.transit.Store(true)
+		return ep, nil
+	}
 	client, err := argon4.NewClient(argon4.ClientConfig{
 		Server:         options.Server,
 		MasterPassword: options.Password,
 		ClientID:       options.ClientID,
 		ClientSecret:   options.ClientSecret,
+		Mode:           options.Mode,
+		Target:         options.Target,
+		Proto:          options.Proto,
 	}, outboundDialer)
 	if err != nil {
 		cancelLoop()
@@ -94,12 +123,10 @@ func newArgon4Endpoint(ctx context.Context, _ adapter.Router, logger log.Context
 		cancelLoop()
 		return nil, err
 	}
-	var dependencies []string
-	if options.Detour != "" {
-		dependencies = append(dependencies, options.Detour)
-	}
 	result := &argon4Endpoint{
 		Adapter:     endpoint.NewAdapter(argon4Type, tag, []string{N.NetworkTCP, N.NetworkUDP}, dependencies),
+		options:     options,
+		dialer:      outboundDialer,
 		loopContext: loopContext,
 		cancelLoop:  cancelLoop,
 		dnsRouter:   service.FromContext[adapter.DNSRouter](ctx),
@@ -114,10 +141,38 @@ func newArgon4Endpoint(ctx context.Context, _ adapter.Router, logger log.Context
 func (e *argon4Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	switch stage {
 	case adapter.StartStateInitialize:
-		scope.Add(e.device.Close)
+		if e.device != nil {
+			scope.Add(e.device.Close)
+		}
 	case adapter.StartStatePostStart:
+		if e.transit.Load() {
+			e.ready.Store(true)
+			scope.Add(func() error {
+				e.ready.Store(false)
+				e.cancelLoop()
+				return nil
+			})
+			return nil
+		}
 		if err := e.client.Connect(scope.Context()); err != nil {
 			return err
+		}
+		if e.client.IsTransit() {
+			_ = e.client.Close()
+			e.client = nil
+			if e.device != nil {
+				_ = e.device.Close()
+				e.device = nil
+			}
+			e.transit.Store(true)
+			e.ready.Store(true)
+			scope.Add(func() error {
+				e.ready.Store(false)
+				e.cancelLoop()
+				return nil
+			})
+			e.logger.Info("Argon4: выбран режим L4-транзита к ", e.options.Target)
+			return nil
 		}
 		scope.Add(func() error {
 			e.ready.Store(false)
@@ -217,6 +272,9 @@ func (e *argon4Endpoint) DialContext(ctx context.Context, network string, destin
 	if !e.ready.Load() {
 		return nil, E.New("Argon4: endpoint ещё не готов")
 	}
+	if e.transit.Load() {
+		return e.dialTransit(ctx, network, destination)
+	}
 	if destination.IsDomain() {
 		if e.dnsRouter == nil {
 			return nil, E.New("Argon4: DNS router недоступен")
@@ -236,6 +294,9 @@ func (e *argon4Endpoint) DialContext(ctx context.Context, network string, destin
 func (e *argon4Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	if !e.ready.Load() {
 		return nil, E.New("Argon4: endpoint ещё не готов")
+	}
+	if e.transit.Load() {
+		return e.listenTransitPacket(ctx, destination)
 	}
 	if destination.IsDomain() {
 		if e.dnsRouter == nil {
@@ -262,11 +323,27 @@ var _ tun.Port = (*argon4Endpoint)(nil)
 
 // Port-интерфейс нужен sing-box для прямых return-путей; Argon4 использует
 // тот же packet-device, что OpenConnect, поэтому делегируем ему эти операции.
-func (e *argon4Endpoint) PortAddresses() (netip.Addr, netip.Addr) { return e.device.PortAddresses() }
-func (e *argon4Endpoint) PortMTU() uint32                         { return e.device.PortMTU() }
+func (e *argon4Endpoint) PortAddresses() (netip.Addr, netip.Addr) {
+	if e.device == nil {
+		return netip.Addr{}, netip.Addr{}
+	}
+	return e.device.PortAddresses()
+}
+func (e *argon4Endpoint) PortMTU() uint32 {
+	if e.device == nil {
+		return 1400
+	}
+	return e.device.PortMTU()
+}
 func (e *argon4Endpoint) AttachReturn(returnPath tun.Return) error {
+	if e.device == nil {
+		return nil
+	}
 	return e.device.AttachReturn(returnPath)
 }
 func (e *argon4Endpoint) DetachReturn(returnPath tun.Return) error {
+	if e.device == nil {
+		return nil
+	}
 	return e.device.DetachReturn(returnPath)
 }

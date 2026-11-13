@@ -176,7 +176,7 @@ tunnel-apk: android/local.properties ## Собрать debug APK клиента 
 	cd android && ./gradlew :tunnel:assembleDebug
 
 # Движок CEP пересобирается, только если менялись его исходники: сборка gomobile идёт минуты.
-$(CEP_AAR): $(wildcard android/cep-engine/*.go android/cep-engine/go.mod android/cep-engine/go.sum)
+$(CEP_AAR): $(wildcard android/cep-engine/*.go android/cep-engine/argon4/*.go android/cep-engine/go.mod android/cep-engine/go.sum)
 	android/cep-engine/build.sh
 
 cep-engine: ## Пересобрать движок CEP (Go + sing-box → android/app/libs/cepcore.aar; нужны Go, NDK, gomobile)

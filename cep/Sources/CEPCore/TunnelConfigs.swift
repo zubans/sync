@@ -30,8 +30,8 @@ public enum OpenVPNConfig {
         return (w[1], port, w.count >= 4 ? w[3] : nil)
     }
 
-    /// Оставляет один remote с уже разрешённым IP: сервер должен совпасть с тем, до которого проложен маршрут.
-    public static func pinRemote(_ config: String, ip: String) throws -> String {
+    /// Оставляет один remote с уже разрешённым IP (или 127.0.0.1 при транзите): сервер должен совпасть с тем, до которого проложен маршрут.
+    public static func pinRemote(_ config: String, ip: String, portOverride: Int? = nil) throws -> String {
         guard let remote = firstRemote(config) else { throw ConfigError("в конфиге OpenVPN нет строки remote") }
         let lower = config.lowercased()
         if lower.contains("<connection>") {
@@ -43,7 +43,7 @@ public enum OpenVPNConfig {
         var lines = config.components(separatedBy: .newlines).enumerated()
             .filter { !drop.contains($0.offset) }
             .map(\.element)
-        var pinned = "remote \(ip) \(remote.port)"
+        var pinned = "remote \(ip) \(portOverride ?? remote.port)"
         if let proto = remote.proto { pinned += " \(proto)" }
         lines.insert(pinned, at: 0)
         return lines.joined(separator: "\n")
@@ -101,8 +101,8 @@ public struct AWGConfig: Sendable {
         addresses.first { !$0.contains(":") }.map { String($0.split(separator: "/")[0]) }
     }
 
-    /// Текст для `awg setconf`: без ключей wg-quick, с Endpoint на разрешённый IP.
-    public func setconfText(endpointIP: String) -> String {
+    /// Текст для `awg setconf`: без ключей wg-quick, с Endpoint на разрешённый IP или локальный порт транзита.
+    public func setconfText(endpointIP: String, portOverride: Int? = nil) -> String {
         var section = ""
         return lines.map { raw in
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -110,7 +110,7 @@ public struct AWGConfig: Sendable {
             if section == "[peer]", let eq = line.firstIndex(of: "="),
                line[..<eq].trimmingCharacters(in: .whitespaces).lowercased() == "endpoint" {
                 let host = endpointIP.contains(":") ? "[\(endpointIP)]" : endpointIP
-                return "Endpoint = \(host):\(endpoint.port ?? 51820)"
+                return "Endpoint = \(host):\(portOverride ?? endpoint.port ?? 51820)"
             }
             return raw
         }.joined(separator: "\n")

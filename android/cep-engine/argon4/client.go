@@ -29,6 +29,9 @@ type ClientConfig struct {
 	MasterPassword string
 	ClientID       string
 	ClientSecret   string
+	Mode           string
+	Target         string
+	Proto          string
 }
 
 // Client — клиентская Argon4-сессия с раздельными ключами направлений и anti-replay.
@@ -37,15 +40,16 @@ type Client struct {
 	config ClientConfig
 	dialer N.Dialer
 
-	conn      net.Conn
-	response  HandshakeResponse
-	salt      [SaltSize]byte
-	psk       []byte
-	c2sKey    []byte
-	s2cKey    []byte
-	seq       atomic.Uint64
-	replay    ReplayWindow
-	closeOnce sync.Once
+	conn        net.Conn
+	response    HandshakeResponse
+	transitMode bool
+	salt        [SaltSize]byte
+	psk         []byte
+	c2sKey      []byte
+	s2cKey      []byte
+	seq         atomic.Uint64
+	replay      ReplayWindow
+	closeOnce   sync.Once
 }
 
 func NewClient(config ClientConfig, dialer N.Dialer) (*Client, error) {
@@ -96,6 +100,9 @@ func (c *Client) Connect(ctx context.Context) error {
 		ClientAuth: hex.EncodeToString(ClientAuthToken(c.psk, c.config.ClientID, c.config.ClientSecret)),
 		ClientPub:  hex.EncodeToString(publicKey),
 		Timestamp:  time.Now().Unix(),
+		Mode:       c.config.Mode,
+		Target:     c.config.Target,
+		Proto:      c.config.Proto,
 	}
 	plaintext, err := json.Marshal(request)
 	if err != nil {
@@ -110,8 +117,19 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := validateHandshakeResponse(response); err != nil {
-		return err
+	effectiveMode := response.Mode
+	if effectiveMode == "" {
+		if c.config.Mode == ModeTransit {
+			effectiveMode = ModeTransit
+		} else {
+			effectiveMode = ModeTunnel
+		}
+		response.Mode = effectiveMode
+	}
+	if effectiveMode != ModeTransit {
+		if err := validateHandshakeResponse(response); err != nil {
+			return err
+		}
 	}
 	serverPublic, err := hex.DecodeString(response.ServerPub)
 	if err != nil || len(serverPublic) != X25519KeySize {
@@ -128,8 +146,14 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	c.conn = conn
 	c.response = response
+	c.transitMode = effectiveMode == ModeTransit
 	connected = true
 	return nil
+}
+
+// IsTransit сообщает, перешла ли сессия в режим L4-транзита без виртуального TUN IP.
+func (c *Client) IsTransit() bool {
+	return c.transitMode
 }
 
 func (c *Client) handshake(ctx context.Context, conn net.Conn, wireRequest, handshakeKey []byte) (HandshakeResponse, error) {
@@ -194,13 +218,50 @@ func (c *Client) Response() HandshakeResponse {
 	return response
 }
 
-// WritePacket шифрует один исходящий IPv4-пакет ключом c2s.
+func (c *Client) LocalAddr() net.Addr {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.LocalAddr()
+}
+
+func (c *Client) RemoteAddr() net.Addr {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.RemoteAddr()
+}
+
+func (c *Client) SetDeadline(t time.Time) error {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
+	return c.conn.SetDeadline(t)
+}
+
+func (c *Client) SetReadDeadline(t time.Time) error {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
+	return c.conn.SetReadDeadline(t)
+}
+
+func (c *Client) SetWriteDeadline(t time.Time) error {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
+	return c.conn.SetWriteDeadline(t)
+}
+
+// WritePacket шифрует один исходящий пакет (IPv4 или L4-транзит) ключом c2s.
 func (c *Client) WritePacket(plaintext []byte) error {
 	if c.conn == nil {
 		return net.ErrClosed
 	}
-	if _, _, ok := ParseIPv4Addrs(plaintext); !ok {
-		return fmt.Errorf("Argon4 переносит только IPv4-пакеты")
+	if !c.transitMode {
+		if _, _, ok := ParseIPv4Addrs(plaintext); !ok {
+			return fmt.Errorf("Argon4 переносит только IPv4-пакеты")
+		}
 	}
 	packet, err := SealPacketWithSeq(FrameTypeData, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), plaintext)
 	if err != nil {
@@ -246,8 +307,10 @@ func (c *Client) ReadPacket() ([]byte, error) {
 		if frameType != FrameTypeData {
 			continue
 		}
-		if _, _, ok := ParseIPv4Addrs(plaintext); !ok {
-			continue
+		if !c.transitMode {
+			if _, _, ok := ParseIPv4Addrs(plaintext); !ok {
+				continue
+			}
 		}
 		return plaintext, nil
 	}

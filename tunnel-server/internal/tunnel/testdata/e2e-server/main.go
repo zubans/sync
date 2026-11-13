@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/example/contactsync/tunnel-server/internal/tunnel"
@@ -82,9 +83,18 @@ func main() {
 	addrFile := flag.String("addr-file", "", "файл, куда записать фактический адрес listener")
 	dropResponses := flag.Int("drop-responses", 0, "число первых ответов, которые нужно потерять")
 	echoData := flag.Bool("echo-data", false, "возвращать data-кадры с переставленными IPv4-адресами")
+	mode := flag.String("mode", "tunnel", "режим сервера: tunnel, transit, auto")
+	transitAllow := flag.String("transit-allow", "", "CIDR/host:port через запятую для L4-транзита")
 	flag.Parse()
 	if *password == "" || *addrFile == "" {
 		log.Fatal("flags -password and -addr-file are required")
+	}
+
+	var allowList []string
+	for _, part := range strings.Split(*transitAllow, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			allowList = append(allowList, trimmed)
+		}
 	}
 
 	var tunDevice io.ReadWriteCloser
@@ -95,17 +105,30 @@ func main() {
 		defer echo.Close()
 	}
 	srv, err := tunnel.NewServer(tunnel.ServerConfig{
+		ListenAddr:     *listen,
 		SubnetCIDR:     "10.44.0.1/24",
 		MasterPassword: *password,
 		ArgonParams:    tunnel.DefaultParams,
 		MTU:            1380,
 		DNS:            []string{"1.1.1.1"},
 		Routes:         []string{"0.0.0.0/0"},
+		Mode:           *mode,
+		TransitAllow:   allowList,
 	}, tunDevice)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer srv.Close()
+
+	if *mode == tunnel.ModeTransit {
+		if err := srv.StartTransit(); err != nil {
+			log.Fatal(err)
+		}
+		if err := os.WriteFile(*addrFile, []byte(srv.LocalAddr().String()), 0o600); err != nil {
+			log.Fatal(err)
+		}
+		log.Fatal(srv.Run())
+	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp4", *listen)
 	if err != nil {
