@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -14,11 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-)
-
-const (
-	handshakeAttempts = 3
-	handshakeTimeout  = 3 * time.Second
 )
 
 // ClientConfig — параметры одного Argon4-туннеля. UDP-соединение использует
@@ -36,6 +30,8 @@ type ClientConfig struct {
 	FirstPacketProfile string
 	Padding            *PaddingConfig
 	PathMTU            int
+	Timing             TimingConfig
+	Clock              Clock
 }
 
 // Client — клиентская Argon4-сессия с раздельными ключами направлений и anti-replay.
@@ -46,6 +42,9 @@ type Client struct {
 	padding            PaddingConfig
 	firstPacketPadding PaddingConfig
 	maxOuterUDP        int
+	timing             TimingConfig
+	clock              Clock
+	tracker            *ActivityTracker
 
 	conn        net.Conn
 	response    HandshakeResponse
@@ -131,12 +130,23 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	timingCfg, err := NormalizeTimingConfig(config.Timing)
+	if err != nil {
+		return nil, err
+	}
+	clk := config.Clock
+	if clk == nil {
+		clk = RealClock{}
+	}
 	return &Client{
 		config:             config,
 		protocolVersion:    ver,
 		padding:            pad,
 		firstPacketPadding: firstPad,
 		maxOuterUDP:        maxOuter,
+		timing:             timingCfg,
+		clock:              clk,
+		tracker:            NewActivityTracker(clk),
 	}, nil
 }
 
@@ -243,58 +253,37 @@ func (c *Client) IsTransit() bool {
 }
 
 func (c *Client) handshake(ctx context.Context, conn net.Conn, wireRequest, handshakeKey []byte) (HandshakeResponse, error) {
-	var lastErr error
-	buffer := make([]byte, 65535)
-	for attempt := 0; attempt < handshakeAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return HandshakeResponse{}, err
+	var parsed HandshakeResponse
+	err := RunHandshakeLoop(ctx, c.timing, c.clock, nil, conn, wireRequest, func(packet []byte) (bool, error) {
+		version, frameType, salt, _, _, _, herr := ParseAndVerifyHeader(packet, c.psk)
+		if herr != nil || frameType != FrameTypeHandshakeResp || !bytes.Equal(salt, c.salt[:]) {
+			return false, nil
 		}
-		deadline := time.Now().Add(handshakeTimeout)
-		if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
-			deadline = contextDeadline
+		opened, oerr := OpenPacketWithOptions(packet, c.psk, handshakeKey, OpenOptions{
+			ExpectedVersion: c.protocolVersion,
+			MaxOuterBytes:   c.maxOuterUDP,
+		})
+		if oerr != nil {
+			if version != c.protocolVersion || IsNonRetryableHandshakeError(oerr) {
+				return false, WrapNonRetryableHandshake(oerr)
+			}
+			return false, nil
 		}
-		if err := conn.SetDeadline(deadline); err != nil {
-			return HandshakeResponse{}, err
+		var response HandshakeResponse
+		if jerr := json.Unmarshal(opened.Plaintext, &response); jerr != nil {
+			return false, WrapNonRetryableHandshake(fmt.Errorf("Argon4: неверный ответ handshake: %w", jerr))
 		}
-		if _, err := conn.Write(wireRequest); err != nil {
-			lastErr = err
-			continue
+		if perr := validateHandshakeProtocol(c.protocolVersion, response); perr != nil {
+			return false, WrapNonRetryableHandshake(perr)
 		}
-		for {
-			n, err := conn.Read(buffer)
-			if err != nil {
-				lastErr = err
-				break
-			}
-			version, frameType, salt, _, _, _, err := ParseAndVerifyHeader(buffer[:n], c.psk)
-			if err != nil || frameType != FrameTypeHandshakeResp || !bytes.Equal(salt, c.salt[:]) {
-				continue
-			}
-			opened, err := OpenPacketWithOptions(buffer[:n], c.psk, handshakeKey, OpenOptions{
-				ExpectedVersion: c.protocolVersion,
-				MaxOuterBytes:   c.maxOuterUDP,
-			})
-			if err != nil {
-				if version != c.protocolVersion || errors.Is(err, ErrDowngradeRejected) || errors.Is(err, ErrBadVersion) ||
-					errors.Is(err, ErrInvalidPadding) || errors.Is(err, ErrTrailingData) || errors.Is(err, ErrInvalidEnvelope) {
-					return HandshakeResponse{}, err
-				}
-				continue
-			}
-			var response HandshakeResponse
-			if err := json.Unmarshal(opened.Plaintext, &response); err != nil {
-				return HandshakeResponse{}, fmt.Errorf("Argon4: неверный ответ handshake: %w", err)
-			}
-			if err := validateHandshakeProtocol(c.protocolVersion, response); err != nil {
-				return HandshakeResponse{}, err
-			}
-			return response, nil
-		}
+		parsed = response
+		return true, nil
+	})
+	if err != nil {
+		return HandshakeResponse{}, err
 	}
-	if lastErr == nil {
-		lastErr = context.DeadlineExceeded
-	}
-	return HandshakeResponse{}, fmt.Errorf("Argon4: сервер не ответил на handshake после %d попыток: %w", handshakeAttempts, lastErr)
+	c.tracker.Touch()
+	return parsed, nil
 }
 
 func validateHandshakeResponse(response HandshakeResponse) error {
@@ -337,7 +326,31 @@ func (c *Client) WritePacket(plaintext []byte) error {
 		return err
 	}
 	_, err = c.conn.Write(packet)
+	if err == nil {
+		c.tracker.Touch()
+	}
 	return err
+}
+
+// Timing возвращает нормализованную конфигурацию таймингов клиента.
+func (c *Client) Timing() TimingConfig {
+	return c.timing
+}
+
+// Tracker возвращает потокобезопасный трекер исходящей активности клиента.
+func (c *Client) Tracker() *ActivityTracker {
+	return c.tracker
+}
+
+// RunKeepalive запускает idle-keepalive с jitter и сбросом по исходящим данным до отмены ctx или ошибки сокета.
+func (c *Client) RunKeepalive(ctx context.Context, onError func(error)) {
+	RunIdleKeepalive(ctx, KeepaliveOptions{
+		Clock:   c.clock,
+		Timing:  c.timing,
+		Tracker: c.tracker,
+		Send:    c.WriteKeepalive,
+		OnError: onError,
+	})
 }
 
 // WriteKeepalive поддерживает UDP NAT и серверную сессию во время простоя.

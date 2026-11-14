@@ -33,6 +33,7 @@ func (e *argon4Endpoint) transitConfig(target, proto string) argon4.ClientConfig
 		PaddingProfile:     e.options.PaddingProfile,
 		FirstPacketProfile: e.options.FirstPacketProfile,
 		PathMTU:            e.options.PathMTU,
+		Timing:             e.options.timingConfig(),
 	}
 }
 
@@ -87,18 +88,11 @@ func (e *argon4Endpoint) connectTransitUDP(ctx context.Context, target string, d
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-keepCtx.Done():
-				return
-			case <-ticker.C:
-				if err := client.WriteKeepalive(); err != nil && keepCtx.Err() == nil {
-					e.logger.Debug("Argon4 транзит keepalive: ", err)
-				}
+		client.RunKeepalive(keepCtx, func(err error) {
+			if keepCtx.Err() == nil {
+				e.logger.Debug("Argon4 транзит keepalive остановлен: ", err)
 			}
-		}
+		})
 	}()
 	stopKeepalive := func() {
 		cancelKeepalive()

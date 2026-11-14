@@ -298,15 +298,20 @@ func TestTransitValidationAndConfig(t *testing.T) {
 
 func TestArgon4V5OptionsPropagateToEndpointConfig(t *testing.T) {
 	plan, err := parsePlan(testPlan(Profile{
-		ID:                      "a1",
-		Name:                    "Argon v5",
-		Proto:                   "argon4",
-		Server:                  "argon.example.com",
-		Password:                "secret",
-		ArgonProtocolVersion:    5,
-		ArgonPaddingProfile:     "wide",
-		ArgonFirstPacketProfile: "compact",
-		ArgonPathMTU:            1420,
+		ID:                             "a1",
+		Name:                           "Argon v5",
+		Proto:                          "argon4",
+		Server:                         "argon.example.com",
+		Password:                       "secret",
+		ArgonProtocolVersion:           5,
+		ArgonPaddingProfile:            "wide",
+		ArgonFirstPacketProfile:        "compact",
+		ArgonPathMTU:                   1420,
+		ArgonHandshakeMaxAttempts:      6,
+		ArgonHandshakeInitialTimeoutMs: 900,
+		ArgonHandshakeMaxTimeoutMs:     3600,
+		ArgonKeepaliveMinIdleSec:       16,
+		ArgonKeepaliveMaxIdleSec:       26,
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -324,5 +329,20 @@ func TestArgon4V5OptionsPropagateToEndpointConfig(t *testing.T) {
 	}
 	if ep["path_mtu"] != float64(1420) && ep["path_mtu"] != 1420 {
 		t.Fatalf("не передан path_mtu=1420: %v", ep["path_mtu"])
+	}
+	if ep["handshake_max_attempts"] != float64(6) && ep["handshake_max_attempts"] != 6 {
+		t.Fatalf("не передан handshake_max_attempts=6: %v", ep["handshake_max_attempts"])
+	}
+	if ep["handshake_initial_timeout_ms"] != float64(900) && ep["handshake_initial_timeout_ms"] != 900 {
+		t.Fatalf("не передан handshake_initial_timeout_ms=900: %v", ep["handshake_initial_timeout_ms"])
+	}
+	if ep["handshake_max_timeout_ms"] != float64(3600) && ep["handshake_max_timeout_ms"] != 3600 {
+		t.Fatalf("не передан handshake_max_timeout_ms=3600: %v", ep["handshake_max_timeout_ms"])
+	}
+	if ep["keepalive_min_idle_sec"] != float64(16) && ep["keepalive_min_idle_sec"] != 16 {
+		t.Fatalf("не передан keepalive_min_idle_sec=16: %v", ep["keepalive_min_idle_sec"])
+	}
+	if ep["keepalive_max_idle_sec"] != float64(26) && ep["keepalive_max_idle_sec"] != 26 {
+		t.Fatalf("не передан keepalive_max_idle_sec=26: %v", ep["keepalive_max_idle_sec"])
 	}
 }

@@ -62,6 +62,7 @@ func probeProfile(profile Profile) string {
 			PaddingProfile:     profile.ArgonPaddingProfile,
 			FirstPacketProfile: profile.ArgonFirstPacketProfile,
 			PathMTU:            profile.ArgonPathMTU,
+			Timing:             timingConfigForProfile(profile),
 		})
 		if err != nil {
 			return "ОШИБКА: " + err.Error()
@@ -84,6 +85,7 @@ func probeProfile(profile Profile) string {
 			PaddingProfile:     profile.ArgonPaddingProfile,
 			FirstPacketProfile: profile.ArgonFirstPacketProfile,
 			PathMTU:            profile.ArgonPathMTU,
+			Timing:             timingConfigForProfile(profile),
 		})
 		if err != nil {
 			return "ОШИБКА: " + err.Error()
@@ -104,6 +106,16 @@ func probeProfile(profile Profile) string {
 	}
 	_ = connection.Close()
 	return fmt.Sprintf("TCP %s доступен напрямую", endpointText(endpoint))
+}
+
+func timingConfigForProfile(profile Profile) argon4.TimingConfig {
+	return argon4.TimingConfig{
+		HandshakeMaxAttempts:    profile.ArgonHandshakeMaxAttempts,
+		HandshakeInitialTimeout: time.Duration(profile.ArgonHandshakeInitialTimeoutMs) * time.Millisecond,
+		HandshakeMaxTimeout:     time.Duration(profile.ArgonHandshakeMaxTimeoutMs) * time.Millisecond,
+		KeepaliveMinIdle:        time.Duration(profile.ArgonKeepaliveMinIdleSec) * time.Second,
+		KeepaliveMaxIdle:        time.Duration(profile.ArgonKeepaliveMaxIdleSec) * time.Second,
+	}
 }
 
 func unavailableWarning(endpoint Endpoint, err error) string {

@@ -90,6 +90,7 @@ func main() {
 	allowV4 := flag.Bool("allow-v4", true, "разрешать приём legacy v4")
 	paddingProfile := flag.String("padding-profile", tunnel.PaddingProfileBalanced, "профиль padding v5")
 	pathMTU := flag.Int("path-mtu", tunnel.DefaultPathMTU, "ограничение внешнего path MTU")
+	sessionIdle := flag.Duration("session-idle-timeout", tunnel.SessionIdleTimeout, "таймаут неактивности сессии сервера")
 	wireLog := flag.String("wire-log", "", "файл для записи длин (in/out) зашифрованных UDP-кадров")
 	flag.Parse()
 	if *password == "" || *addrFile == "" {
@@ -126,6 +127,7 @@ func main() {
 			Profile: *paddingProfile,
 			PathMTU: *pathMTU,
 		},
+		SessionIdleTimeout: *sessionIdle,
 	}, tunDevice)
 	if err != nil {
 		log.Fatal(err)

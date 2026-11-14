@@ -64,12 +64,25 @@ type TransitStreamConn struct {
 	s2cKey    []byte
 	version   byte
 	padding   PaddingConfig
+	timing    TimingConfig
+	clock     Clock
+	tracker   *ActivityTracker
 	seq       atomic.Uint64
 	replay    ReplayWindow
 	readMu    sync.Mutex
 	pending   []byte
 	writeMu   sync.Mutex
 	closeOnce sync.Once
+}
+
+// Timing возвращает нормализованную конфигурацию таймингов потокового транзита.
+func (c *TransitStreamConn) Timing() TimingConfig {
+	return c.timing
+}
+
+// Tracker возвращает трекер исходящей активности TCP-транзита.
+func (c *TransitStreamConn) Tracker() *ActivityTracker {
+	return c.tracker
 }
 
 // DialTransitTCP устанавливает зашифрованное TCP-соединение через переданный dialer sing-box.
@@ -86,6 +99,14 @@ func DialTransitTCP(ctx context.Context, config ClientConfig, dialer N.Dialer) (
 	ver, pad, firstPad, _, err := resolveTransportOptions(config, false)
 	if err != nil {
 		return nil, HandshakeResponse{}, err
+	}
+	timingCfg, err := NormalizeTimingConfig(config.Timing)
+	if err != nil {
+		return nil, HandshakeResponse{}, err
+	}
+	clk := config.Clock
+	if clk == nil {
+		clk = RealClock{}
 	}
 	destination := M.ParseSocksaddr(config.Server)
 	if !destination.IsValid() || destination.Port == 0 {
@@ -150,7 +171,7 @@ func DialTransitTCP(ctx context.Context, config ClientConfig, dialer N.Dialer) (
 		return nil, HandshakeResponse{}, err
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := clk.Now().Add(timingCfg.HandshakeMaxElapsed)
 	if ctxDeadline, hasDeadline := ctx.Deadline(); hasDeadline && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
@@ -211,6 +232,9 @@ func DialTransitTCP(ctx context.Context, config ClientConfig, dialer N.Dialer) (
 		s2cKey:   s2cKey,
 		version:  ver,
 		padding:  pad,
+		timing:   timingCfg,
+		clock:    clk,
+		tracker:  NewActivityTracker(clk),
 	}
 	ok = true
 	return stream, resp, nil
@@ -305,6 +329,7 @@ func (c *TransitStreamConn) Write(p []byte) (int, error) {
 		if err := c.writeFrameLocked(FrameTypeData, chunk); err != nil {
 			return written, err
 		}
+		c.tracker.Touch()
 		written += len(chunk)
 		p = p[len(chunk):]
 	}

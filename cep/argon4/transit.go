@@ -63,12 +63,25 @@ type TransitStreamConn struct {
 	s2cKey    []byte
 	version   byte
 	padding   PaddingConfig
+	timing    TimingConfig
+	clock     Clock
+	tracker   *ActivityTracker
 	seq       atomic.Uint64
 	replay    ReplayWindow
 	readMu    sync.Mutex
 	pending   []byte
 	writeMu   sync.Mutex
 	closeOnce sync.Once
+}
+
+// Timing возвращает нормализованную конфигурацию таймингов потокового транзита.
+func (c *TransitStreamConn) Timing() TimingConfig {
+	return c.timing
+}
+
+// Tracker возвращает трекер исходящей активности TCP-транзита.
+func (c *TransitStreamConn) Tracker() *ActivityTracker {
+	return c.tracker
 }
 
 // DialTransitTCP устанавливает зашифрованное TCP-соединение с транзитным сервером Argon4 к config.Target.
@@ -82,6 +95,14 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 	ver, pad, firstPad, _, err := resolveTransportOptions(config, false)
 	if err != nil {
 		return nil, HandshakeResponse{}, err
+	}
+	timingCfg, err := NormalizeTimingConfig(config.Timing)
+	if err != nil {
+		return nil, HandshakeResponse{}, err
+	}
+	clk := config.Clock
+	if clk == nil {
+		clk = RealClock{}
 	}
 	raw, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", config.Server)
 	if err != nil {
@@ -141,7 +162,7 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 		return nil, HandshakeResponse{}, err
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := clk.Now().Add(timingCfg.HandshakeMaxElapsed)
 	if ctxDeadline, hasDeadline := ctx.Deadline(); hasDeadline && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
@@ -202,6 +223,9 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 		s2cKey:   s2cKey,
 		version:  ver,
 		padding:  pad,
+		timing:   timingCfg,
+		clock:    clk,
+		tracker:  NewActivityTracker(clk),
 	}
 	ok = true
 	return stream, resp, nil
@@ -296,6 +320,7 @@ func (c *TransitStreamConn) Write(p []byte) (int, error) {
 		if err := c.writeFrameLocked(FrameTypeData, chunk); err != nil {
 			return written, err
 		}
+		c.tracker.Touch()
 		written += len(chunk)
 		p = p[len(chunk):]
 	}
@@ -350,7 +375,11 @@ func ConnectAuto(ctx context.Context, config ClientConfig, listenAddr string) (*
 	if probeCfg.Mode == "" {
 		probeCfg.Mode = ModeAuto
 	}
-	hsCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	timingCfg, err := NormalizeTimingConfig(probeCfg.Timing)
+	if err != nil {
+		return nil, nil, err
+	}
+	hsCtx, cancel := context.WithTimeout(ctx, timingCfg.HandshakeMaxElapsed)
 	defer cancel()
 
 	client, err := NewClient(probeCfg)
@@ -392,7 +421,11 @@ func ConnectAuto(ctx context.Context, config ClientConfig, listenAddr string) (*
 func StartTransitProxy(ctx context.Context, config ClientConfig, listenAddr string) (*TransitProxy, error) {
 	config.Mode = ModeTransit
 	proto := strings.ToLower(strings.TrimSpace(config.Proto))
-	hsCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	timingCfg, err := NormalizeTimingConfig(config.Timing)
+	if err != nil {
+		return nil, err
+	}
+	hsCtx, cancel := context.WithTimeout(ctx, timingCfg.HandshakeMaxElapsed)
 	defer cancel()
 
 	switch proto {
@@ -480,8 +513,11 @@ func startTransitProxyWithUDP(ctx context.Context, config ClientConfig, resp Han
 	}
 	go p.runUDPRelay()
 	go func() {
-		<-ctx.Done()
-		_ = p.Close()
+		select {
+		case <-ctx.Done():
+			_ = p.Close()
+		case <-p.done:
+		}
 	}()
 	return p, nil
 }
@@ -519,8 +555,11 @@ func startTCPProxy(ctx context.Context, config ClientConfig, resp HandshakeRespo
 	}
 	go p.runTCPAccept(firstConn)
 	go func() {
-		<-ctx.Done()
-		_ = p.Close()
+		select {
+		case <-ctx.Done():
+			_ = p.Close()
+		case <-p.done:
+		}
 	}()
 	return p, nil
 }
@@ -585,31 +624,30 @@ func (p *TransitProxy) handleLocalTCP(localConn net.Conn, pre *TransitStreamConn
 	}
 	defer remote.Close()
 
-	kaStop := make(chan struct{})
-	defer close(kaStop)
+	kaCtx, kaCancel := context.WithCancel(context.Background())
+	kaDone := make(chan struct{})
+	defer func() {
+		kaCancel()
+		<-kaDone
+	}()
 	go func() {
 		select {
 		case <-p.done:
+			kaCancel()
 			_ = localConn.Close()
 			_ = remote.Close()
-		case <-kaStop:
+		case <-kaCtx.Done():
 		}
 	}()
 	go func() {
-		ticker := time.NewTicker(25 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-kaStop:
-				return
-			case <-p.done:
-				return
-			case <-ticker.C:
-				if err := remote.WriteKeepalive(); err != nil {
-					return
-				}
-			}
-		}
+		defer close(kaDone)
+		RunIdleKeepalive(kaCtx, KeepaliveOptions{
+			Clock:   remote.clock,
+			Timing:  remote.Timing(),
+			Tracker: remote.Tracker(),
+			Send:    remote.WriteKeepalive,
+			OnError: func(error) { kaCancel() },
+		})
 	}()
 
 	toRemoteDone := make(chan error, 1)
@@ -645,15 +683,30 @@ func (p *TransitProxy) handleLocalTCP(localConn net.Conn, pre *TransitStreamConn
 }
 
 func (p *TransitProxy) runUDPRelay() {
+	defer func() { _ = p.Close() }()
 	var lastPeer atomic.Pointer[net.UDPAddr]
-	stop := make(chan struct{})
-	defer close(stop)
+	kaCtx, kaCancel := context.WithCancel(context.Background())
+	kaDone := make(chan struct{})
+	defer func() {
+		kaCancel()
+		<-kaDone
+	}()
+	go func() {
+		select {
+		case <-p.done:
+			kaCancel()
+		case <-kaCtx.Done():
+		}
+	}()
 
 	// Клиент UDP-транзита -> локальный UDP-клиент.
+	readerDone := make(chan struct{})
 	go func() {
+		defer close(readerDone)
 		for {
 			pkt, err := p.udpClient.ReadPacket()
 			if err != nil {
+				_ = p.Close()
 				return
 			}
 			peer := lastPeer.Load()
@@ -662,23 +715,15 @@ func (p *TransitProxy) runUDPRelay() {
 			}
 		}
 	}()
+	defer func() {
+		_ = p.Close()
+		<-readerDone
+	}()
 
-	// Keepalive на время простоя.
+	// Keepalive только после фактического простоя исходящего канала с jitter.
 	go func() {
-		ticker := time.NewTicker(25 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-p.done:
-				return
-			case <-ticker.C:
-				if err := p.udpClient.WriteKeepalive(); err != nil {
-					return
-				}
-			}
-		}
+		defer close(kaDone)
+		p.udpClient.RunKeepalive(kaCtx, nil)
 	}()
 
 	buf := make([]byte, 65535)

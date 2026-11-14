@@ -369,6 +369,21 @@ func (e *Engine) startArgon(index int, profile Profile, ip string, portOverride 
 	if profile.ArgonPathMTU != 0 {
 		configuration["path_mtu"] = profile.ArgonPathMTU
 	}
+	if profile.ArgonHandshakeMaxAttempts != 0 {
+		configuration["handshake_max_attempts"] = profile.ArgonHandshakeMaxAttempts
+	}
+	if profile.ArgonHandshakeInitialTimeoutMs != 0 {
+		configuration["handshake_initial_timeout_ms"] = profile.ArgonHandshakeInitialTimeoutMs
+	}
+	if profile.ArgonHandshakeMaxTimeoutMs != 0 {
+		configuration["handshake_max_timeout_ms"] = profile.ArgonHandshakeMaxTimeoutMs
+	}
+	if profile.ArgonKeepaliveMinIdleSec != 0 {
+		configuration["keepalive_min_idle_sec"] = profile.ArgonKeepaliveMinIdleSec
+	}
+	if profile.ArgonKeepaliveMaxIdleSec != 0 {
+		configuration["keepalive_max_idle_sec"] = profile.ArgonKeepaliveMaxIdleSec
+	}
 	configFile := e.privateFile(index, "argon.json")
 	if underlay {
 		configFile = e.privateFile(index, "argon-underlay.json")

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/example/contactsync/tunnel-server/internal/tunnel"
 )
@@ -17,6 +18,15 @@ import (
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envDurationOr(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return fallback
 }
@@ -32,29 +42,30 @@ func envIntOr(key string, fallback int) int {
 
 func main() {
 	var (
-		listenIface = flag.String("interface", envOr("ARGON_LISTEN_INTERFACE", ""), "Сетевой интерфейс Ubuntu для приёма зашифрованных пакетов (например, eth0, ens3; пусто — все)")
-		listenAddr  = flag.String("listen", envOr("ARGON_LISTEN_ADDR", "0.0.0.0:51820"), "UDP-адрес и порт приёма пакетов")
-		tunName     = flag.String("tun", envOr("ARGON_TUN_NAME", "argon0"), "Имя создаваемого или оборачиваемого TUN-интерфейса на Ubuntu")
-		subnetCIDR  = flag.String("subnet", envOr("ARGON_SUBNET", "10.44.0.1/24"), "Виртуальный IP/CIDR туннеля на Ubuntu")
-		outIface    = flag.String("out-interface", envOr("ARGON_OUT_INTERFACE", ""), "Существующий сетевой интерфейс Ubuntu для оборачивания/NAT (например, eth0)")
-		backendDest = flag.String("backend", envOr("ARGON_BACKEND_TARGET", ""), "Целевой хост:порт по умолчанию для проброса TCP-обращений к виртуальному IP шлюза (например, app:80)")
-		enableNAT   = flag.Bool("nat", envOr("ARGON_ENABLE_NAT", "1") == "1", "Автоматически включать IPv4 forwarding и правила iptables MASQUERADE")
-		noTun       = flag.Bool("no-tun", envOr("ARGON_NO_TUN", "0") == "1", "Запуск без открытия /dev/net/tun (для тестов без прав root)")
-		masterPass  = flag.String("password", envOr("ARGON_MASTER_PASSWORD", ""), "Мастер-пароль для вывода ключа Argon2id")
-		argonTime   = flag.Int("argon-time", envIntOr("ARGON_TIME", int(tunnel.DefaultArgonTime)), "Число итераций Argon2id (time cost)")
-		argonMem    = flag.Int("argon-memory", envIntOr("ARGON_MEMORY_KIB", int(tunnel.DefaultArgonMemory)), "Объём памяти Argon2id в КиБ")
-		argonLanes  = flag.Int("argon-parallelism", envIntOr("ARGON_PARALLELISM", int(tunnel.DefaultArgonThreads)), "Параллелизм Argon2id (число потоков)")
-		mtu          = flag.Int("mtu", envIntOr("ARGON_MTU", 1380), "MTU виртуального интерфейса TUN")
-		dnsList      = flag.String("dns", envOr("ARGON_DNS", "1.1.1.1,8.8.8.8"), "DNS-серверы через запятую для передачи клиентам")
-		routesList   = flag.String("routes", envOr("ARGON_ROUTES", "0.0.0.0/0"), "Маршруты CIDR через запятую для передачи клиентам")
-		mode            = flag.String("mode", envOr("ARGON_MODE", tunnel.ModeTunnel), "Режим сервера: tunnel (L3 TUN) или transit (L4 UDP/TCP-ретранслятор без TUN)")
-		transitDest     = flag.String("transit-target", envOr("ARGON_TRANSIT_TARGET", ""), "Фиксированная цель транзита host:port (используется по умолчанию и обязательна для -transit-blind)")
-		transitAllow    = flag.String("transit-allow", envOr("ARGON_TRANSIT_ALLOW", ""), "Список разрешённых целей транзита через запятую (CIDR, host, host:port, *:port или *)")
-		transitBlind    = flag.Bool("transit-blind", envOr("ARGON_TRANSIT_BLIND", "0") == "1", "Слепой L4-транзит к -transit-target без расшифровки Argon4 (не требует пароля)")
-		protoVersion    = flag.Int("protocol-version", envIntOr("ARGON_PROTOCOL_VERSION", int(tunnel.ProtocolVersionV5)), "Основная версия протокола Argon4 (4 или 5)")
-		allowV4         = flag.Bool("allow-v4", envOr("ARGON_ALLOW_V4", "1") == "1", "Разрешать приём legacy-сессий Argon4 v4 для обратной совместимости (без downgrade активных v5)")
-		paddingProfile  = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль распределения padding v5 (balanced, compact, wide)")
-		pathMTU         = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU для ограничения длины padding UDP-датаграмм")
+		listenIface        = flag.String("interface", envOr("ARGON_LISTEN_INTERFACE", ""), "Сетевой интерфейс Ubuntu для приёма зашифрованных пакетов (например, eth0, ens3; пусто — все)")
+		listenAddr         = flag.String("listen", envOr("ARGON_LISTEN_ADDR", "0.0.0.0:51820"), "UDP-адрес и порт приёма пакетов")
+		tunName            = flag.String("tun", envOr("ARGON_TUN_NAME", "argon0"), "Имя создаваемого или оборачиваемого TUN-интерфейса на Ubuntu")
+		subnetCIDR         = flag.String("subnet", envOr("ARGON_SUBNET", "10.44.0.1/24"), "Виртуальный IP/CIDR туннеля на Ubuntu")
+		outIface           = flag.String("out-interface", envOr("ARGON_OUT_INTERFACE", ""), "Существующий сетевой интерфейс Ubuntu для оборачивания/NAT (например, eth0)")
+		backendDest        = flag.String("backend", envOr("ARGON_BACKEND_TARGET", ""), "Целевой хост:порт по умолчанию для проброса TCP-обращений к виртуальному IP шлюза (например, app:80)")
+		enableNAT          = flag.Bool("nat", envOr("ARGON_ENABLE_NAT", "1") == "1", "Автоматически включать IPv4 forwarding и правила iptables MASQUERADE")
+		noTun              = flag.Bool("no-tun", envOr("ARGON_NO_TUN", "0") == "1", "Запуск без открытия /dev/net/tun (для тестов без прав root)")
+		masterPass         = flag.String("password", envOr("ARGON_MASTER_PASSWORD", ""), "Мастер-пароль для вывода ключа Argon2id")
+		argonTime          = flag.Int("argon-time", envIntOr("ARGON_TIME", int(tunnel.DefaultArgonTime)), "Число итераций Argon2id (time cost)")
+		argonMem           = flag.Int("argon-memory", envIntOr("ARGON_MEMORY_KIB", int(tunnel.DefaultArgonMemory)), "Объём памяти Argon2id в КиБ")
+		argonLanes         = flag.Int("argon-parallelism", envIntOr("ARGON_PARALLELISM", int(tunnel.DefaultArgonThreads)), "Параллелизм Argon2id (число потоков)")
+		mtu                = flag.Int("mtu", envIntOr("ARGON_MTU", 1380), "MTU виртуального интерфейса TUN")
+		dnsList            = flag.String("dns", envOr("ARGON_DNS", "1.1.1.1,8.8.8.8"), "DNS-серверы через запятую для передачи клиентам")
+		routesList         = flag.String("routes", envOr("ARGON_ROUTES", "0.0.0.0/0"), "Маршруты CIDR через запятую для передачи клиентам")
+		mode               = flag.String("mode", envOr("ARGON_MODE", tunnel.ModeTunnel), "Режим сервера: tunnel (L3 TUN) или transit (L4 UDP/TCP-ретранслятор без TUN)")
+		transitDest        = flag.String("transit-target", envOr("ARGON_TRANSIT_TARGET", ""), "Фиксированная цель транзита host:port (используется по умолчанию и обязательна для -transit-blind)")
+		transitAllow       = flag.String("transit-allow", envOr("ARGON_TRANSIT_ALLOW", ""), "Список разрешённых целей транзита через запятую (CIDR, host, host:port, *:port или *)")
+		transitBlind       = flag.Bool("transit-blind", envOr("ARGON_TRANSIT_BLIND", "0") == "1", "Слепой L4-транзит к -transit-target без расшифровки Argon4 (не требует пароля)")
+		protoVersion       = flag.Int("protocol-version", envIntOr("ARGON_PROTOCOL_VERSION", int(tunnel.ProtocolVersionV5)), "Основная версия протокола Argon4 (4 или 5)")
+		allowV4            = flag.Bool("allow-v4", envOr("ARGON_ALLOW_V4", "1") == "1", "Разрешать приём legacy-сессий Argon4 v4 для обратной совместимости (без downgrade активных v5)")
+		paddingProfile     = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль распределения padding v5 (balanced, compact, wide)")
+		pathMTU            = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU для ограничения длины padding UDP-датаграмм")
+		sessionIdleTimeout = flag.Duration("session-idle-timeout", envDurationOr("ARGON_SESSION_IDLE_TIMEOUT", tunnel.SessionIdleTimeout), "Таймаут неактивности клиентской сессии (например, 10m)")
 	)
 	flag.Parse()
 
@@ -111,6 +122,7 @@ func main() {
 			Profile: *paddingProfile,
 			PathMTU: *pathMTU,
 		},
+		SessionIdleTimeout: *sessionIdleTimeout,
 	}
 
 	var srv *tunnel.Server

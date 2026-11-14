@@ -18,20 +18,25 @@ import (
 )
 
 type configuration struct {
-	Server             string `json:"server"`
-	Password           string `json:"password"`
-	ClientID           string `json:"client_id"`
-	ClientSecret       string `json:"client_secret"`
-	ReadyFile          string `json:"ready_file"`
-	TunName            string `json:"tun_name"`
-	Mode               string `json:"mode,omitempty"`
-	Target             string `json:"target,omitempty"`
-	Proto              string `json:"proto,omitempty"`
-	Listen             string `json:"listen,omitempty"`
-	ProtocolVersion    int    `json:"protocol_version,omitempty"`
-	PaddingProfile     string `json:"padding_profile,omitempty"`
-	FirstPacketProfile string `json:"first_packet_profile,omitempty"`
-	PathMTU            int    `json:"path_mtu,omitempty"`
+	Server                    string `json:"server"`
+	Password                  string `json:"password"`
+	ClientID                  string `json:"client_id"`
+	ClientSecret              string `json:"client_secret"`
+	ReadyFile                 string `json:"ready_file"`
+	TunName                   string `json:"tun_name"`
+	Mode                      string `json:"mode,omitempty"`
+	Target                    string `json:"target,omitempty"`
+	Proto                     string `json:"proto,omitempty"`
+	Listen                    string `json:"listen,omitempty"`
+	ProtocolVersion           int    `json:"protocol_version,omitempty"`
+	PaddingProfile            string `json:"padding_profile,omitempty"`
+	FirstPacketProfile        string `json:"first_packet_profile,omitempty"`
+	PathMTU                   int    `json:"path_mtu,omitempty"`
+	HandshakeMaxAttempts      int    `json:"handshake_max_attempts,omitempty"`
+	HandshakeInitialTimeoutMs int    `json:"handshake_initial_timeout_ms,omitempty"`
+	HandshakeMaxTimeoutMs     int    `json:"handshake_max_timeout_ms,omitempty"`
+	KeepaliveMinIdleSec       int    `json:"keepalive_min_idle_sec,omitempty"`
+	KeepaliveMaxIdleSec       int    `json:"keepalive_max_idle_sec,omitempty"`
 }
 
 type readyStatus struct {
@@ -95,6 +100,13 @@ func run(configPath string) error {
 		PaddingProfile:     config.PaddingProfile,
 		FirstPacketProfile: config.FirstPacketProfile,
 		PathMTU:            config.PathMTU,
+		Timing: argon4.TimingConfig{
+			HandshakeMaxAttempts:    config.HandshakeMaxAttempts,
+			HandshakeInitialTimeout: time.Duration(config.HandshakeInitialTimeoutMs) * time.Millisecond,
+			HandshakeMaxTimeout:     time.Duration(config.HandshakeMaxTimeoutMs) * time.Millisecond,
+			KeepaliveMinIdle:        time.Duration(config.KeepaliveMinIdleSec) * time.Second,
+			KeepaliveMaxIdle:        time.Duration(config.KeepaliveMaxIdleSec) * time.Second,
+		},
 	}
 
 	var proxy *argon4.TransitProxy
@@ -111,12 +123,11 @@ func run(configPath string) error {
 			return err
 		}
 	default:
-		connectContext, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
 		client, err = argon4.NewClient(clientCfg)
 		if err != nil {
-			cancelConnect()
 			return err
 		}
+		connectContext, cancelConnect := context.WithTimeout(ctx, client.Timing().HandshakeMaxElapsed)
 		if err := client.Connect(connectContext); err != nil {
 			cancelConnect()
 			return err
@@ -186,19 +197,11 @@ func run(configPath string) error {
 	keepaliveDone := make(chan struct{})
 	go func() {
 		defer close(keepaliveDone)
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := client.WriteKeepalive(); err != nil && ctx.Err() == nil {
-					log.Printf("Argon4: keepalive: %v", err)
-					return
-				}
+		client.RunKeepalive(ctx, func(err error) {
+			if ctx.Err() == nil {
+				log.Printf("Argon4: keepalive остановлен: %v", err)
 			}
-		}
+		})
 	}()
 
 	var runErr error

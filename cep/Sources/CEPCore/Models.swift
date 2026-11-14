@@ -99,6 +99,16 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
     public var argonFirstPacketProfile: String? = nil
     /// Внешний path MTU для расчёта бюджета padding Argon4.
     public var argonPathMTU: Int? = nil
+    /// Максимум попыток UDP-рукопожатия Argon4.
+    public var argonHandshakeMaxAttempts: Int? = nil
+    /// Начальный таймаут попытки handshake Argon4 (мс).
+    public var argonHandshakeInitialTimeoutMs: Int? = nil
+    /// Потолок таймаута одной попытки handshake Argon4 (мс).
+    public var argonHandshakeMaxTimeoutMs: Int? = nil
+    /// Минимальный простой перед отправкой keepalive Argon4 (с).
+    public var argonKeepaliveMinIdleSec: Int? = nil
+    /// Максимальный простой перед отправкой keepalive Argon4 (с).
+    public var argonKeepaliveMaxIdleSec: Int? = nil
 
     public init(name: String, proto: VPNProtocol) {
         self.name = name
@@ -128,6 +138,11 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
         argonPaddingProfile = try c.decodeIfPresent(String.self, forKey: .argonPaddingProfile)
         argonFirstPacketProfile = try c.decodeIfPresent(String.self, forKey: .argonFirstPacketProfile)
         argonPathMTU = try c.decodeIfPresent(Int.self, forKey: .argonPathMTU)
+        argonHandshakeMaxAttempts = try c.decodeIfPresent(Int.self, forKey: .argonHandshakeMaxAttempts)
+        argonHandshakeInitialTimeoutMs = try c.decodeIfPresent(Int.self, forKey: .argonHandshakeInitialTimeoutMs)
+        argonHandshakeMaxTimeoutMs = try c.decodeIfPresent(Int.self, forKey: .argonHandshakeMaxTimeoutMs)
+        argonKeepaliveMinIdleSec = try c.decodeIfPresent(Int.self, forKey: .argonKeepaliveMinIdleSec)
+        argonKeepaliveMaxIdleSec = try c.decodeIfPresent(Int.self, forKey: .argonKeepaliveMaxIdleSec)
     }
 }
 

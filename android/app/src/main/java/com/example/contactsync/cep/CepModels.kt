@@ -72,6 +72,16 @@ data class CepProfile(
     val argonPaddingProfile: String? = null,
     val argonFirstPacketProfile: String? = null,
     val argonPathMTU: Int? = null,
+    /** Максимум попыток UDP-рукопожатия Argon4. */
+    val argonHandshakeMaxAttempts: Int? = null,
+    /** Начальный таймаут попытки handshake Argon4 (мс). */
+    val argonHandshakeInitialTimeoutMs: Int? = null,
+    /** Потолок таймаута одной попытки handshake Argon4 (мс). */
+    val argonHandshakeMaxTimeoutMs: Int? = null,
+    /** Минимальный простой перед отправкой keepalive Argon4 (с). */
+    val argonKeepaliveMinIdleSec: Int? = null,
+    /** Максимальный простой перед отправкой keepalive Argon4 (с). */
+    val argonKeepaliveMaxIdleSec: Int? = null,
 ) {
     val protocol: VpnProtocol? get() = VpnProtocol.of(proto)
 }

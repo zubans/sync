@@ -15,24 +15,27 @@ import (
 
 // ServerConfig описывает конфигурацию серверного демона Argon4 на Ubuntu.
 type ServerConfig struct {
-	ListenInterface string
-	ListenAddr      string
-	TunName         string
-	SubnetCIDR      string
-	OutInterface    string
-	EnableNAT       bool
-	MasterPassword  string
-	ArgonParams     ArgonParams
-	MTU             int
-	DNS             []string
-	Routes          []string
-	Mode            string
-	TransitTarget   string
-	TransitAllow    []string
-	TransitBlind    bool
-	ProtocolVersion byte
-	DisallowV4      bool
-	Padding         PaddingConfig
+	ListenInterface    string
+	ListenAddr         string
+	TunName            string
+	SubnetCIDR         string
+	OutInterface       string
+	EnableNAT          bool
+	MasterPassword     string
+	ArgonParams        ArgonParams
+	MTU                int
+	DNS                []string
+	Routes             []string
+	Mode               string
+	TransitTarget      string
+	TransitAllow       []string
+	TransitBlind       bool
+	ProtocolVersion    byte
+	DisallowV4         bool
+	Padding            PaddingConfig
+	SessionIdleTimeout time.Duration
+	HandshakeCacheTTL  time.Duration
+	Now                func() time.Time
 }
 
 type handshakeResponseCacheEntry struct {
@@ -44,19 +47,21 @@ type handshakeResponseCacheEntry struct {
 
 // Server реализует шифрованный шлюз Argon4 (режим tunnel поверх TUN и режим L4 transit поверх UDP/TCP).
 type Server struct {
-	cfg             ServerConfig
-	protocolVersion byte
-	padding         PaddingConfig
-	maxOuterUDP     int
-	sessions        *SessionManager
-	udpConn         *net.UDPConn
-	tcpListener     *net.TCPListener
-	tun             io.ReadWriteCloser
-	lastErrLog      atomic.Int64
-	handshakeMu     sync.Mutex
-	handshakeCache  map[[SaltSize]byte]handshakeResponseCacheEntry
-	blindMu         sync.Mutex
-	blindUDP        map[string]*blindUDPPeer
+	cfg               ServerConfig
+	protocolVersion   byte
+	padding           PaddingConfig
+	maxOuterUDP       int
+	handshakeCacheTTL time.Duration
+	nowFunc           func() time.Time
+	sessions          *SessionManager
+	udpConn           *net.UDPConn
+	tcpListener       *net.TCPListener
+	tun               io.ReadWriteCloser
+	lastErrLog        atomic.Int64
+	handshakeMu       sync.Mutex
+	handshakeCache    map[[SaltSize]byte]handshakeResponseCacheEntry
+	blindMu           sync.Mutex
+	blindUDP          map[string]*blindUDPPeer
 }
 
 func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
@@ -105,24 +110,42 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 		cfg.Routes = []string{"0.0.0.0/0"}
 	}
 
+	if cfg.SessionIdleTimeout < 0 || cfg.HandshakeCacheTTL < 0 {
+		return nil, fmt.Errorf("%w: отрицательные таймауты сервера недопустимы", ErrInvalidTimingConfig)
+	}
+	idleTimeout := cfg.SessionIdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = SessionIdleTimeout
+	}
+	cacheTTL := cfg.HandshakeCacheTTL
+	if cacheTTL == 0 {
+		cacheTTL = HandshakeReplayTTL
+	}
+	nowFn := cfg.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+
 	var sm *SessionManager
 	if cfg.MasterPassword != "" {
 		var err error
-		sm, err = NewSessionManager(cfg.MasterPassword, cfg.ArgonParams, cfg.SubnetCIDR, cfg.MTU, cfg.DNS, cfg.Routes)
+		sm, err = NewSessionManagerWithTiming(cfg.MasterPassword, cfg.ArgonParams, cfg.SubnetCIDR, cfg.MTU, cfg.DNS, cfg.Routes, idleTimeout, cacheTTL, nowFn)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return &Server{
-		cfg:             cfg,
-		protocolVersion: effVersion,
-		padding:         resolvedPadding,
-		maxOuterUDP:     maxOuterUDP,
-		sessions:        sm,
-		tun:             tunDev,
-		handshakeCache:  make(map[[SaltSize]byte]handshakeResponseCacheEntry),
-		blindUDP:        make(map[string]*blindUDPPeer),
+		cfg:               cfg,
+		protocolVersion:   effVersion,
+		padding:           resolvedPadding,
+		maxOuterUDP:       maxOuterUDP,
+		handshakeCacheTTL: cacheTTL,
+		nowFunc:           nowFn,
+		sessions:          sm,
+		tun:               tunDev,
+		handshakeCache:    make(map[[SaltSize]byte]handshakeResponseCacheEntry),
+		blindUDP:          make(map[string]*blindUDPPeer),
 	}, nil
 }
 
@@ -343,19 +366,27 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 	return nil
 }
 
+func (s *Server) now() time.Time {
+	if s != nil && s.nowFunc != nil {
+		return s.nowFunc()
+	}
+	return time.Now()
+}
+
 // cachedHandshakeResponse делает повторную UDP-передачу идемпотентной: тот же запрос
 // с того же адреса получает тот же ответ без новой сессии и нового расчёта Argon2id.
 func (s *Server) cachedHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAddr) []byte {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
+	now := s.now()
 	s.handshakeMu.Lock()
 	defer s.handshakeMu.Unlock()
 	entry, ok := s.handshakeCache[saltKey]
 	if !ok {
 		return nil
 	}
-	if !time.Now().Before(entry.expires) {
+	if !now.Before(entry.expires) {
 		delete(s.handshakeCache, saltKey)
 		return nil
 	}
@@ -369,7 +400,11 @@ func (s *Server) cacheHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAdd
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
-	now := time.Now()
+	now := s.now()
+	ttl := s.handshakeCacheTTL
+	if ttl <= 0 {
+		ttl = HandshakeReplayTTL
+	}
 	s.handshakeMu.Lock()
 	for key, entry := range s.handshakeCache {
 		if !now.Before(entry.expires) {
@@ -380,7 +415,7 @@ func (s *Server) cacheHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAdd
 		remoteAddr: remoteAddr.String(),
 		request:    append([]byte(nil), pkt...),
 		response:   append([]byte(nil), response...),
-		expires:    now.Add(HandshakeReplayTTL),
+		expires:    now.Add(ttl),
 	}
 	s.handshakeMu.Unlock()
 }
@@ -434,7 +469,7 @@ func (s *Server) authenticateHandshake(pkt, psk, salt []byte, headerVersion byte
 		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
-	now = time.Now()
+	now = s.now()
 	reqTime := time.Unix(req.Timestamp, 0)
 	if now.Sub(reqTime).Abs() > HandshakeClockSkew {
 		s.logDrop(remoteAddr, "handshake timestamp", ErrClockSkew)

@@ -242,14 +242,32 @@ type SessionManager struct {
 	dns            []string
 	routes         []string
 
-	bySalt         map[[SaltSize]byte]*PeerSession
-	byIP           map[[4]byte]*PeerSession
-	byClient       map[string]*PeerSession
-	seenHandshakes map[[SaltSize]byte]time.Time
-	nextHost       byte
+	bySalt             map[[SaltSize]byte]*PeerSession
+	byIP               map[[4]byte]*PeerSession
+	byClient           map[string]*PeerSession
+	seenHandshakes     map[[SaltSize]byte]time.Time
+	nextHost           byte
+	idleTimeout        time.Duration
+	handshakeReplayTTL time.Duration
+	nowFunc            func() time.Time
 }
 
+// NewSessionManager создаёт менеджер сессий со значениями таймингов по умолчанию.
 func NewSessionManager(masterPassword string, params ArgonParams, subnetCIDR string, mtu int, dns, routes []string) (*SessionManager, error) {
+	return NewSessionManagerWithTiming(masterPassword, params, subnetCIDR, mtu, dns, routes, SessionIdleTimeout, HandshakeReplayTTL, nil)
+}
+
+// NewSessionManagerWithTiming создаёт менеджер сессий с настраиваемыми таймаутами простоя и кэша рукопожатий.
+func NewSessionManagerWithTiming(
+	masterPassword string,
+	params ArgonParams,
+	subnetCIDR string,
+	mtu int,
+	dns, routes []string,
+	idleTimeout time.Duration,
+	handshakeReplayTTL time.Duration,
+	nowFunc func() time.Time,
+) (*SessionManager, error) {
 	ip, ipNet, err := net.ParseCIDR(subnetCIDR)
 	if err != nil {
 		return nil, err
@@ -264,24 +282,52 @@ func NewSessionManager(masterPassword string, params ArgonParams, subnetCIDR str
 		serverIP[3] = 1
 	}
 
+	if idleTimeout <= 0 {
+		idleTimeout = SessionIdleTimeout
+	}
+	if handshakeReplayTTL <= 0 {
+		handshakeReplayTTL = HandshakeReplayTTL
+	}
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
+
 	psk := DerivePSK(masterPassword, params)
 
 	return &SessionManager{
-		masterPassword: masterPassword,
-		params:         params,
-		psk:            psk,
-		argonSem:       make(chan struct{}, MaxConcurrentArgon2),
-		serverIP:       serverIP,
-		subnet:         ipNet,
-		mtu:            mtu,
-		dns:            dns,
-		routes:         routes,
-		bySalt:         make(map[[SaltSize]byte]*PeerSession),
-		byIP:           make(map[[4]byte]*PeerSession),
-		byClient:       make(map[string]*PeerSession),
-		seenHandshakes: make(map[[SaltSize]byte]time.Time),
-		nextHost:       2,
+		masterPassword:     masterPassword,
+		params:             params,
+		psk:                psk,
+		argonSem:           make(chan struct{}, MaxConcurrentArgon2),
+		serverIP:           serverIP,
+		subnet:             ipNet,
+		mtu:                mtu,
+		dns:                dns,
+		routes:             routes,
+		bySalt:             make(map[[SaltSize]byte]*PeerSession),
+		byIP:               make(map[[4]byte]*PeerSession),
+		byClient:           make(map[string]*PeerSession),
+		seenHandshakes:     make(map[[SaltSize]byte]time.Time),
+		nextHost:           2,
+		idleTimeout:        idleTimeout,
+		handshakeReplayTTL: handshakeReplayTTL,
+		nowFunc:            nowFunc,
 	}, nil
+}
+
+func (m *SessionManager) now() time.Time {
+	if m != nil && m.nowFunc != nil {
+		return m.nowFunc()
+	}
+	return time.Now()
+}
+
+// IdleTimeout возвращает действующий таймаут простоя сессии.
+func (m *SessionManager) IdleTimeout() time.Duration {
+	if m != nil && m.idleTimeout > 0 {
+		return m.idleTimeout
+	}
+	return SessionIdleTimeout
 }
 
 func (m *SessionManager) PSK() []byte {
@@ -298,13 +344,18 @@ func (m *SessionManager) SubnetPrefixLen() int {
 }
 
 // LookupBySalt возвращает активную сессию по 16-байтной соли (без запуска Argon2id).
+// Если сессия превысила таймаут простоя, возвращает nil.
 func (m *SessionManager) LookupBySalt(salt []byte) *PeerSession {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
+	now := m.now()
 	m.mu.RLock()
 	sess := m.bySalt[saltKey]
 	m.mu.RUnlock()
+	if sess != nil && now.Sub(sess.LastSeen()) > m.IdleTimeout() {
+		return nil
+	}
 	return sess
 }
 
@@ -313,9 +364,9 @@ func (m *SessionManager) DeriveHandshakeKey(salt []byte) ([]byte, error) {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
-	now := time.Now()
+	now := m.now()
 	m.mu.RLock()
-	if _, seen := m.seenHandshakes[saltKey]; seen {
+	if exp, seen := m.seenHandshakes[saltKey]; seen && now.Before(exp) {
 		m.mu.RUnlock()
 		return nil, ErrHandshakeReplay
 	}
@@ -344,7 +395,7 @@ func (m *SessionManager) RegisterSessionWithProtocol(clientID string, clientAuth
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
-	now := time.Now()
+	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -404,7 +455,7 @@ func (m *SessionManager) RegisterTransitSessionWithProtocol(clientID string, cli
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
-	now := time.Now()
+	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -450,14 +501,19 @@ func (m *SessionManager) reserveHandshakeLocked(saltKey [SaltSize]byte, now time
 	if exp, seen := m.seenHandshakes[saltKey]; seen && now.Before(exp) {
 		return ErrHandshakeReplay
 	}
-	m.seenHandshakes[saltKey] = now.Add(HandshakeReplayTTL)
+	ttl := m.handshakeReplayTTL
+	if ttl <= 0 {
+		ttl = HandshakeReplayTTL
+	}
+	m.seenHandshakes[saltKey] = now.Add(ttl)
 	return nil
 }
 
 func (m *SessionManager) TouchSession(sess *PeerSession, remoteAddr *net.UDPAddr) {
+	now := m.now()
 	sess.stateMu.Lock()
 	sess.remoteAddr = cloneUDPAddr(remoteAddr)
-	sess.lastSeen = time.Now()
+	sess.lastSeen = now
 	sess.stateMu.Unlock()
 }
 
@@ -481,9 +537,10 @@ func (m *SessionManager) purgeExpiredLocked(now time.Time) {
 			delete(m.seenHandshakes, s)
 		}
 	}
+	idleTimeout := m.IdleTimeout()
 	var expired []*PeerSession
 	for saltKey, sess := range m.bySalt {
-		if now.Sub(sess.LastSeen()) > SessionIdleTimeout {
+		if now.Sub(sess.LastSeen()) > idleTimeout {
 			delete(m.bySalt, saltKey)
 			if ip4 := sess.AssignedIP.To4(); ip4 != nil {
 				var ipKey [4]byte

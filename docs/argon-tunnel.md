@@ -106,3 +106,19 @@ make install-tunnel-apk
 - `-padding-profile` / `ARGON_PADDING_PROFILE` (`balanced` | `compact` | `wide` | `custom`, по умолчанию `balanced`).
 - `-first-packet-profile` / `ARGON_FIRST_PACKET_PROFILE` (отдельный профиль padding для первого кадра `HandshakeReq`, по умолчанию `wide`).
 - `-path-mtu` / `ARGON_PATH_MTU` (внешний MTU трассы `576..9000`, по умолчанию `1500`; эффективный внутренний TUN MTU снижается автоматически с учётом IP/UDP-заголовка и 50-байтного overhead v5).
+
+### Тайминги handshake и адаптивный idle keepalive
+
+Чтобы устранить фиксированные периодические сигнатуры (`3×3s` handshake и константный цикл `25s`/`30s` keepalive), во всех клиентах и сервере применяется нормализуемая конфигурация таймингов:
+
+- **Handshake (exponential backoff + jitter)**:
+  - по умолчанию до `5` попыток с начальным таймаутом `1.2s`, коэффициентом `1.7`, потолком `4.5s`, общим бюджетом `15s`, jitter `±30%` и паузой между попытками `120ms..800ms`;
+  - каждая повторная попытка отправляет байт-в-байт тот же зашифрованный `HandshakeReq` для идемпотентности через серверный handshake-cache; при фатальной ошибке протокола (например, anti-downgrade `v5 -> v4`) повторы прекращаются сразу.
+- **Idle keepalive со сбросом по активности**:
+  - keepalive (`"ping"`/`"pong"` поверх v5 padded-конверта с anti-replay) отправляется только после фактического простоя исходящего канала;
+  - любая полезная исходящая передача (`ActivityTracker.Touch`) сдвигает таймер на новый случайный интервал из диапазона `[16s..28s]` (строго `maxIdle > minIdle` и `maxIdle * 2 <= sessionIdleTimeout`, что удерживает NAT-таблицы >30s и сессию на сервере с `SessionIdleTimeout = 10m`);
+  - при отмене контекста, остановке прокси или фатальной ошибке сокета горутины/корутины и таймеры закрываются без утечек.
+- **Настройка (CLI / env / профили CEP и Kotlin)**:
+  - сервер: `-session-idle-timeout` / `ARGON_SESSION_IDLE_TIMEOUT` (по умолчанию `10m`);
+  - `argon-tunnel-client`: `-handshake-max-attempts` (`ARGON_HANDSHAKE_MAX_ATTEMPTS`), `-handshake-initial-timeout` (`ARGON_HANDSHAKE_INITIAL_TIMEOUT`), `-handshake-max-timeout` (`ARGON_HANDSHAKE_MAX_TIMEOUT`), `-handshake-max-elapsed` (`ARGON_HANDSHAKE_MAX_ELAPSED`), `-keepalive-min-idle` (`ARGON_KEEPALIVE_MIN_IDLE`), `-keepalive-max-idle` (`ARGON_KEEPALIVE_MAX_IDLE`), `-session-idle-timeout` (`ARGON_SESSION_IDLE_TIMEOUT`);
+  - профили CEP (`cep/Sources/CEPCore/Models.swift`, `cep-cli`, `android/cep-engine`): `argonHandshakeMaxAttempts`, `argonHandshakeInitialTimeoutMs`, `argonHandshakeMaxTimeoutMs`, `argonKeepaliveMinIdleSec`, `argonKeepaliveMaxIdleSec`; Kotlin `TunnelSettings`: `handshakeMaxAttempts`, `handshakeInitialTimeoutMs`, `handshakeMaxTimeoutMs`, `keepaliveMinIdleMs`, `keepaliveMaxIdleMs`.

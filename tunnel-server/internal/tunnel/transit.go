@@ -321,10 +321,14 @@ func (s *Server) udpTransitReturnLoop(sess *PeerSession) {
 	buf := make([]byte, 65535)
 	psk := s.sessions.PSK()
 	opts := sess.sealOptions(s.maxOuterUDP)
+	idleTimeout := s.sessions.IdleTimeout()
 	for {
-		_ = sess.TargetConn.SetReadDeadline(time.Now().Add(SessionIdleTimeout))
+		_ = sess.TargetConn.SetReadDeadline(time.Now().Add(idleTimeout))
 		n, err := sess.TargetConn.Read(buf)
 		if err != nil {
+			if isTimeoutNetError(err) && s.now().Sub(sess.LastSeen()) < idleTimeout {
+				continue
+			}
 			s.sessions.RemoveSession(sess.Salt[:])
 			return
 		}
@@ -439,12 +443,13 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 		})
 	}
 
+	idleTimeout := s.sessions.IdleTimeout()
 	errCh := make(chan error, 2)
 	// Цель -> клиент (шифруем поток S2C-кадрами).
 	go func() {
 		buf := make([]byte, TransitTCPChunkSize)
 		for {
-			_ = targetRaw.SetReadDeadline(time.Now().Add(SessionIdleTimeout))
+			_ = targetRaw.SetReadDeadline(time.Now().Add(idleTimeout))
 			n, rerr := targetRaw.Read(buf)
 			if n > 0 {
 				wirePkt, serr := SealPacketWithOptions(FrameTypeData, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), buf[:n], tcpSealOpts)
@@ -474,7 +479,7 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 			MaxOuterBytes:   MaxTCPFrameSize,
 		}
 		for {
-			_ = clientConn.SetReadDeadline(time.Now().Add(SessionIdleTimeout))
+			_ = clientConn.SetReadDeadline(time.Now().Add(idleTimeout))
 			pkt, rerr := ReadTCPFrame(clientConn)
 			if rerr != nil {
 				errCh <- rerr

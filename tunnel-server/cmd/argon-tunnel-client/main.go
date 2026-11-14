@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -21,19 +22,39 @@ import (
 
 func main() {
 	var (
-		serverAddr         = flag.String("server", envOr("ARGON_SERVER_ADDR", "tunnel:51820"), "UDP-адрес и порт сервера Argon4 на Ubuntu")
-		bindIface          = flag.String("interface", envOr("ARGON_CLIENT_INTERFACE", ""), "Исходящий сетевой интерфейс клиента для отправки зашифрованных пакетов (например, eth0)")
-		tunName            = flag.String("tun", envOr("ARGON_CLIENT_TUN", "argon-client0"), "Имя виртуального TUN-интерфейса на клиенте")
-		masterPass         = flag.String("password", envOr("ARGON_MASTER_PASSWORD", ""), "Мастер-пароль для вывода ключа Argon2id")
-		clientID           = flag.String("client-id", envOr("ARGON_CLIENT_ID", "docker-e2e-client"), "Идентификатор клиента")
-		probeURL           = flag.String("probe-url", envOr("ARGON_PROBE_URL", ""), "HTTP URL для контрольного запроса через шифрованный TUN-интерфейс (например, http://10.44.0.1:80/admin/login)")
-		sendPayload        = flag.String("send-material", "", "Строка материала для одноразового шифрования и отправки через выбранный интерфейс")
-		protoVersion       = flag.Int("protocol-version", envIntOr("ARGON_PROTOCOL_VERSION", int(tunnel.ProtocolVersionV5)), "Версия протокола Argon4 (4 или 5)")
-		paddingProfile     = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль padding v5 (balanced, compact, wide)")
-		firstPacketProfile = flag.String("first-packet-profile", envOr("ARGON_FIRST_PACKET_PROFILE", ""), "Профиль padding первого handshake-пакета")
-		pathMTU            = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU")
+		serverAddr            = flag.String("server", envOr("ARGON_SERVER_ADDR", "tunnel:51820"), "UDP-адрес и порт сервера Argon4 на Ubuntu")
+		bindIface             = flag.String("interface", envOr("ARGON_CLIENT_INTERFACE", ""), "Исходящий сетевой интерфейс клиента для отправки зашифрованных пакетов (например, eth0)")
+		tunName               = flag.String("tun", envOr("ARGON_CLIENT_TUN", "argon-client0"), "Имя виртуального TUN-интерфейса на клиенте")
+		masterPass            = flag.String("password", envOr("ARGON_MASTER_PASSWORD", ""), "Мастер-пароль для вывода ключа Argon2id")
+		clientID              = flag.String("client-id", envOr("ARGON_CLIENT_ID", "docker-e2e-client"), "Идентификатор клиента")
+		probeURL              = flag.String("probe-url", envOr("ARGON_PROBE_URL", ""), "HTTP URL для контрольного запроса через шифрованный TUN-интерфейс (например, http://10.44.0.1:80/admin/login)")
+		sendPayload           = flag.String("send-material", "", "Строка материала для одноразового шифрования и отправки через выбранный интерфейс")
+		protoVersion          = flag.Int("protocol-version", envIntOr("ARGON_PROTOCOL_VERSION", int(tunnel.ProtocolVersionV5)), "Версия протокола Argon4 (4 или 5)")
+		paddingProfile        = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль padding v5 (balanced, compact, wide)")
+		firstPacketProfile    = flag.String("first-packet-profile", envOr("ARGON_FIRST_PACKET_PROFILE", ""), "Профиль padding первого handshake-пакета")
+		pathMTU               = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU")
+		hsMaxAttempts         = flag.Int("handshake-max-attempts", envIntOr("ARGON_HANDSHAKE_MAX_ATTEMPTS", 0), "Максимум попыток UDP-рукопожатия")
+		hsInitialTimeout      = flag.Duration("handshake-initial-timeout", envDurationOr("ARGON_HANDSHAKE_INITIAL_TIMEOUT", 0), "Начальный таймаут ожидания ответа handshake (exponential backoff)")
+		hsMaxTimeout          = flag.Duration("handshake-max-timeout", envDurationOr("ARGON_HANDSHAKE_MAX_TIMEOUT", 0), "Потолок таймаута одной попытки handshake")
+		hsMaxElapsed          = flag.Duration("handshake-max-elapsed", envDurationOr("ARGON_HANDSHAKE_MAX_ELAPSED", 0), "Общий бюджет времени на повторы handshake")
+		keepaliveMinIdle      = flag.Duration("keepalive-min-idle", envDurationOr("ARGON_KEEPALIVE_MIN_IDLE", 0), "Минимальный простой исходящего канала до keepalive")
+		keepaliveMaxIdle      = flag.Duration("keepalive-max-idle", envDurationOr("ARGON_KEEPALIVE_MAX_IDLE", 0), "Максимальный простой исходящего канала до keepalive")
+		sessionIdleTimeoutCfg = flag.Duration("session-idle-timeout", envDurationOr("ARGON_SESSION_IDLE_TIMEOUT", 0), "Ожидаемый таймаут неактивности серверной сессии")
 	)
 	flag.Parse()
+
+	timingCfg, err := tunnel.NormalizeTimingConfig(tunnel.TimingConfig{
+		HandshakeMaxAttempts:    *hsMaxAttempts,
+		HandshakeInitialTimeout: *hsInitialTimeout,
+		HandshakeMaxTimeout:     *hsMaxTimeout,
+		HandshakeMaxElapsed:     *hsMaxElapsed,
+		KeepaliveMinIdle:        *keepaliveMinIdle,
+		KeepaliveMaxIdle:        *keepaliveMaxIdle,
+		SessionIdleTimeout:      *sessionIdleTimeoutCfg,
+	})
+	if err != nil {
+		log.Fatalf("Некорректные параметры таймингов: %v", err)
+	}
 
 	if *masterPass == "" {
 		log.Fatal("Не задан мастер-пароль: укажите флаг -password или переменную окружения ARGON_MASTER_PASSWORD")
@@ -109,31 +130,33 @@ func main() {
 		log.Fatalf("SealPacketWithOptions handshake failed: %v", err)
 	}
 
-	if _, err := conn.Write(wireReq); err != nil {
-		log.Fatalf("Write handshake failed: %v", err)
-	}
-
 	buf := make([]byte, 65535)
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := conn.Read(buf)
-	if err != nil {
-		log.Fatalf("Read handshake response failed: %v", err)
-	}
-
-	openedResp, err := tunnel.OpenPacketWithOptions(buf[:n], psk, hsKey, tunnel.OpenOptions{
-		ExpectedVersion: effVersion,
-		MaxOuterBytes:   maxOuterUDP,
-	})
-	if err != nil || openedResp.FrameType != tunnel.FrameTypeHandshakeResp {
-		log.Fatalf("OpenPacketWithOptions handshake response failed: type=%d err=%v", openedResp.FrameType, err)
-	}
-
 	var hsResp tunnel.HandshakeResponse
-	if err := json.Unmarshal(openedResp.Plaintext, &hsResp); err != nil {
-		log.Fatalf("Unmarshal handshake response failed: %v", err)
-	}
-	if hsResp.ProtocolVersion != 0 && byte(hsResp.ProtocolVersion) != effVersion {
-		log.Fatalf("Server downgraded or mismatched protocol version: got %d want %d", hsResp.ProtocolVersion, effVersion)
+	hsCtx, hsCancel := context.WithTimeout(context.Background(), timingCfg.HandshakeMaxElapsed)
+	err = tunnel.RunHandshakeLoop(hsCtx, timingCfg, nil, nil, conn, wireReq, func(packet []byte) (bool, error) {
+		openedResp, oerr := tunnel.OpenPacketWithOptions(packet, psk, hsKey, tunnel.OpenOptions{
+			ExpectedVersion: effVersion,
+			MaxOuterBytes:   maxOuterUDP,
+		})
+		if oerr != nil {
+			return false, oerr
+		}
+		if openedResp.FrameType != tunnel.FrameTypeHandshakeResp || !bytes.Equal(openedResp.Salt, salt) {
+			return false, nil
+		}
+		var parsed tunnel.HandshakeResponse
+		if jerr := json.Unmarshal(openedResp.Plaintext, &parsed); jerr != nil {
+			return false, jerr
+		}
+		if parsed.ProtocolVersion != 0 && byte(parsed.ProtocolVersion) != effVersion {
+			return false, fmt.Errorf("%w: ответ v%d вместо v%d", tunnel.ErrDowngradeRejected, parsed.ProtocolVersion, effVersion)
+		}
+		hsResp = parsed
+		return true, nil
+	})
+	hsCancel()
+	if err != nil {
+		log.Fatalf("Handshake failed: %v", err)
 	}
 	srvPub, err := hex.DecodeString(hsResp.ServerPub)
 	if err != nil || len(srvPub) != tunnel.X25519KeySize {
@@ -203,6 +226,35 @@ func main() {
 
 	_ = conn.SetReadDeadline(time.Time{})
 
+	tracker := tunnel.NewActivityTracker(nil)
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	kaDone := make(chan struct{})
+	defer func() {
+		loopCancel()
+		<-kaDone
+	}()
+
+	go func() {
+		defer close(kaDone)
+		tunnel.RunIdleKeepalive(loopCtx, tunnel.KeepaliveOptions{
+			Timing:  timingCfg,
+			Tracker: tracker,
+			Send: func() error {
+				pkt, serr := tunnel.SealPacketWithOptions(tunnel.FrameTypeKeepalive, salt, psk, c2sKey, c2sSeq.Add(1), []byte("ping"), sealOpts)
+				if serr != nil {
+					return serr
+				}
+				_, werr := conn.Write(pkt)
+				return werr
+			},
+			OnError: func(kerr error) {
+				if loopCtx.Err() == nil {
+					log.Printf("[argon4-client] keepalive: %v", kerr)
+				}
+			},
+		})
+	}()
+
 	// Двунаправленная пересылка между клиентским TUN и UDP-сокетом
 	go func() {
 		tunBuf := make([]byte, 65535)
@@ -213,7 +265,9 @@ func main() {
 			}
 			wire, serr := tunnel.SealPacketWithOptions(tunnel.FrameTypeData, salt, psk, c2sKey, c2sSeq.Add(1), tunBuf[:rn], sealOpts)
 			if serr == nil {
-				_, _ = conn.Write(wire)
+				if _, werr := conn.Write(wire); werr == nil {
+					tracker.Touch()
+				}
 			}
 		}
 	}()
@@ -255,6 +309,15 @@ func envIntOr(k string, def int) int {
 	if v := os.Getenv(k); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envDurationOr(k string, def time.Duration) time.Duration {
+	if v := os.Getenv(k); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
 		}
 	}
 	return def

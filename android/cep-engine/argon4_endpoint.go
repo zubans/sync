@@ -34,18 +34,33 @@ func withArgon4Endpoint(registry *endpoint.Registry) *endpoint.Registry {
 }
 
 type argon4Options struct {
-	Server             string `json:"server"`
-	Password           string `json:"password"`
-	ClientID           string `json:"client_id"`
-	ClientSecret       string `json:"client_secret"`
-	Detour             string `json:"detour"`
-	Mode               string `json:"mode,omitempty"`
-	Target             string `json:"target,omitempty"`
-	Proto              string `json:"proto,omitempty"`
-	ProtocolVersion    int    `json:"protocol_version,omitempty"`
-	PaddingProfile     string `json:"padding_profile,omitempty"`
-	FirstPacketProfile string `json:"first_packet_profile,omitempty"`
-	PathMTU            int    `json:"path_mtu,omitempty"`
+	Server                    string `json:"server"`
+	Password                  string `json:"password"`
+	ClientID                  string `json:"client_id"`
+	ClientSecret              string `json:"client_secret"`
+	Detour                    string `json:"detour"`
+	Mode                      string `json:"mode,omitempty"`
+	Target                    string `json:"target,omitempty"`
+	Proto                     string `json:"proto,omitempty"`
+	ProtocolVersion           int    `json:"protocol_version,omitempty"`
+	PaddingProfile            string `json:"padding_profile,omitempty"`
+	FirstPacketProfile        string `json:"first_packet_profile,omitempty"`
+	PathMTU                   int    `json:"path_mtu,omitempty"`
+	HandshakeMaxAttempts      int    `json:"handshake_max_attempts,omitempty"`
+	HandshakeInitialTimeoutMs int    `json:"handshake_initial_timeout_ms,omitempty"`
+	HandshakeMaxTimeoutMs     int    `json:"handshake_max_timeout_ms,omitempty"`
+	KeepaliveMinIdleSec       int    `json:"keepalive_min_idle_sec,omitempty"`
+	KeepaliveMaxIdleSec       int    `json:"keepalive_max_idle_sec,omitempty"`
+}
+
+func (o argon4Options) timingConfig() argon4.TimingConfig {
+	return argon4.TimingConfig{
+		HandshakeMaxAttempts:    o.HandshakeMaxAttempts,
+		HandshakeInitialTimeout: time.Duration(o.HandshakeInitialTimeoutMs) * time.Millisecond,
+		HandshakeMaxTimeout:     time.Duration(o.HandshakeMaxTimeoutMs) * time.Millisecond,
+		KeepaliveMinIdle:        time.Duration(o.KeepaliveMinIdleSec) * time.Second,
+		KeepaliveMaxIdle:        time.Duration(o.KeepaliveMaxIdleSec) * time.Second,
+	}
 }
 
 // argon4Endpoint передаёт сырые IPv4-пакеты Argon4 через packet-device sing-box
@@ -109,6 +124,7 @@ func newArgon4Endpoint(ctx context.Context, _ adapter.Router, logger log.Context
 		PaddingProfile:     options.PaddingProfile,
 		FirstPacketProfile: options.FirstPacketProfile,
 		PathMTU:            options.PathMTU,
+		Timing:             options.timingConfig(),
 	}, outboundDialer)
 	if err != nil {
 		cancelLoop()
@@ -236,18 +252,11 @@ func (e *argon4Endpoint) readLoop() {
 }
 
 func (e *argon4Endpoint) keepaliveLoop() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-e.loopContext.Done():
-			return
-		case <-ticker.C:
-			if err := e.client.WriteKeepalive(); err != nil && e.loopContext.Err() == nil {
-				e.logger.Debug("Argon4: keepalive: ", err)
-			}
+	e.client.RunKeepalive(e.loopContext, func(err error) {
+		if e.loopContext.Err() == nil {
+			e.logger.Debug("Argon4: keepalive остановлен: ", err)
 		}
-	}
+	})
 }
 
 func (e *argon4Endpoint) writePacketBuffers(packetBuffers []*buf.Buffer) error {

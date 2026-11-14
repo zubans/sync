@@ -14,27 +14,32 @@ type Store struct {
 }
 
 type Profile struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	Proto             string `json:"proto"`
-	URI               string `json:"uri"`
-	Config            string `json:"config"`
-	Server            string `json:"server"`
-	Username          string `json:"username"`
-	Password          string `json:"password"`
-	ClientID          string `json:"clientID"`
-	ClientSecret      string `json:"clientSecret"`
-	OpenConnectFlavor string `json:"openconnectFlavor"`
-	ServerCert        string `json:"serverCert"`
-	AuthGroup         string `json:"authGroup"`
-	IgnoreCertErrors  bool   `json:"ignoreCertErrors"`
-	Routes            string `json:"routes"`
-	UseArgon                bool   `json:"useArgon"`
-	ArgonPassword           string `json:"argonPassword"`
-	ArgonProtocolVersion    int    `json:"argonProtocolVersion,omitempty"`
-	ArgonPaddingProfile     string `json:"argonPaddingProfile,omitempty"`
-	ArgonFirstPacketProfile string `json:"argonFirstPacketProfile,omitempty"`
-	ArgonPathMTU            int    `json:"argonPathMTU,omitempty"`
+	ID                             string `json:"id"`
+	Name                           string `json:"name"`
+	Proto                          string `json:"proto"`
+	URI                            string `json:"uri"`
+	Config                         string `json:"config"`
+	Server                         string `json:"server"`
+	Username                       string `json:"username"`
+	Password                       string `json:"password"`
+	ClientID                       string `json:"clientID"`
+	ClientSecret                   string `json:"clientSecret"`
+	OpenConnectFlavor              string `json:"openconnectFlavor"`
+	ServerCert                     string `json:"serverCert"`
+	AuthGroup                      string `json:"authGroup"`
+	IgnoreCertErrors               bool   `json:"ignoreCertErrors"`
+	Routes                         string `json:"routes"`
+	UseArgon                       bool   `json:"useArgon"`
+	ArgonPassword                  string `json:"argonPassword"`
+	ArgonProtocolVersion           int    `json:"argonProtocolVersion,omitempty"`
+	ArgonPaddingProfile            string `json:"argonPaddingProfile,omitempty"`
+	ArgonFirstPacketProfile        string `json:"argonFirstPacketProfile,omitempty"`
+	ArgonPathMTU                   int    `json:"argonPathMTU,omitempty"`
+	ArgonHandshakeMaxAttempts      int    `json:"argonHandshakeMaxAttempts,omitempty"`
+	ArgonHandshakeInitialTimeoutMs int    `json:"argonHandshakeInitialTimeoutMs,omitempty"`
+	ArgonHandshakeMaxTimeoutMs     int    `json:"argonHandshakeMaxTimeoutMs,omitempty"`
+	ArgonKeepaliveMinIdleSec       int    `json:"argonKeepaliveMinIdleSec,omitempty"`
+	ArgonKeepaliveMaxIdleSec       int    `json:"argonKeepaliveMaxIdleSec,omitempty"`
 }
 
 type Chain struct {

@@ -15,6 +15,11 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
     public var paddingProfile: String?
     public var firstPacketProfile: String?
     public var pathMTU: Int?
+    public var handshakeMaxAttempts: Int?
+    public var handshakeInitialTimeoutMs: Int?
+    public var handshakeMaxTimeoutMs: Int?
+    public var keepaliveMinIdleSec: Int?
+    public var keepaliveMaxIdleSec: Int?
 
     enum CodingKeys: String, CodingKey {
         case server, password, mode, target, proto, listen
@@ -25,6 +30,11 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
         case paddingProfile = "padding_profile"
         case firstPacketProfile = "first_packet_profile"
         case pathMTU = "path_mtu"
+        case handshakeMaxAttempts = "handshake_max_attempts"
+        case handshakeInitialTimeoutMs = "handshake_initial_timeout_ms"
+        case handshakeMaxTimeoutMs = "handshake_max_timeout_ms"
+        case keepaliveMinIdleSec = "keepalive_min_idle_sec"
+        case keepaliveMaxIdleSec = "keepalive_max_idle_sec"
     }
 
     public init(
@@ -61,6 +71,11 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
         self.paddingProfile = profile.argonPaddingProfile
         self.firstPacketProfile = profile.argonFirstPacketProfile
         self.pathMTU = profile.argonPathMTU
+        self.handshakeMaxAttempts = profile.argonHandshakeMaxAttempts
+        self.handshakeInitialTimeoutMs = profile.argonHandshakeInitialTimeoutMs
+        self.handshakeMaxTimeoutMs = profile.argonHandshakeMaxTimeoutMs
+        self.keepaliveMinIdleSec = profile.argonKeepaliveMinIdleSec
+        self.keepaliveMaxIdleSec = profile.argonKeepaliveMaxIdleSec
     }
 }
 
