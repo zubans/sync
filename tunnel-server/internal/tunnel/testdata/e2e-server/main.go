@@ -89,6 +89,8 @@ func main() {
 	protoVersion := flag.Int("protocol-version", int(tunnel.ProtocolVersionV5), "версия протокола Argon4 (4 или 5)")
 	allowV4 := flag.Bool("allow-v4", true, "разрешать приём legacy v4")
 	paddingProfile := flag.String("padding-profile", tunnel.PaddingProfileBalanced, "профиль padding v5")
+	behaviorProfile := flag.String("behavior-profile", "", "поведенческий профиль трафика Argon4 (baseline, video-call)")
+	allowVideoCall := flag.Bool("allow-video-call", true, "разрешать клиентам профиль video-call")
 	pathMTU := flag.Int("path-mtu", tunnel.DefaultPathMTU, "ограничение внешнего path MTU")
 	sessionIdle := flag.Duration("session-idle-timeout", tunnel.SessionIdleTimeout, "таймаут неактивности сессии сервера")
 	wireLog := flag.String("wire-log", "", "файл для записи длин (in/out) зашифрованных UDP-кадров")
@@ -101,6 +103,21 @@ func main() {
 	for _, part := range strings.Split(*transitAllow, ",") {
 		if trimmed := strings.TrimSpace(part); trimmed != "" {
 			allowList = append(allowList, trimmed)
+		}
+	}
+
+	var connMu sync.Mutex
+	var sharedConn *net.UDPConn
+	var wireLogMu sync.Mutex
+	logWire := func(dir string, size int) {
+		if *wireLog == "" {
+			return
+		}
+		wireLogMu.Lock()
+		defer wireLogMu.Unlock()
+		if f, oerr := os.OpenFile(*wireLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); oerr == nil {
+			_, _ = fmt.Fprintf(f, "%s %d\n", dir, size)
+			_ = f.Close()
 		}
 	}
 
@@ -127,7 +144,20 @@ func main() {
 			Profile: *paddingProfile,
 			PathMTU: *pathMTU,
 		},
+		BehaviorProfile:    *behaviorProfile,
+		DisallowVideoCall:  !*allowVideoCall,
 		SessionIdleTimeout: *sessionIdle,
+		WriteUDP: func(wire []byte, dst *net.UDPAddr) error {
+			connMu.Lock()
+			c := sharedConn
+			connMu.Unlock()
+			if c == nil || dst == nil {
+				return net.ErrClosed
+			}
+			logWire("tx", len(wire))
+			_, werr := c.WriteToUDP(wire, dst)
+			return werr
+		},
 	}, tunDevice)
 	if err != nil {
 		log.Fatal(err)
@@ -153,21 +183,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer conn.Close()
+	connMu.Lock()
+	sharedConn = conn
+	connMu.Unlock()
 	if err := os.WriteFile(*addrFile, []byte(conn.LocalAddr().String()), 0o600); err != nil {
 		log.Fatal(err)
-	}
-
-	var wireLogMu sync.Mutex
-	logWire := func(dir string, size int) {
-		if *wireLog == "" {
-			return
-		}
-		wireLogMu.Lock()
-		defer wireLogMu.Unlock()
-		if f, oerr := os.OpenFile(*wireLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); oerr == nil {
-			_, _ = fmt.Fprintf(f, "%s %d\n", dir, size)
-			_ = f.Close()
-		}
 	}
 
 	if echo != nil {
@@ -178,11 +198,7 @@ func main() {
 				if err != nil {
 					return
 				}
-				response, remoteAddr := srv.SealTunPacket(buffer[:n])
-				if response != nil && remoteAddr != nil {
-					logWire("tx", len(response))
-					_, _ = conn.WriteToUDP(response, remoteAddr)
-				}
+				srv.DispatchTunPacket(buffer[:n])
 			}
 		}()
 	}

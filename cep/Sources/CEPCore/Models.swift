@@ -109,6 +109,12 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
     public var argonKeepaliveMinIdleSec: Int? = nil
     /// Максимальный простой перед отправкой keepalive Argon4 (с).
     public var argonKeepaliveMaxIdleSec: Int? = nil
+    /// Поведенческий профиль трафика Argon4 (nil/"" — выкл., "baseline", "video-call").
+    public var argonBehaviorProfile: String? = nil
+    /// Режим пониженного энергопотребления для профилей Argon4.
+    public var argonLowPowerMode: Bool = false
+    /// Лимит длительности профиля video-call в секундах (по умолчанию 7200).
+    public var argonVideoCallMaxDurationSec: Int? = nil
 
     public init(name: String, proto: VPNProtocol) {
         self.name = name
@@ -143,6 +149,9 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
         argonHandshakeMaxTimeoutMs = try c.decodeIfPresent(Int.self, forKey: .argonHandshakeMaxTimeoutMs)
         argonKeepaliveMinIdleSec = try c.decodeIfPresent(Int.self, forKey: .argonKeepaliveMinIdleSec)
         argonKeepaliveMaxIdleSec = try c.decodeIfPresent(Int.self, forKey: .argonKeepaliveMaxIdleSec)
+        argonBehaviorProfile = try c.decodeIfPresent(String.self, forKey: .argonBehaviorProfile)
+        argonLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .argonLowPowerMode) ?? false
+        argonVideoCallMaxDurationSec = try c.decodeIfPresent(Int.self, forKey: .argonVideoCallMaxDurationSec)
     }
 }
 
@@ -204,14 +213,31 @@ public enum ChainValidation {
                         throw ConfigError("Argon4-надстройка: не задан мастер-пароль")
                     }
                 }
+                if let behavior = hop.argonBehaviorProfile?.trimmingCharacters(in: .whitespacesAndNewlines), !behavior.isEmpty {
+                    guard behavior == "baseline" || behavior == "video-call" else {
+                        throw ConfigError("Неизвестный поведенческий профиль Argon4 «\(behavior)»")
+                    }
+                    if hop.argonProtocolVersion == 4 {
+                        throw ConfigError("Поведенческие профили Argon4 требуют версию v5 (недоступны в v4)")
+                    }
+                }
                 if hop.proto == .transit {
                     if index == plan.hops.count - 1 {
                         throw ConfigError("Транзитный шлюз «\(hop.name)» не может быть последним узлом цепочки")
                     }
                     if hop.password.isEmpty {
+                        if let behavior = hop.argonBehaviorProfile?.trimmingCharacters(in: .whitespacesAndNewlines), !behavior.isEmpty {
+                            throw ConfigError("Слепой транзитный шлюз не поддерживает поведенческие профили Argon4")
+                        }
                         let next = plan.hops[index + 1]
                         if next.proto != .argon4 && !next.useArgon {
                             throw ConfigError("Для транзитного шлюза без пароля следующий узел должен использовать Argon4")
+                        }
+                    } else if hop.argonBehaviorProfile == "video-call" {
+                        let next = plan.hops[index + 1]
+                        let nextProto = next.useArgon ? "udp" : ArgonTransportProto.of(next)
+                        if nextProto != "udp" {
+                            throw ConfigError("Профиль «video-call» в транзитном шлюзе поддерживается только для UDP-целей")
                         }
                     }
                 }

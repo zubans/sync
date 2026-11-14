@@ -40,6 +40,9 @@ type Profile struct {
 	ArgonHandshakeMaxTimeoutMs     int    `json:"argonHandshakeMaxTimeoutMs,omitempty"`
 	ArgonKeepaliveMinIdleSec       int    `json:"argonKeepaliveMinIdleSec,omitempty"`
 	ArgonKeepaliveMaxIdleSec       int    `json:"argonKeepaliveMaxIdleSec,omitempty"`
+	ArgonBehaviorProfile           string `json:"argonBehaviorProfile,omitempty"`
+	ArgonLowPowerMode              bool   `json:"argonLowPowerMode,omitempty"`
+	ArgonVideoCallMaxDurationSec   int    `json:"argonVideoCallMaxDurationSec,omitempty"`
 }
 
 type Chain struct {
@@ -146,14 +149,30 @@ func validatePlan(plan *Plan) error {
 				return fmt.Errorf("«%s»: Argon4-надстройка: не задан мастер-пароль", hop.Name)
 			}
 		}
+		if hop.ArgonBehaviorProfile != "" {
+			if hop.ArgonBehaviorProfile != "baseline" && hop.ArgonBehaviorProfile != "video-call" {
+				return fmt.Errorf("«%s»: неизвестный поведенческий профиль Argon4 %q", hop.Name, hop.ArgonBehaviorProfile)
+			}
+			if hop.ArgonProtocolVersion == 4 {
+				return fmt.Errorf("«%s»: поведенческие профили Argon4 требуют версию v5 и недоступны в v4", hop.Name)
+			}
+		}
 		if hop.Proto == "transit" {
 			if i == len(plan.Hops)-1 {
 				return fmt.Errorf("«%s»: транзитный шлюз не может быть последним узлом цепочки", hop.Name)
 			}
 			if hop.Password == "" {
+				if hop.ArgonBehaviorProfile != "" {
+					return fmt.Errorf("«%s»: слепой транзитный шлюз не поддерживает поведенческие профили Argon4", hop.Name)
+				}
 				next := plan.Hops[i+1]
 				if next.Proto != "argon4" && !next.UseArgon {
 					return fmt.Errorf("«%s»: для транзитного шлюза без пароля следующий узел должен использовать Argon4", hop.Name)
+				}
+			} else if hop.ArgonBehaviorProfile == "video-call" {
+				next := plan.Hops[i+1]
+				if !next.UseArgon && next.Proto != "argon4" && next.Proto != "hysteria2" && next.Proto != "hysteria" {
+					return fmt.Errorf("«%s»: профиль video-call в транзитном шлюзе поддерживается только поверх UDP-узлов", hop.Name)
 				}
 			}
 		}

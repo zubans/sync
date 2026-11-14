@@ -1,6 +1,7 @@
 package cepcore
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -254,5 +255,79 @@ func TestAndroidArgon4RejectsV4DowngradeAndStrictServerRejectsV4(t *testing.T) {
 	defer instance.Close()
 	if err := instance.Start(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAndroidCepEngineVideoCallInteropAndStrictRejection(t *testing.T) {
+	bin := buildAndroidE2EServer(t)
+	vcAddr, stopVC := startAndroidE2EServer(t, bin, "-echo-data", "-protocol-version", "5", "-allow-v4=false", "-behavior-profile", "video-call", "-allow-video-call=true")
+	defer stopVC()
+
+	noVCAddr, stopNoVC := startAndroidE2EServer(t, bin, "-echo-data", "-protocol-version", "5", "-allow-v4=false", "-allow-video-call=false")
+	defer stopNoVC()
+
+	// Клиент требует video-call, но сервер его запрещает -> строгий отказ без молчаливого отката.
+	deniedCli, err := argon4.NewClient(argon4.ClientConfig{
+		Server:         noVCAddr,
+		MasterPassword: "android-secret",
+		ClientID:       "android-vc-denied",
+		Profile:        argon4.ProfileConfig{Name: argon4.ProfileVideoCall},
+	}, directDialer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel1()
+	if err := deniedCli.Connect(ctx1); err == nil {
+		_ = deniedCli.Close()
+		t.Fatalf("клиент должен отклонять сервер с запрещённым video-call")
+	}
+	_ = deniedCli.Close()
+
+	// Разрешённый сервер + video-call -> успешное рукопожатие, MTU <= 1160 и echo-обмен через batch/data.
+	cli, err := argon4.NewClient(argon4.ClientConfig{
+		Server:         vcAddr,
+		MasterPassword: "android-secret",
+		ClientID:       "android-vc-ok",
+		Profile:        argon4.ProfileConfig{Name: argon4.ProfileVideoCall},
+	}, directDialer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel2()
+	if err := cli.Connect(ctx2); err != nil {
+		t.Fatalf("Connect video-call: %v", err)
+	}
+	resp := cli.Response()
+	if resp.BehaviorProfile != argon4.ProfileVideoCall || resp.MTU > 1160 {
+		t.Fatalf("неожиданные параметры ответа video-call: %+v", resp)
+	}
+	pkt := make([]byte, 44)
+	pkt[0] = 0x45
+	pkt[9] = 17
+	copy(pkt[12:16], []byte{10, 44, 0, 2})
+	copy(pkt[16:20], []byte{10, 44, 0, 1})
+	binary.BigEndian.PutUint16(pkt[20:22], 50001)
+	binary.BigEndian.PutUint16(pkt[22:24], 50002)
+	binary.BigEndian.PutUint16(pkt[24:26], 24)
+	copy(pkt[28:44], []byte("android-vc-echo!"))
+	if err := cli.WritePacket(pkt); err != nil {
+		t.Fatalf("WritePacket: %v", err)
+	}
+	readDone := make(chan []byte, 1)
+	go func() {
+		if r, rerr := cli.ReadPacket(); rerr == nil {
+			readDone <- r
+		}
+	}()
+	select {
+	case echoed := <-readDone:
+		if len(echoed) < 44 || !bytes.Equal(echoed[28:44], []byte("android-vc-echo!")) {
+			t.Fatalf("некорректное echo от сервера: %q", echoed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("таймаут ожидания echo-пакета в video-call режиме")
 	}
 }

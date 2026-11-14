@@ -24,6 +24,7 @@ const (
 	FrameTypeHandshakeResp byte = 0x02
 	FrameTypeData          byte = 0x03
 	FrameTypeKeepalive     byte = 0x04
+	FrameTypeBatch         byte = 0x05
 
 	// Параметры Argon2id по умолчанию (по рекомендации OWASP: 19 МиБ, 2 прохода, 1 поток)
 	DefaultArgonTime    uint32 = 2
@@ -164,10 +165,11 @@ func BuildAAD(version, frameType byte, salt []byte, seq uint64) []byte {
 	return aad
 }
 
-// SealOptions задаёт версию протокола, профиль padding и предельный размер внешнего кадра.
+// SealOptions задаёт версию протокола, профиль padding, генератор длины и предельный размер внешнего кадра.
 type SealOptions struct {
 	Version       byte
 	Padding       PaddingConfig
+	SamplePad     func(payloadLen, maxOuter int) (int, error)
 	UseFixedPad   bool
 	FixedPadding  int
 	MaxOuterBytes int
@@ -234,6 +236,11 @@ func SealPacketWithOptions(frameType byte, salt, psk, key []byte, seq uint64, pl
 		var err error
 		if opts.UseFixedPad {
 			padLen = opts.FixedPadding
+		} else if opts.SamplePad != nil {
+			padLen, err = opts.SamplePad(len(plaintext), maxOuter)
+			if err != nil {
+				return nil, err
+			}
 		} else {
 			padLen, err = SamplePaddingLen(opts.Padding, len(plaintext), maxOuter)
 			if err != nil {
@@ -303,7 +310,7 @@ func ParseAndVerifyHeader(packet, psk []byte) (version, frameType byte, salt []b
 		return 0, 0, nil, nonce, 0, nil, ErrBadVersion
 	}
 	frameType = meta[1]
-	if frameType < FrameTypeHandshakeReq || frameType > FrameTypeKeepalive {
+	if frameType < FrameTypeHandshakeReq || frameType > FrameTypeBatch {
 		return 0, 0, nil, nonce, 0, nil, ErrHeaderAuthFailed
 	}
 	seq = binary.BigEndian.Uint64(meta[6:14])

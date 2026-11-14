@@ -82,6 +82,12 @@ data class CepProfile(
     val argonKeepaliveMinIdleSec: Int? = null,
     /** Максимальный простой перед отправкой keepalive Argon4 (с). */
     val argonKeepaliveMaxIdleSec: Int? = null,
+    /** Поведенческий профиль трафика Argon4 (null/"" — выкл., "baseline", "video-call"). */
+    val argonBehaviorProfile: String? = null,
+    /** Режим пониженного энергопотребления для профилей Argon4. */
+    val argonLowPowerMode: Boolean = false,
+    /** Лимит длительности профиля video-call в секундах. */
+    val argonVideoCallMaxDurationSec: Int? = null,
 ) {
     val protocol: VpnProtocol? get() = VpnProtocol.of(proto)
 }

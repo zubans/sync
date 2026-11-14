@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.argontunnel.BuildConfig
+import com.example.argontunnel.crypto.Argon4Profile
 import com.example.argontunnel.data.RoutingMode
 import com.example.argontunnel.data.TunnelSettings
 import com.example.argontunnel.service.ArgonVpnService
@@ -83,6 +84,8 @@ fun TunnelScreen(modifier: Modifier = Modifier) {
     var selectedPackages by remember { mutableStateOf(settings.selectedPackages) }
     var customPackageInput by rememberSaveable { mutableStateOf("") }
     var testMaterial by rememberSaveable { mutableStateOf("") }
+    var behaviorProfile by rememberSaveable { mutableStateOf(settings.behaviorProfile) }
+    var lowPowerMode by rememberSaveable { mutableStateOf(settings.lowPowerMode) }
 
     val availableInterfaces = remember { settings.availableNetworkInterfaces() }
     val installedApps = remember { settings.installedRoutableApps() }
@@ -95,6 +98,8 @@ fun TunnelScreen(modifier: Modifier = Modifier) {
         settings.masterPassword = masterPassword
         settings.routingMode = routingMode
         settings.selectedPackages = selectedPackages
+        settings.behaviorProfile = behaviorProfile
+        settings.lowPowerMode = lowPowerMode
     }
 
     fun startVpnService() {
@@ -160,10 +165,17 @@ fun TunnelScreen(modifier: Modifier = Modifier) {
                 )
                 status.serverEndpoint?.let { Text("Сервер Ubuntu: $it", style = MaterialTheme.typography.bodySmall) }
                 status.boundInterface?.let { Text("Исходящий интерфейс: $it", style = MaterialTheme.typography.bodySmall) }
+                if (status.behaviorProfile.isNotBlank()) {
+                    val archSuffix = if (status.behaviorArchetype.isNotBlank()) " (${status.behaviorArchetype})" else ""
+                    Text("Профиль трафика: ${status.behaviorProfile}$archSuffix", style = MaterialTheme.typography.bodySmall)
+                }
                 Text(
                     "Отправлено: ${status.txPackets} пак. (${status.txBytes} Б) · Принято: ${status.rxPackets} пак. (${status.rxBytes} Б)",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                status.warningMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall)
+                }
                 status.lastError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
@@ -240,6 +252,55 @@ fun TunnelScreen(modifier: Modifier = Modifier) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        // Поведенческий профиль трафика Argon4 v5 (явный opt-in, по умолчанию выключен)
+        Text("Поведенческий профиль трафика (v5)", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            val profiles = listOf(
+                Argon4Profile.PROFILE_NONE to "Выкл (off)",
+                Argon4Profile.PROFILE_BASELINE to "baseline",
+                Argon4Profile.PROFILE_VIDEO_CALL to "video-call",
+            )
+            profiles.forEach { (value, label) ->
+                FilterChip(
+                    selected = behaviorProfile == value,
+                    onClick = {
+                        behaviorProfile = value
+                        settings.behaviorProfile = value
+                    },
+                    label = { Text(label) },
+                )
+            }
+        }
+        if (behaviorProfile == Argon4Profile.PROFILE_VIDEO_CALL) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        val next = !lowPowerMode
+                        lowPowerMode = next
+                        settings.lowPowerMode = next
+                    },
+            ) {
+                Checkbox(
+                    checked = lowPowerMode,
+                    onCheckedChange = { checked ->
+                        lowPowerMode = checked
+                        settings.lowPowerMode = checked
+                    },
+                )
+                Text("Энергосберегающий режим video-call (меньше фоновых кадров и трафика)", style = MaterialTheme.typography.bodySmall)
+            }
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = Argon4Profile.VIDEO_CALL_WARNING,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        }
 
         // Мастер-пароль Argon4
         Text("Мастер-пароль (Argon2id)", style = MaterialTheme.typography.titleMedium)

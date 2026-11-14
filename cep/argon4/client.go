@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"strings"
@@ -31,6 +33,7 @@ type ClientConfig struct {
 	Padding            *PaddingConfig
 	PathMTU            int
 	Timing             TimingConfig
+	Profile            ProfileConfig
 	Clock              Clock
 }
 
@@ -45,6 +48,10 @@ type Client struct {
 	timing             TimingConfig
 	clock              Clock
 	tracker            *ActivityTracker
+	reqProfileName     string
+	reqProfileVer      int
+	profile            SessionProfile
+	shaper             *TrafficShaper
 
 	conn        net.Conn
 	response    HandshakeResponse
@@ -55,6 +62,10 @@ type Client struct {
 	s2cKey      []byte
 	seq         atomic.Uint64
 	replay      ReplayWindow
+	readMu      sync.Mutex
+	pendingRead [][]byte
+	shaperErrMu sync.Mutex
+	shaperErr   error
 	closeOnce   sync.Once
 }
 
@@ -99,11 +110,8 @@ func resolveTransportOptions(config ClientConfig, isUDP bool) (version byte, pad
 	return version, pad, firstPad, maxOuterUDP, nil
 }
 
-func capabilitiesForVersion(version byte) []string {
-	if version == ProtocolVersionV5 {
-		return []string{"pad-v5"}
-	}
-	return nil
+func capabilitiesForVersion(version byte, profileCapable bool) []string {
+	return CapabilitiesForVersion(version, profileCapable)
 }
 
 func validateHandshakeProtocol(expectedVersion byte, response HandshakeResponse) error {
@@ -134,6 +142,13 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	reqProfName, reqProfVer, err := ValidateProfileRequest(ver, config.Mode, config.Proto, config.Profile)
+	if err != nil {
+		return nil, err
+	}
+	if reqProfName == ProfileVideoCall {
+		log.Printf("[argon4] ПРЕДУПРЕЖДЕНИЕ: %s", VideoCallWarning)
+	}
 	clk := config.Clock
 	if clk == nil {
 		clk = RealClock{}
@@ -147,6 +162,8 @@ func NewClient(config ClientConfig) (*Client, error) {
 		timing:             timingCfg,
 		clock:              clk,
 		tracker:            NewActivityTracker(clk),
+		reqProfileName:     reqProfName,
+		reqProfileVer:      reqProfVer,
 	}, nil
 }
 
@@ -189,8 +206,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		Target:          c.config.Target,
 		Proto:           c.config.Proto,
 		ProtocolVersion: int(c.protocolVersion),
-		Capabilities:    capabilitiesForVersion(c.protocolVersion),
+		Capabilities:    capabilitiesForVersion(c.protocolVersion, c.reqProfileVer > 0),
 		PaddingProfile:  c.padding.Profile,
+		BehaviorProfile: c.reqProfileName,
+		ProfileVersion:  c.reqProfileVer,
 	}
 	plaintext, err := json.Marshal(request)
 	if err != nil {
@@ -209,6 +228,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	sessProf, err := VerifyClientProfileResponse(c.reqProfileName, c.reqProfileVer, response, c.padding, c.timing, c.config.Profile, rand.Reader)
+	if err != nil {
+		return err
+	}
 	effectiveMode := response.Mode
 	if effectiveMode == "" {
 		if c.config.Mode == ModeTransit {
@@ -222,7 +245,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		if err := validateHandshakeResponse(response); err != nil {
 			return err
 		}
-		response.MTU = EffectiveTunMTU(response.MTU, c.padding.PathMTU, c.protocolVersion)
+		response.MTU = EffectiveProfileTunMTU(response.MTU, c.padding.PathMTU, c.protocolVersion, sessProf)
 	}
 	if response.ProtocolVersion == 0 {
 		response.ProtocolVersion = int(c.protocolVersion)
@@ -243,6 +266,33 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.conn = conn
 	c.response = response
 	c.transitMode = effectiveMode == ModeTransit
+	c.profile = sessProf
+	if sessProf.IsActive() {
+		shaper := NewTrafficShaper(ShaperOptions{
+			Profile:          sessProf,
+			Salt:             c.salt[:],
+			PSK:              c.psk,
+			Key:              c.c2sKey,
+			Version:          c.protocolVersion,
+			MaxOuterBytes:    c.maxOuterUDP,
+			NextSeq:          func() uint64 { return c.seq.Add(1) },
+			WriteWire:        func(w []byte) error { _, werr := conn.Write(w); return werr },
+			Clock:            c.clock,
+			Tracker:          c.tracker,
+			KeepaliveEnabled: true,
+			IsServer:         false,
+			OnFatalError: func(ferr error) {
+				c.shaperErrMu.Lock()
+				if c.shaperErr == nil {
+					c.shaperErr = ferr
+				}
+				c.shaperErrMu.Unlock()
+				_ = c.Close()
+			},
+		})
+		shaper.Start()
+		c.shaper = shaper
+	}
 	connected = true
 	return nil
 }
@@ -317,6 +367,13 @@ func (c *Client) WritePacket(plaintext []byte) error {
 			return fmt.Errorf("Argon4 переносит только IPv4-пакеты")
 		}
 	}
+	if c.shaper != nil {
+		err := c.shaper.EnqueueReal(plaintext)
+		if errors.Is(err, ErrQueueFull) {
+			return nil
+		}
+		return err
+	}
 	packet, err := SealPacketWithOptions(FrameTypeData, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), plaintext, SealOptions{
 		Version:       c.protocolVersion,
 		Padding:       c.padding,
@@ -332,6 +389,19 @@ func (c *Client) WritePacket(plaintext []byte) error {
 	return err
 }
 
+// Profile возвращает активный поведенческий профиль клиентской сессии.
+func (c *Client) Profile() SessionProfile {
+	return c.profile
+}
+
+// ShaperStats возвращает агрегированную статистику шейпера (если профиль включён).
+func (c *Client) ShaperStats() ShaperStats {
+	if c.shaper == nil {
+		return ShaperStats{}
+	}
+	return c.shaper.Stats()
+}
+
 // Timing возвращает нормализованную конфигурацию таймингов клиента.
 func (c *Client) Timing() TimingConfig {
 	return c.timing
@@ -344,6 +414,20 @@ func (c *Client) Tracker() *ActivityTracker {
 
 // RunKeepalive запускает idle-keepalive с jitter и сбросом по исходящим данным до отмены ctx или ошибки сокета.
 func (c *Client) RunKeepalive(ctx context.Context, onError func(error)) {
+	if c.shaper != nil {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.shaper.Done():
+			c.shaperErrMu.Lock()
+			ferr := c.shaperErr
+			c.shaperErrMu.Unlock()
+			if ferr != nil && ctx.Err() == nil && onError != nil {
+				onError(ferr)
+			}
+			return
+		}
+	}
 	RunIdleKeepalive(ctx, KeepaliveOptions{
 		Clock:   c.clock,
 		Timing:  c.timing,
@@ -357,6 +441,9 @@ func (c *Client) RunKeepalive(ctx context.Context, onError func(error)) {
 func (c *Client) WriteKeepalive() error {
 	if c.conn == nil {
 		return net.ErrClosed
+	}
+	if c.shaper != nil {
+		return c.shaper.RequestControl(KeepalivePingPayload)
 	}
 	packet, err := SealPacketWithOptions(FrameTypeKeepalive, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), []byte("ping"), SealOptions{
 		Version:       c.protocolVersion,
@@ -376,6 +463,15 @@ func (c *Client) ReadPacket() ([]byte, error) {
 	if c.conn == nil {
 		return nil, net.ErrClosed
 	}
+	c.readMu.Lock()
+	if len(c.pendingRead) > 0 {
+		next := c.pendingRead[0]
+		c.pendingRead = c.pendingRead[1:]
+		c.readMu.Unlock()
+		return next, nil
+	}
+	c.readMu.Unlock()
+
 	maxPayload := c.maxOuterUDP - OverheadV4
 	if c.protocolVersion == ProtocolVersionV5 {
 		maxPayload = c.maxOuterUDP - OverheadV5
@@ -398,6 +494,39 @@ func (c *Client) ReadPacket() ([]byte, error) {
 		if err != nil || !c.replay.Accept(opened.Seq) {
 			continue
 		}
+		if opened.FrameType == FrameTypeKeepalive {
+			if c.shaper != nil && string(opened.Plaintext) == KeepalivePingPayload {
+				_ = c.shaper.RequestControl(KeepalivePongPayload)
+			}
+			continue
+		}
+		if opened.FrameType == FrameTypeBatch {
+			items, berr := UnpackBatchPlaintext(opened.Plaintext, maxPayload)
+			if berr != nil {
+				continue
+			}
+			valid := items[:0]
+			for _, item := range items {
+				if !c.transitMode {
+					if _, _, ok := ParseIPv4Addrs(item); !ok {
+						continue
+					}
+				}
+				valid = append(valid, item)
+			}
+			if len(valid) == 0 {
+				continue
+			}
+			if c.shaper != nil {
+				c.shaper.RecordInboundActivity()
+			}
+			if len(valid) > 1 {
+				c.readMu.Lock()
+				c.pendingRead = append(c.pendingRead, valid[1:]...)
+				c.readMu.Unlock()
+			}
+			return valid[0], nil
+		}
 		if opened.FrameType != FrameTypeData {
 			continue
 		}
@@ -407,6 +536,9 @@ func (c *Client) ReadPacket() ([]byte, error) {
 				continue
 			}
 		}
+		if c.shaper != nil {
+			c.shaper.RecordInboundActivity()
+		}
 		return plaintext, nil
 	}
 }
@@ -414,6 +546,9 @@ func (c *Client) ReadPacket() ([]byte, error) {
 func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		if c.shaper != nil {
+			c.shaper.Close()
+		}
 		if c.conn != nil {
 			err = c.conn.Close()
 		}

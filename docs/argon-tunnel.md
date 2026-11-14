@@ -122,3 +122,27 @@ make install-tunnel-apk
   - сервер: `-session-idle-timeout` / `ARGON_SESSION_IDLE_TIMEOUT` (по умолчанию `10m`);
   - `argon-tunnel-client`: `-handshake-max-attempts` (`ARGON_HANDSHAKE_MAX_ATTEMPTS`), `-handshake-initial-timeout` (`ARGON_HANDSHAKE_INITIAL_TIMEOUT`), `-handshake-max-timeout` (`ARGON_HANDSHAKE_MAX_TIMEOUT`), `-handshake-max-elapsed` (`ARGON_HANDSHAKE_MAX_ELAPSED`), `-keepalive-min-idle` (`ARGON_KEEPALIVE_MIN_IDLE`), `-keepalive-max-idle` (`ARGON_KEEPALIVE_MAX_IDLE`), `-session-idle-timeout` (`ARGON_SESSION_IDLE_TIMEOUT`);
   - профили CEP (`cep/Sources/CEPCore/Models.swift`, `cep-cli`, `android/cep-engine`): `argonHandshakeMaxAttempts`, `argonHandshakeInitialTimeoutMs`, `argonHandshakeMaxTimeoutMs`, `argonKeepaliveMinIdleSec`, `argonKeepaliveMaxIdleSec`; Kotlin `TunnelSettings`: `handshakeMaxAttempts`, `handshakeInitialTimeoutMs`, `handshakeMaxTimeoutMs`, `keepaliveMinIdleMs`, `keepaliveMaxIdleMs`.
+
+### Поведенческие профили трафика v5 (`profile-v1`, SYNC-656)
+
+По умолчанию поведенческий шейпинг **выключен** (`""` / `off`): включается только явным выбором (`baseline` или `video-call`) и поддерживается только на Argon4 `v5` (попытка включить на `v4`, указать неизвестное имя/версию или использовать `video-call` поверх TCP-транзита немедленно отклоняется без молчаливого отката).
+
+- **Профили**:
+  - `off` (по умолчанию): стандартный per-packet padding v5 + адаптивный idle keepalive без отложенной очереди.
+  - `baseline`: лёгкое сглаживание длин и временное объединение серии мелких пакетов (`FrameTypeBatch = 0x05`, `<= 8 мс` добавленной задержки, окно `1..4 мс`), уменьшающее число мелких кадров на проводе (~`-5%..-15%` пакетов при коротких всплесках) практически без фонового расхода.
+  - `video-call`: сессионная модель, калиброванная по живому дампу Яндекс Телемоста (три архетипа сеанса: `telemost-av-active`, `telemost-hd-dynamic`, `telemost-low-cam`):
+    - ограничение внешнего кадра (`1184..1228` Б, рекомендованный TUN MTU `1120..1150` Б, по умолчанию `1140`),
+    - многомодальные корзины размеров (кластер мелких аудио/RTCP `92..196` Б, проба/RTX `278..342` Б, медиа-корзины `620..1210` Б),
+    - пачечный burst/keyframe pacing с жёсткой границей добавленной задержки (`MaxAddedDelay = 15..18 мс`, жёсткий потолок `30 мс`),
+    - объединение мелких пакетов в `FrameTypeBatch (0x05)` с сохранением строго монотонного `seq` перед зашифровкой,
+    - низкоприоритетная обратная связь простоя (`"fb"` / `"ping"`), всегда уступающая реальным пакетам, и автоматическое снижение до `baseline` через `MaxDuration` (по умолчанию `2h`).
+- **Ограничение памяти и backpressure**: очередь шейпера ограничена `128` пакетами и `256 KiB` (`ErrQueueFull` / `QueueFullException` при переполнении с отбросом сверхлимита и сбросом pacing выше `highWatermark`, без неограниченного роста памяти).
+- **Энергосбережение и честные ограничения**:
+  - Флаг `low-power` / `argonLowPowerMode` (на Android также включается автоматически в режиме Battery Saver или предупреждает на тарифицируемой сети) отключает фоновые `"fb"`-кадры и переводит keepalive в редкий режим `[4s..10s]`.
+  - В редких/малонагруженных потоках (`idle` / `browsing` / `video_vod`) `video-call` существенно увеличивает служебный трафик и расход батареи (по замерам в симуляции до `+327%..+564%` байт при малом пользовательском трафике, `+23.9%` при массовой загрузке), а добавленная задержка сглаживания составляет `p50 ~1..4 мс`, `p95 ~4..8 мс`.
+  - Поведенческий профиль **не скрывает** IP-адрес сервера и сам факт использования активного транспортного протокола.
+- **Настройка**:
+  - `argon-tunnel-server`: `-behavior-profile` (`ARGON_BEHAVIOR_PROFILE`), `-allow-video-call` (`ARGON_ALLOW_VIDEO_CALL=1`), `-video-call-max-duration` (`ARGON_VIDEO_CALL_MAX_DURATION=2h`);
+  - `argon-tunnel-client`: `-behavior-profile` (`ARGON_BEHAVIOR_PROFILE`), `-low-power` (`ARGON_LOW_POWER=0|1`), `-video-call-max-duration` (`ARGON_VIDEO_CALL_MAX_DURATION=2h`);
+  - CEP (`Models.swift`, `cep-cli`, `android/cep-engine`, `CepModels.kt`): `argonBehaviorProfile`, `argonLowPowerMode`, `argonVideoCallMaxDurationSec`;
+  - Android Kotlin `TunnelSettings` / UI: `behaviorProfile`, `lowPowerMode`, `videoCallMaxMinutes`.

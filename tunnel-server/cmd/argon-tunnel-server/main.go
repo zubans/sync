@@ -63,9 +63,12 @@ func main() {
 		transitBlind       = flag.Bool("transit-blind", envOr("ARGON_TRANSIT_BLIND", "0") == "1", "Слепой L4-транзит к -transit-target без расшифровки Argon4 (не требует пароля)")
 		protoVersion       = flag.Int("protocol-version", envIntOr("ARGON_PROTOCOL_VERSION", int(tunnel.ProtocolVersionV5)), "Основная версия протокола Argon4 (4 или 5)")
 		allowV4            = flag.Bool("allow-v4", envOr("ARGON_ALLOW_V4", "1") == "1", "Разрешать приём legacy-сессий Argon4 v4 для обратной совместимости (без downgrade активных v5)")
-		paddingProfile     = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль распределения padding v5 (balanced, compact, wide)")
-		pathMTU            = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU для ограничения длины padding UDP-датаграмм")
-		sessionIdleTimeout = flag.Duration("session-idle-timeout", envDurationOr("ARGON_SESSION_IDLE_TIMEOUT", tunnel.SessionIdleTimeout), "Таймаут неактивности клиентской сессии (например, 10m)")
+		paddingProfile       = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль распределения padding v5 (balanced, compact, wide)")
+		pathMTU              = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU для ограничения длины padding UDP-датаграмм")
+		behaviorProfile      = flag.String("behavior-profile", envOr("ARGON_BEHAVIOR_PROFILE", ""), "Поведенческий профиль трафика (пусто, baseline, video-call)")
+		allowVideoCall       = flag.Bool("allow-video-call", envOr("ARGON_ALLOW_VIDEO_CALL", "1") == "1", "Разрешать клиентам согласование профиля video-call")
+		videoCallMaxDuration = flag.Duration("video-call-max-duration", envDurationOr("ARGON_VIDEO_CALL_MAX_DURATION", tunnel.DefaultVideoCallMaxDuration), "Предельная длительность активного режима video-call на сессию")
+		sessionIdleTimeout   = flag.Duration("session-idle-timeout", envDurationOr("ARGON_SESSION_IDLE_TIMEOUT", tunnel.SessionIdleTimeout), "Таймаут неактивности клиентской сессии (например, 10m)")
 	)
 	flag.Parse()
 
@@ -122,7 +125,10 @@ func main() {
 			Profile: *paddingProfile,
 			PathMTU: *pathMTU,
 		},
-		SessionIdleTimeout: *sessionIdleTimeout,
+		BehaviorProfile:      *behaviorProfile,
+		DisallowVideoCall:    !*allowVideoCall,
+		VideoCallMaxDuration: *videoCallMaxDuration,
+		SessionIdleTimeout:   *sessionIdleTimeout,
 	}
 
 	var srv *tunnel.Server

@@ -24,6 +24,7 @@ enum class Argon4ErrorKind {
     INVALID_ENVELOPE,
     TRAILING_DATA,
     MTU_EXCEEDED,
+    PROFILE_UNSUPPORTED,
 }
 
 /** Исключение протокола Argon4 с явным типом нарушения границ, версии или padding. */
@@ -49,6 +50,7 @@ data class SealOptions(
     val padding: PaddingConfig = PaddingConfig(),
     val useFixedPad: Boolean = false,
     val fixedPadding: Int = 0,
+    val samplePad: ((payloadLen: Int, maxOuterBytes: Int) -> Int)? = null,
     val maxOuterBytes: Int = Argon4Crypto.DEFAULT_MAX_OUTER_UDP_SIZE,
 )
 
@@ -81,6 +83,10 @@ data class HandshakeRequest(
     val capabilities: List<String>? = null,
     /** Запрошенный профиль padding (`"balanced"`, `"compact"`, `"wide"`, `"custom"`). */
     val paddingProfile: String? = null,
+    /** Запрошенный поведенческий профиль трафика (`"baseline"`, `"video-call"`). */
+    val behaviorProfile: String? = null,
+    /** Версия схемы поведенческого профиля (`1` для `profile-v1`, `0` = выкл.). */
+    val profileVersion: Int = 0,
 )
 
 /** Параметры сессии и маршрутизации, выданные сервером Ubuntu после проверки мастер-пароля. */
@@ -108,6 +114,10 @@ data class HandshakeResponse(
     val capabilities: List<String>? = null,
     /** Согласованный профиль padding. */
     val paddingProfile: String? = null,
+    /** Подтверждённый сервером поведенческий профиль трафика. */
+    val behaviorProfile: String? = null,
+    /** Подтверждённая версия поведенческого профиля. */
+    val profileVersion: Int = 0,
 )
 
 /** Параметры вывода ключа Argon2id (RFC 9106, по умолчанию по рекомендации OWASP: 19 МиБ, 2 прохода, 1 поток). */
@@ -189,6 +199,7 @@ object Argon4Crypto {
     const val FRAME_HANDSHAKE_RESP: Byte = 0x02
     const val FRAME_DATA: Byte = 0x03
     const val FRAME_KEEPALIVE: Byte = 0x04
+    const val FRAME_BATCH: Byte = 0x05
 
     const val KEY_BYTES = 32
     const val SALT_BYTES = 16
@@ -425,8 +436,12 @@ object Argon4Crypto {
         return envelope.copyOfRange(ENVELOPE_HEADER_V5_BYTES, padStart)
     }
 
-    fun capabilitiesForVersion(version: Byte): List<String>? =
-        if (version == PROTOCOL_VERSION_V5) listOf("pad-v5") else null
+    fun capabilitiesForVersion(version: Byte, profileCapable: Boolean = false): List<String>? =
+        if (version == PROTOCOL_VERSION_V5) {
+            if (profileCapable) listOf("pad-v5", "profile-v1") else listOf("pad-v5")
+        } else {
+            null
+        }
 
     fun resolveVersion(rawVersion: Int): Byte = when (rawVersion) {
         0, PROTOCOL_VERSION_V5.toInt() -> PROTOCOL_VERSION_V5
@@ -648,10 +663,10 @@ object Argon4Crypto {
         val innerLen: Int
         when (version) {
             PROTOCOL_VERSION_V5 -> {
-                val padLen = if (options.useFixedPad) {
-                    options.fixedPadding
-                } else {
-                    samplePaddingLen(options.padding, length, options.maxOuterBytes)
+                val padLen = when {
+                    options.useFixedPad -> options.fixedPadding
+                    options.samplePad != null -> options.samplePad.invoke(length, options.maxOuterBytes)
+                    else -> samplePaddingLen(options.padding, length, options.maxOuterBytes)
                 }
                 innerInput = packEnvelopeV5(plaintext, offset, length, padLen, options.maxOuterBytes)
                 innerOffset = 0

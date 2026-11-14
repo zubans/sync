@@ -38,6 +38,9 @@ type Profile struct {
 	ArgonHandshakeMaxTimeoutMs     int    `json:"argonHandshakeMaxTimeoutMs,omitempty"`
 	ArgonKeepaliveMinIdleSec       int    `json:"argonKeepaliveMinIdleSec,omitempty"`
 	ArgonKeepaliveMaxIdleSec       int    `json:"argonKeepaliveMaxIdleSec,omitempty"`
+	ArgonBehaviorProfile           string `json:"argonBehaviorProfile,omitempty"`
+	ArgonLowPowerMode              bool   `json:"argonLowPowerMode,omitempty"`
+	ArgonVideoCallMaxDurationSec   int    `json:"argonVideoCallMaxDurationSec,omitempty"`
 }
 
 type Plan struct {
@@ -216,6 +219,28 @@ func Validate(planJSON string) string {
 				problems = append(problems, fmt.Sprintf("«%s»: не задан пароль Argon4-надстройки", hop.Name))
 			}
 		}
+		if hop.ArgonBehaviorProfile != "" {
+			if hop.ArgonBehaviorProfile != "baseline" && hop.ArgonBehaviorProfile != "video-call" {
+				problems = append(problems, fmt.Sprintf("«%s»: неизвестный поведенческий профиль Argon4 %q", hop.Name, hop.ArgonBehaviorProfile))
+			} else if hop.ArgonProtocolVersion == 4 {
+				problems = append(problems, fmt.Sprintf("«%s»: поведенческие профили Argon4 требуют версию v5 и недоступны в v4", hop.Name))
+			} else if hop.Proto == "transit" && strings.TrimSpace(hop.Password) == "" {
+				problems = append(problems, fmt.Sprintf("«%s»: слепой транзит без пароля не поддерживает поведенческие профили Argon4", hop.Name))
+			} else if hop.ArgonBehaviorProfile == "video-call" {
+				if hop.Proto == "transit" && i+1 < len(plan.Hops) {
+					nextHop := &plan.Hops[i+1]
+					if !nextHop.UseArgon {
+						if _, nextProto, perr := hopTargetPortAndProto(nextHop); perr == nil && nextProto != "udp" {
+							problems = append(problems, fmt.Sprintf("«%s»: профиль video-call в транзитном шлюзе поддерживается только для UDP-целей", hop.Name))
+						}
+					}
+				} else if hop.UseArgon {
+					if _, hopProto, perr := hopTargetPortAndProto(&hop); perr == nil && hopProto != "udp" {
+						problems = append(problems, fmt.Sprintf("«%s»: профиль video-call в Argon4-надстройке поддерживается только для UDP-узлов", hop.Name))
+					}
+				}
+			}
+		}
 		if _, err := parseRoutes(hop.Routes); err != nil {
 			problems = append(problems, fmt.Sprintf("«%s»: %s", hop.Name, err))
 		}
@@ -301,6 +326,15 @@ func argon4BaseOptions(hop *Profile, serverAddr, password, clientID string) map[
 	}
 	if hop.ArgonKeepaliveMaxIdleSec != 0 {
 		opts["keepalive_max_idle_sec"] = hop.ArgonKeepaliveMaxIdleSec
+	}
+	if hop.ArgonBehaviorProfile != "" {
+		opts["behavior_profile"] = hop.ArgonBehaviorProfile
+	}
+	if hop.ArgonLowPowerMode {
+		opts["low_power_mode"] = true
+	}
+	if hop.ArgonVideoCallMaxDurationSec != 0 {
+		opts["video_call_max_duration_sec"] = hop.ArgonVideoCallMaxDurationSec
 	}
 	return opts
 }

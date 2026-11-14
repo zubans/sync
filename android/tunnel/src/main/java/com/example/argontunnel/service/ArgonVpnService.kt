@@ -4,19 +4,27 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import com.example.argontunnel.crypto.ActivityTracker
 import com.example.argontunnel.crypto.Argon4Crypto
 import com.example.argontunnel.crypto.Argon4ErrorKind
+import com.example.argontunnel.crypto.Argon4Profile
 import com.example.argontunnel.crypto.Argon4ProtocolException
 import com.example.argontunnel.crypto.Argon4Timing
+import com.example.argontunnel.crypto.ArgonProfileConfig
 import com.example.argontunnel.crypto.ArgonTimingConfig
+import com.example.argontunnel.crypto.ArgonTrafficShaper
 import com.example.argontunnel.crypto.HandshakeRequest
 import com.example.argontunnel.crypto.HandshakeResponse
+import com.example.argontunnel.crypto.QueueFullException
 import com.example.argontunnel.crypto.ReplayWindow
+import com.example.argontunnel.crypto.SessionBehaviorProfile
 import com.example.argontunnel.crypto.SystemArgonClock
 import com.example.argontunnel.data.RoutingMode
 import com.example.argontunnel.data.TunnelSettings
@@ -68,6 +76,12 @@ data class TunnelStatus(
     val txBytes: Long = 0,
     /** Принято байт шифротекста. */
     val rxBytes: Long = 0,
+    /** Активный поведенческий профиль трафика (`""` = выкл.). */
+    val behaviorProfile: String = "",
+    /** Выбранный для сессии архетип профиля. */
+    val behaviorArchetype: String = "",
+    /** Предупреждение о стоимости батареи/трафика или переключении профиля. */
+    val warningMessage: String? = null,
     /** Последнее сообщение об ошибке. */
     val lastError: String? = null,
 )
@@ -140,7 +154,7 @@ class ArgonVpnService : VpnService() {
                 }
 
                 val transport = resolveTransportConfig(settings)
-                val (handshake, sessionKeys) = performHandshake(
+                val outcome = performHandshake(
                     socket = socket,
                     serverAddr = serverAddr,
                     salt = salt,
@@ -151,11 +165,15 @@ class ArgonVpnService : VpnService() {
                     apps = appsList,
                     transport = transport,
                 )
+                val handshake = outcome.response
+                val sessionKeys = outcome.sessionKeys
+                val profile = outcome.profile
 
-                val pfd = establishTun(settings, handshake, transport)
+                val pfd = establishTun(settings, handshake, transport, profile)
                 tunPfd = pfd
 
                 val routedCount = if (settings.routingMode == RoutingMode.SELECTED_APPS) settings.selectedPackages.size else -1
+                val warningText = buildProfileWarning(profile, transport.isMetered, transport.autoLowPower)
                 _status.value = TunnelStatus(
                     running = true,
                     connecting = false,
@@ -163,13 +181,16 @@ class ArgonVpnService : VpnService() {
                     serverEndpoint = "${settings.serverHost}:${settings.serverPort}",
                     boundInterface = settings.bindInterface.ifBlank { "авто" },
                     routedAppsCount = routedCount,
+                    behaviorProfile = profile.name,
+                    behaviorArchetype = profile.archetype,
+                    warningMessage = warningText,
                 )
                 startForegroundWithNotification("Активен: ${handshake.assignedIp} → ${settings.serverHost}:${settings.serverPort}")
 
                 runPacketLoops(
                     pfd, socket, serverAddr, salt, psk,
                     sessionKeys.c2sKey, sessionKeys.s2cKey,
-                    transport,
+                    transport, profile,
                 )
             }.onFailure { err ->
                 _status.value = _status.value.copy(
@@ -190,10 +211,32 @@ class ArgonVpnService : VpnService() {
         val maxOuterBytes: Int,
         val maxPayloadBytes: Int,
         val timing: ArgonTimingConfig,
+        val profileName: String,
+        val profileVersion: Int,
+        val profileCfg: ArgonProfileConfig,
+        val autoLowPower: Boolean,
+        val isMetered: Boolean,
+    )
+
+    private data class HandshakeOutcome(
+        val response: HandshakeResponse,
+        val sessionKeys: Argon4Crypto.SessionKeys,
+        val profile: SessionBehaviorProfile,
     )
 
     private fun resolveTransportConfig(settings: TunnelSettings): ResolvedTransportConfig {
         val version = Argon4Crypto.resolveVersion(settings.protocolVersion)
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val isMetered = cm?.isActiveNetworkMetered == true
+        val autoLowPower = pm?.isPowerSaveMode == true || isMetered
+        val profileCfg = settings.profileConfig(extraLowPower = autoLowPower)
+        val (profileName, profileVersion) = Argon4Profile.validateProfileRequest(
+            version = version,
+            mode = Argon4Profile.MODE_TUNNEL,
+            proto = Argon4Profile.PROTO_UDP,
+            cfg = profileCfg,
+        )
         val padding = Argon4Crypto.normalizePaddingConfig(
             Argon4Crypto.presetPaddingConfig(settings.paddingProfile, settings.pathMtu),
             isUdp = true,
@@ -219,7 +262,32 @@ class ArgonVpnService : VpnService() {
             maxOuterBytes = maxOuterBytes,
             maxPayloadBytes = (maxOuterBytes - overhead).coerceAtLeast(0),
             timing = settings.timingConfig(),
+            profileName = profileName,
+            profileVersion = profileVersion,
+            profileCfg = profileCfg,
+            autoLowPower = autoLowPower,
+            isMetered = isMetered,
         )
+    }
+
+    private fun buildProfileWarning(
+        profile: SessionBehaviorProfile,
+        isMetered: Boolean,
+        autoLowPower: Boolean,
+    ): String? {
+        if (profile.name != Argon4Profile.PROFILE_VIDEO_CALL) return null
+        val extras = mutableListOf<String>()
+        if (profile.lowPowerMode) {
+            extras += if (autoLowPower) "активен авто-энергосберегающий режим" else "активен энергосберегающий режим"
+        }
+        if (isMetered) {
+            extras += "тарифицируемая сеть (metered)"
+        }
+        return if (extras.isEmpty()) {
+            Argon4Profile.VIDEO_CALL_WARNING
+        } else {
+            "${Argon4Profile.VIDEO_CALL_WARNING} (${extras.joinToString(", ")})"
+        }
     }
 
     private suspend fun sendTestMaterial(material: String) {
@@ -290,7 +358,7 @@ class ArgonVpnService : VpnService() {
         clientSecret: String,
         apps: List<String>,
         transport: ResolvedTransportConfig,
-    ): Pair<HandshakeResponse, Argon4Crypto.SessionKeys> {
+    ): HandshakeOutcome {
         val keyPair = Argon4Crypto.generateX25519Keypair()
         try {
             val clientAuth = Argon4Crypto.clientAuthToken(psk, clientId, clientSecret)
@@ -301,8 +369,10 @@ class ArgonVpnService : VpnService() {
                 apps = apps,
                 timestamp = System.currentTimeMillis() / 1000,
                 protocolVersion = transport.version.toInt(),
-                capabilities = Argon4Crypto.capabilitiesForVersion(transport.version),
+                capabilities = Argon4Crypto.capabilitiesForVersion(transport.version, profileCapable = true),
                 paddingProfile = transport.padding.profile,
+                behaviorProfile = transport.profileName.ifEmpty { null },
+                profileVersion = transport.profileVersion,
             )
             val reqJson = json.encodeToString(req).toByteArray(Charsets.UTF_8)
             val wireReq = Argon4Crypto.sealPacketWithOptions(
@@ -358,12 +428,24 @@ class ArgonVpnService : VpnService() {
                     }
                     val response = json.decodeFromString<HandshakeResponse>(opened.plaintext.decodeToString())
                     Argon4Crypto.validateHandshakeProtocol(transport.version, response)
+                    val negotiatedProfile = Argon4Profile.verifyClientProfileResponse(
+                        reqName = transport.profileName,
+                        reqVersion = transport.profileVersion,
+                        resp = response,
+                        pad = transport.padding,
+                        timing = transport.timing,
+                        cfg = transport.profileCfg,
+                    )
                     val sharedSecret = Argon4Crypto.computeX25519Shared(
                         keyPair.privateKey,
                         Argon4Crypto.hexToBytes(response.serverPub),
                     )
                     try {
-                        response to Argon4Crypto.deriveSessionKeys(key, sharedSecret, salt)
+                        HandshakeOutcome(
+                            response = response,
+                            sessionKeys = Argon4Crypto.deriveSessionKeys(key, sharedSecret, salt),
+                            profile = negotiatedProfile,
+                        )
                     } finally {
                         sharedSecret.fill(0)
                     }
@@ -378,8 +460,14 @@ class ArgonVpnService : VpnService() {
         settings: TunnelSettings,
         hs: HandshakeResponse,
         transport: ResolvedTransportConfig,
+        profile: SessionBehaviorProfile,
     ): ParcelFileDescriptor {
-        val effectiveMtu = Argon4Crypto.effectiveTunMtu(hs.mtu, transport.padding.pathMtu, transport.version)
+        val effectiveMtu = Argon4Profile.effectiveProfileTunMtu(
+            requestedMtu = hs.mtu,
+            pathMtu = transport.padding.pathMtu,
+            version = transport.version,
+            profile = profile,
+        )
         val builder = Builder()
             .setSession(settings.tunInterfaceName.ifBlank { "argon0" })
             .setMtu(effectiveMtu.coerceIn(Argon4Crypto.MIN_PATH_MTU, 1500))
@@ -425,6 +513,7 @@ class ArgonVpnService : VpnService() {
         c2sKey: SecretKey,
         s2cKey: SecretKey,
         transport: ResolvedTransportConfig,
+        profile: SessionBehaviorProfile,
     ) {
         socket.soTimeout = 0
         val seqCounter = AtomicLong(1L)
@@ -449,7 +538,44 @@ class ArgonVpnService : VpnService() {
             maxPayloadBytes = transport.maxPayloadBytes,
         )
 
-        // 1. Чтение IP-пакетов из TUN -> шифрование Argon4 -> отправка по UDP на сервер Ubuntu
+        val sendWirePacket: (ByteArray) -> Unit = { wire ->
+            socket.send(DatagramPacket(wire, wire.size, serverAddr))
+            val pCount = txPkts.incrementAndGet()
+            val bCount = txBytes.addAndGet(wire.size.toLong())
+            if (pCount % 5L == 1L) {
+                _status.value = _status.value.copy(txPackets = pCount, txBytes = bCount)
+            }
+        }
+
+        val shaper: ArgonTrafficShaper? = if (profile.isActive()) {
+            ArgonTrafficShaper(
+                profile = profile,
+                version = transport.version,
+                salt = salt,
+                psk = psk,
+                key = c2sKey,
+                maxOuterBytes = transport.maxOuterBytes,
+                isServer = false,
+                keepaliveEnabled = true,
+                clock = clock,
+                tracker = tracker,
+                nextSeq = { seqCounter.getAndIncrement() },
+                writeWire = { wire -> sendWirePacket(wire) },
+                onDowngrade = { msg ->
+                    _status.value = _status.value.copy(warningMessage = msg)
+                },
+                onFatalError = { err ->
+                    _status.value = _status.value.copy(lastError = "Ошибка шейпера профиля: ${err.message}")
+                    runCatching { socket.close() }
+                    runCatching { pfd.close() }
+                    scope.cancel()
+                },
+            ).also { it.start(scope) }
+        } else {
+            null
+        }
+
+        // 1. Чтение IP-пакетов из TUN -> шифрование Argon4 (или очередь шейпера) -> UDP на сервер Ubuntu
         val tunToUdp = scope.launch {
             try {
                 FileInputStream(pfd.fileDescriptor).use { tunIn ->
@@ -457,6 +583,14 @@ class ArgonVpnService : VpnService() {
                     while (isActive) {
                         val n = tunIn.read(buf)
                         if (n <= 0) continue
+                        if (shaper != null) {
+                            try {
+                                shaper.enqueueReal(buf.copyOf(n))
+                            } catch (_: QueueFullException) {
+                                // При переполнении очереди отбрасываем лишний пакет без обрыва туннеля.
+                            }
+                            continue
+                        }
                         val seq = seqCounter.getAndIncrement()
                         val encrypted = Argon4Crypto.sealPacketWithOptions(
                             frameType = Argon4Crypto.FRAME_DATA,
@@ -469,13 +603,8 @@ class ArgonVpnService : VpnService() {
                             length = n,
                             options = dataSealOptions,
                         )
-                        socket.send(DatagramPacket(encrypted, encrypted.size, serverAddr))
+                        sendWirePacket(encrypted)
                         tracker.touch()
-                        val pCount = txPkts.incrementAndGet()
-                        val bCount = txBytes.addAndGet(encrypted.size.toLong())
-                        if (pCount % 5L == 1L) {
-                            _status.value = _status.value.copy(txPackets = pCount, txBytes = bCount)
-                        }
                     }
                 }
             } catch (ce: CancellationException) {
@@ -511,8 +640,25 @@ class ArgonVpnService : VpnService() {
 
                         val pCount = rxPkts.incrementAndGet()
                         val bCount = rxBytes.addAndGet(dp.length.toLong())
-                        if (opened.frameType == Argon4Crypto.FRAME_DATA && opened.plaintext.isNotEmpty()) {
-                            tunOut.write(opened.plaintext)
+                        when (opened.frameType) {
+                            Argon4Crypto.FRAME_DATA -> {
+                                if (opened.plaintext.isNotEmpty()) {
+                                    tunOut.write(opened.plaintext)
+                                    shaper?.recordInboundActivity()
+                                }
+                            }
+                            Argon4Crypto.FRAME_BATCH -> {
+                                val subPackets = runCatching {
+                                    Argon4Profile.unpackBatchPlaintext(opened.plaintext, transport.maxPayloadBytes)
+                                }.getOrNull() ?: continue
+                                subPackets.forEach { sub -> tunOut.write(sub) }
+                                shaper?.recordInboundActivity()
+                            }
+                            Argon4Crypto.FRAME_KEEPALIVE -> {
+                                if (shaper != null && opened.plaintext.decodeToString() == Argon4Profile.KEEPALIVE_PING_PAYLOAD) {
+                                    shaper.requestControl(Argon4Profile.KEEPALIVE_PONG_PAYLOAD)
+                                }
+                            }
                         }
                         if (pCount % 5L == 1L) {
                             _status.value = _status.value.copy(rxPackets = pCount, rxBytes = bCount)
@@ -531,43 +677,48 @@ class ArgonVpnService : VpnService() {
             }
         }
 
-        // 3. Keepalive только в реальном простое (v5 padded ping) с рандомизированным окном и сбросом при трафике
-        val keepalive = scope.launch {
-            val pingBytes = "ping".toByteArray(Charsets.UTF_8)
-            Argon4Timing.runIdleKeepalive(
-                config = transport.timing,
-                clock = clock,
-                tracker = tracker,
-                onError = { err ->
-                    if (isActive) {
-                        _status.value = _status.value.copy(lastError = "Ошибка keepalive туннеля: ${err.message}")
-                    }
-                    runCatching { socket.close() }
-                    runCatching { pfd.close() }
-                    tunToUdp.cancel()
-                    udpToTun.cancel()
-                    scope.cancel()
-                },
-                sendKeepalive = {
-                    val seq = seqCounter.getAndIncrement()
-                    val ka = Argon4Crypto.sealPacketWithOptions(
-                        frameType = Argon4Crypto.FRAME_KEEPALIVE,
-                        salt = salt,
-                        psk = psk,
-                        key = c2sKey,
-                        seq = seq,
-                        plaintext = pingBytes,
-                        options = dataSealOptions,
-                    )
-                    socket.send(DatagramPacket(ka, ka.size, serverAddr))
-                },
-            )
+        // 3. Keepalive в режиме без шейпера (при активном профиле keepalive и "fb" ведёт shaper).
+        val keepalive: Job? = if (shaper == null) {
+            scope.launch {
+                val pingBytes = Argon4Profile.KEEPALIVE_PING_PAYLOAD.toByteArray(Charsets.UTF_8)
+                Argon4Timing.runIdleKeepalive(
+                    config = transport.timing,
+                    clock = clock,
+                    tracker = tracker,
+                    onError = { err ->
+                        if (isActive) {
+                            _status.value = _status.value.copy(lastError = "Ошибка keepalive туннеля: ${err.message}")
+                        }
+                        runCatching { socket.close() }
+                        runCatching { pfd.close() }
+                        tunToUdp.cancel()
+                        udpToTun.cancel()
+                        scope.cancel()
+                    },
+                    sendKeepalive = {
+                        val seq = seqCounter.getAndIncrement()
+                        val ka = Argon4Crypto.sealPacketWithOptions(
+                            frameType = Argon4Crypto.FRAME_KEEPALIVE,
+                            salt = salt,
+                            psk = psk,
+                            key = c2sKey,
+                            seq = seq,
+                            plaintext = pingBytes,
+                            options = dataSealOptions,
+                        )
+                        sendWirePacket(ka)
+                    },
+                )
+            }
+        } else {
+            null
         }
 
         try {
             tunToUdp.join()
         } finally {
-            keepalive.cancel()
+            shaper?.close()
+            keepalive?.cancel()
             udpToTun.cancel()
             tunToUdp.cancel()
             runCatching { socket.close() }

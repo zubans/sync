@@ -130,4 +130,27 @@ class CepLogicTest {
         assertEquals("pw", decoded.profiles[1].argonPassword)
         assertEquals(decoded, CepLogic.decode(CepLogic.encode(decoded)))
     }
+
+    @Test
+    fun `behavior profile defaults and round trip remain backward compatible`() {
+        val store = CepStore(
+            profiles = listOf(
+                CepProfile(
+                    id = "A5",
+                    name = "Argon Video",
+                    proto = "argon4",
+                    server = "1.2.3.4:51820",
+                    password = "pw",
+                    argonBehaviorProfile = "video-call",
+                    argonLowPowerMode = true,
+                    argonVideoCallMaxDurationSec = 3600,
+                ),
+            ),
+            chains = listOf(CepChain(id = "C5", name = "vc", hops = listOf("A5"))),
+        )
+        val decoded = CepLogic.decode(CepLogic.encode(store))
+        assertEquals("video-call", decoded.profiles.single().argonBehaviorProfile)
+        assertTrue(decoded.profiles.single().argonLowPowerMode)
+        assertEquals(3600, decoded.profiles.single().argonVideoCallMaxDurationSec)
+    }
 }

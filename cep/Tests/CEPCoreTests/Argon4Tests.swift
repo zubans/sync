@@ -179,4 +179,53 @@ final class Argon4Tests: XCTestCase {
         XCTAssertEqual(object["keepalive_min_idle_sec"] as? Int, 16)
         XCTAssertEqual(object["keepalive_max_idle_sec"] as? Int, 26)
     }
+
+    func testBehaviorProfileDefaultsAndChainValidation() throws {
+        var argon = Profile(name: "Argon", proto: .argon4)
+        argon.server = "1.2.3.4:51820"
+        argon.password = "secret"
+        XCTAssertNil(argon.argonBehaviorProfile)
+        XCTAssertFalse(argon.argonLowPowerMode)
+
+        argon.argonBehaviorProfile = "video-call"
+        argon.argonLowPowerMode = true
+        argon.argonVideoCallMaxDurationSec = 1800
+
+        let cfg = try Argon4Configuration(profile: argon, resolvedIP: "1.2.3.4", readyFile: "/tmp/ready.json", underlay: false)
+        XCTAssertEqual(cfg.behaviorProfile, "video-call")
+        XCTAssertEqual(cfg.lowPowerMode, true)
+        XCTAssertEqual(cfg.videoCallMaxDurationSec, 1800)
+
+        let jsonData = try JSONEncoder().encode(cfg)
+        let jsonObj = try XCTUnwrap(JSONSerialization.jsonObject(with: jsonData) as? [String: Any])
+        XCTAssertEqual(jsonObj["behavior_profile"] as? String, "video-call")
+        XCTAssertEqual(jsonObj["low_power_mode"] as? Bool, true)
+        XCTAssertEqual(jsonObj["video_call_max_duration_sec"] as? Int, 1800)
+
+        // Проверка совместимости в ChainValidation
+        var chain = Chain(name: "test")
+        var badArgon = argon
+        badArgon.argonProtocolVersion = 4
+        chain.hops = [badArgon.id]
+        XCTAssertFalse(ChainValidation.problems(Plan(chain: chain, profiles: [badArgon])).isEmpty)
+
+        var transit = Profile(name: "Transit", proto: .transit)
+        transit.server = "2.2.2.2:51820"
+        transit.password = "secret"
+        transit.argonBehaviorProfile = "video-call"
+
+        var tcpNext = Profile(name: "VLESS", proto: .vless)
+        tcpNext.uri = "vless://11111111-1111-1111-1111-111111111111@3.3.3.3:443#v"
+
+        var udpNext = Profile(name: "HY2", proto: .hysteria2)
+        udpNext.uri = "hysteria2://pass@3.3.3.3:443#h"
+
+        var tcpChain = Chain(name: "tcp")
+        tcpChain.hops = [transit.id, tcpNext.id]
+        XCTAssertFalse(ChainValidation.problems(Plan(chain: tcpChain, profiles: [transit, tcpNext])).isEmpty)
+
+        var udpChain = Chain(name: "udp")
+        udpChain.hops = [transit.id, udpNext.id]
+        XCTAssertTrue(ChainValidation.problems(Plan(chain: udpChain, profiles: [transit, udpNext])).isEmpty)
+    }
 }

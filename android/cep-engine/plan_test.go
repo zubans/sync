@@ -346,3 +346,55 @@ func TestArgon4V5OptionsPropagateToEndpointConfig(t *testing.T) {
 		t.Fatalf("не передан keepalive_max_idle_sec=26: %v", ep["keepalive_max_idle_sec"])
 	}
 }
+
+func TestBehaviorProfilePlanValidationAndPropagation(t *testing.T) {
+	// v4 + профиль должен отклоняться на Validate
+	badV4 := testPlan(Profile{
+		ID: "a1", Name: "Argon", Proto: "argon4", Server: "1.2.3.4", Password: "sec",
+		ArgonProtocolVersion: 4, ArgonBehaviorProfile: "baseline",
+	})
+	if res := Validate(badV4); res == "[]" {
+		t.Fatalf("ожидалась ошибка Validate для v4+profile, получено %s", res)
+	}
+
+	// video-call поверх транзита на TCP (vless) должен отклоняться
+	badTransit := mustJSON(Plan{
+		ChainName: "bad",
+		Hops: []Profile{
+			{ID: "t1", Name: "Relay", Proto: "transit", Server: "1.2.3.4:51820", Password: "sec", ArgonBehaviorProfile: "video-call"},
+			{ID: "v1", Name: "VLESS", Proto: "vless", URI: "vless://11111111-1111-1111-1111-111111111111@5.6.7.8:443#v"},
+		},
+		DNS: []string{"1.1.1.1"},
+	})
+	if res := Validate(badTransit); res == "[]" {
+		t.Fatalf("ожидалась ошибка Validate для transit(video-call)->vless(tcp), получено %s", res)
+	}
+
+	// Валидный video-call транзит на UDP-узел (hysteria2) и распространение полей в buildConfig
+	goodPlanJSON := mustJSON(Plan{
+		ChainName: "good",
+		Hops: []Profile{
+			{
+				ID: "t1", Name: "Relay", Proto: "transit", Server: "1.2.3.4:51820", Password: "sec",
+				ArgonBehaviorProfile: "video-call", ArgonLowPowerMode: true, ArgonVideoCallMaxDurationSec: 1800,
+			},
+			{ID: "h1", Name: "HY2", Proto: "hysteria2", URI: "hysteria2://pass@5.6.7.8:443#h"},
+		},
+		DNS: []string{"1.1.1.1"},
+	})
+	if res := Validate(goodPlanJSON); res != "[]" {
+		t.Fatalf("ожидалась чистая валидация UDP-цели, получено %s", res)
+	}
+	plan, err := parsePlan(goodPlanJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := buildConfig(plan, []string{"1.2.3.4", "5.6.7.8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := cfg["endpoints"].([]any)[0].(map[string]any)
+	if ep["behavior_profile"] != "video-call" || ep["low_power_mode"] != true {
+		t.Fatalf("поведенческий профиль не попал в endpoint конфиг: %v", ep)
+	}
+}

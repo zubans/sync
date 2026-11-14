@@ -34,6 +34,7 @@ func (e *argon4Endpoint) transitConfig(target, proto string) argon4.ClientConfig
 		FirstPacketProfile: e.options.FirstPacketProfile,
 		PathMTU:            e.options.PathMTU,
 		Timing:             e.options.timingConfig(),
+		Profile:            e.options.profileConfig(),
 	}
 }
 

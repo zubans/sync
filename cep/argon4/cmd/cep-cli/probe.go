@@ -63,6 +63,7 @@ func probeProfile(profile Profile) string {
 			FirstPacketProfile: profile.ArgonFirstPacketProfile,
 			PathMTU:            profile.ArgonPathMTU,
 			Timing:             timingConfigForProfile(profile),
+			Profile:            profileConfigForProfile(profile),
 		})
 		if err != nil {
 			return "ОШИБКА: " + err.Error()
@@ -86,6 +87,7 @@ func probeProfile(profile Profile) string {
 			FirstPacketProfile: profile.ArgonFirstPacketProfile,
 			PathMTU:            profile.ArgonPathMTU,
 			Timing:             timingConfigForProfile(profile),
+			Profile:            profileConfigForProfile(profile),
 		})
 		if err != nil {
 			return "ОШИБКА: " + err.Error()
@@ -115,6 +117,14 @@ func timingConfigForProfile(profile Profile) argon4.TimingConfig {
 		HandshakeMaxTimeout:     time.Duration(profile.ArgonHandshakeMaxTimeoutMs) * time.Millisecond,
 		KeepaliveMinIdle:        time.Duration(profile.ArgonKeepaliveMinIdleSec) * time.Second,
 		KeepaliveMaxIdle:        time.Duration(profile.ArgonKeepaliveMaxIdleSec) * time.Second,
+	}
+}
+
+func profileConfigForProfile(profile Profile) argon4.ProfileConfig {
+	return argon4.ProfileConfig{
+		Name:         profile.ArgonBehaviorProfile,
+		LowPowerMode: profile.ArgonLowPowerMode,
+		MaxDuration:  time.Duration(profile.ArgonVideoCallMaxDurationSec) * time.Second,
 	}
 }
 

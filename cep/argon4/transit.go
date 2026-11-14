@@ -100,6 +100,10 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 	if err != nil {
 		return nil, HandshakeResponse{}, err
 	}
+	reqProfName, reqProfVer, err := ValidateProfileRequest(ver, ModeTransit, ProtoTCP, config.Profile)
+	if err != nil {
+		return nil, HandshakeResponse{}, err
+	}
 	clk := config.Clock
 	if clk == nil {
 		clk = RealClock{}
@@ -146,8 +150,10 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 		Target:          config.Target,
 		Proto:           ProtoTCP,
 		ProtocolVersion: int(ver),
-		Capabilities:    capabilitiesForVersion(ver),
+		Capabilities:    capabilitiesForVersion(ver, reqProfVer > 0),
 		PaddingProfile:  pad.Profile,
+		BehaviorProfile: reqProfName,
+		ProfileVersion:  reqProfVer,
 	}
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
@@ -195,6 +201,9 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 		return nil, HandshakeResponse{}, fmt.Errorf("Argon4 TCP transit: ошибка JSON handshake: %w", err)
 	}
 	if err := validateHandshakeProtocol(ver, resp); err != nil {
+		return nil, HandshakeResponse{}, err
+	}
+	if _, err := VerifyClientProfileResponse(reqProfName, reqProfVer, resp, pad, timingCfg, config.Profile, rand.Reader); err != nil {
 		return nil, HandshakeResponse{}, err
 	}
 	srvPub, err := hex.DecodeString(resp.ServerPub)
@@ -401,6 +410,10 @@ func ConnectAuto(ctx context.Context, config ClientConfig, listenAddr string) (*
 	}
 
 	proto := strings.ToLower(strings.TrimSpace(config.Proto))
+	if proto != ProtoUDP && strings.EqualFold(strings.TrimSpace(config.Profile.Name), ProfileVideoCall) {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("%w: поведенческий профиль %q поддерживается в L4-транзите только при proto=udp", ErrProfileUnsupported, ProfileVideoCall)
+	}
 	if proto == ProtoUDP {
 		proxy, err := startTransitProxyWithUDP(ctx, proxyCfg, resp, listenAddr, client, false)
 		if err != nil {
@@ -462,6 +475,9 @@ func StartTransitProxy(ctx context.Context, config ClientConfig, listenAddr stri
 		return proxy, nil
 
 	default:
+		if strings.EqualFold(strings.TrimSpace(config.Profile.Name), ProfileVideoCall) {
+			return nil, fmt.Errorf("%w: поведенческий профиль %q поддерживается в L4-транзите только при proto=udp", ErrProfileUnsupported, ProfileVideoCall)
+		}
 		// Универсальный режим ("" — и TCP, и UDP на одном локальном порту): проверяем оба.
 		udpCfg := config
 		udpCfg.Proto = ProtoUDP

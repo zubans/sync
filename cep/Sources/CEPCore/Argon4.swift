@@ -20,6 +20,9 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
     public var handshakeMaxTimeoutMs: Int?
     public var keepaliveMinIdleSec: Int?
     public var keepaliveMaxIdleSec: Int?
+    public var behaviorProfile: String?
+    public var lowPowerMode: Bool?
+    public var videoCallMaxDurationSec: Int?
 
     enum CodingKeys: String, CodingKey {
         case server, password, mode, target, proto, listen
@@ -35,6 +38,9 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
         case handshakeMaxTimeoutMs = "handshake_max_timeout_ms"
         case keepaliveMinIdleSec = "keepalive_min_idle_sec"
         case keepaliveMaxIdleSec = "keepalive_max_idle_sec"
+        case behaviorProfile = "behavior_profile"
+        case lowPowerMode = "low_power_mode"
+        case videoCallMaxDurationSec = "video_call_max_duration_sec"
     }
 
     public init(
@@ -76,6 +82,10 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
         self.handshakeMaxTimeoutMs = profile.argonHandshakeMaxTimeoutMs
         self.keepaliveMinIdleSec = profile.argonKeepaliveMinIdleSec
         self.keepaliveMaxIdleSec = profile.argonKeepaliveMaxIdleSec
+        let behavior = profile.argonBehaviorProfile?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.behaviorProfile = (behavior?.isEmpty == false) ? behavior : nil
+        self.lowPowerMode = profile.argonLowPowerMode ? true : nil
+        self.videoCallMaxDurationSec = profile.argonVideoCallMaxDurationSec
     }
 }
 

@@ -51,6 +51,9 @@ type argon4Options struct {
 	HandshakeMaxTimeoutMs     int    `json:"handshake_max_timeout_ms,omitempty"`
 	KeepaliveMinIdleSec       int    `json:"keepalive_min_idle_sec,omitempty"`
 	KeepaliveMaxIdleSec       int    `json:"keepalive_max_idle_sec,omitempty"`
+	BehaviorProfile           string `json:"behavior_profile,omitempty"`
+	LowPowerMode              bool   `json:"low_power_mode,omitempty"`
+	VideoCallMaxDurationSec   int    `json:"video_call_max_duration_sec,omitempty"`
 }
 
 func (o argon4Options) timingConfig() argon4.TimingConfig {
@@ -60,6 +63,14 @@ func (o argon4Options) timingConfig() argon4.TimingConfig {
 		HandshakeMaxTimeout:     time.Duration(o.HandshakeMaxTimeoutMs) * time.Millisecond,
 		KeepaliveMinIdle:        time.Duration(o.KeepaliveMinIdleSec) * time.Second,
 		KeepaliveMaxIdle:        time.Duration(o.KeepaliveMaxIdleSec) * time.Second,
+	}
+}
+
+func (o argon4Options) profileConfig() argon4.ProfileConfig {
+	return argon4.ProfileConfig{
+		Name:         o.BehaviorProfile,
+		LowPowerMode: o.LowPowerMode,
+		MaxDuration:  time.Duration(o.VideoCallMaxDurationSec) * time.Second,
 	}
 }
 
@@ -125,6 +136,7 @@ func newArgon4Endpoint(ctx context.Context, _ adapter.Router, logger log.Context
 		FirstPacketProfile: options.FirstPacketProfile,
 		PathMTU:            options.PathMTU,
 		Timing:             options.timingConfig(),
+		Profile:            options.profileConfig(),
 	}, outboundDialer)
 	if err != nil {
 		cancelLoop()

@@ -3,7 +3,9 @@ package com.example.argontunnel.data
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import com.example.argontunnel.BuildConfig
+import com.example.argontunnel.crypto.Argon4Profile
 import com.example.argontunnel.crypto.Argon4Timing
+import com.example.argontunnel.crypto.ArgonProfileConfig
 import com.example.argontunnel.crypto.ArgonTimingConfig
 import java.net.NetworkInterface
 import java.util.Collections
@@ -148,6 +150,36 @@ class TunnelSettings(private val context: Context) {
         ),
     )
 
+    /** Поведенческий профиль трафика Argon4 (`""` = выкл., `"baseline"`, `"video-call"`). */
+    var behaviorProfile: String
+        get() = prefs.getString(KEY_BEHAVIOR_PROFILE, Argon4Profile.PROFILE_NONE).orEmpty()
+        set(value) {
+            val normalized = runCatching { Argon4Profile.normalizeBehaviorProfileName(value) }
+                .getOrDefault(Argon4Profile.PROFILE_NONE)
+            prefs.edit().putString(KEY_BEHAVIOR_PROFILE, normalized).apply()
+        }
+
+    /** Энергосберегающий режим для профиля `video-call` (меньше фоновых кадров и трафика). */
+    var lowPowerMode: Boolean
+        get() = prefs.getBoolean(KEY_LOW_POWER_MODE, false)
+        set(value) = prefs.edit().putBoolean(KEY_LOW_POWER_MODE, value).apply()
+
+    /** Максимальная длительность активной маскировки `video-call` в минутах (10..480, по умолчанию 120). */
+    var videoCallMaxMinutes: Int
+        get() = prefs.getInt(KEY_VIDEO_CALL_MAX_MINUTES, 120).coerceIn(10, 480)
+        set(value) = prefs.edit().putInt(KEY_VIDEO_CALL_MAX_MINUTES, value.coerceIn(10, 480)).apply()
+
+    /** Собирает политику поведенческого профиля из локальных настроек приложения. */
+    fun profileConfig(extraLowPower: Boolean = false): ArgonProfileConfig {
+        val norm = Argon4Profile.normalizeBehaviorProfileName(behaviorProfile)
+        return ArgonProfileConfig(
+            name = norm,
+            version = if (norm.isEmpty()) 0 else Argon4Profile.BEHAVIOR_PROFILE_VERSION,
+            maxDurationMs = if (norm == Argon4Profile.PROFILE_VIDEO_CALL) videoCallMaxMinutes * 60_000L else 0L,
+            lowPowerMode = lowPowerMode || extraLowPower,
+        )
+    }
+
     /**
      * Выбранные для маршрутизации пакеты приложений.
      * По умолчанию всегда включён Contact Sync (`com.example.contactsync`).
@@ -231,6 +263,9 @@ class TunnelSettings(private val context: Context) {
         const val KEY_HANDSHAKE_MAX_TIMEOUT_MS = "handshake_max_timeout_ms"
         const val KEY_KEEPALIVE_MIN_IDLE_MS = "keepalive_min_idle_ms"
         const val KEY_KEEPALIVE_MAX_IDLE_MS = "keepalive_max_idle_ms"
+        const val KEY_BEHAVIOR_PROFILE = "behavior_profile"
+        const val KEY_LOW_POWER_MODE = "low_power_mode"
+        const val KEY_VIDEO_CALL_MAX_MINUTES = "video_call_max_minutes"
 
         @Volatile
         private var inMemoryMasterPassword: String = ""

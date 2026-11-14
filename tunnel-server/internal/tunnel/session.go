@@ -50,6 +50,8 @@ type HandshakeRequest struct {
 	ProtocolVersion int      `json:"protocolVersion,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 	PaddingProfile  string   `json:"paddingProfile,omitempty"`
+	BehaviorProfile string   `json:"behaviorProfile,omitempty"`
+	ProfileVersion  int      `json:"profileVersion,omitempty"`
 }
 
 // HandshakeResponse возвращается сервером зашифрованным внутри кадра FrameTypeHandshakeResp.
@@ -67,6 +69,8 @@ type HandshakeResponse struct {
 	ProtocolVersion int      `json:"protocolVersion,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 	PaddingProfile  string   `json:"paddingProfile,omitempty"`
+	BehaviorProfile string   `json:"behaviorProfile,omitempty"`
+	ProfileVersion  int      `json:"profileVersion,omitempty"`
 }
 
 // ReplayWindow реализует 64-пакетное скользящее окно защиты от повтора (anti-replay) по принципу RFC 6479 / WireGuard.
@@ -133,17 +137,20 @@ type PeerSession struct {
 	S2CKey          []byte
 	ProtocolVersion byte
 	Padding         PaddingConfig
+	Profile         SessionProfile
 	MaxOuterBytes   int
 	Mode            string
 	Target          string
 	Proto           string
 	TargetConn      *net.UDPConn
+	Shaper          *TrafficShaper
 
 	stateMu    sync.RWMutex
 	remoteAddr *net.UDPAddr
 	lastSeen   time.Time
 	replay     ReplayWindow
 	s2cSeq     atomic.Uint64
+	closeOnce  sync.Once
 }
 
 func (s *PeerSession) sealOptions(defaultMaxOuter int) SealOptions {
@@ -155,18 +162,30 @@ func (s *PeerSession) sealOptions(defaultMaxOuter int) SealOptions {
 	if maxOuter <= 0 {
 		maxOuter = defaultMaxOuter
 	}
-	return SealOptions{
+	opts := SealOptions{
 		Version:       ver,
 		Padding:       s.Padding,
 		MaxOuterBytes: maxOuter,
 	}
+	if ver == ProtocolVersionV5 && s.Profile.IsActive() {
+		opts.SamplePad = s.Profile.SamplePaddingLen
+	}
+	return opts
 }
 
-// Close освобождает связанные с транзитной сессией сетевые ресурсы.
+// Close освобождает связанные с сессией сетевые ресурсы и останавливает шейпер.
 func (s *PeerSession) Close() {
-	if s != nil && s.TargetConn != nil {
-		_ = s.TargetConn.Close()
+	if s == nil {
+		return
 	}
+	s.closeOnce.Do(func() {
+		if s.Shaper != nil {
+			s.Shaper.Close()
+		}
+		if s.TargetConn != nil {
+			_ = s.TargetConn.Close()
+		}
+	})
 }
 
 // RemoteAddr возвращает копию текущего адреса для безопасного roaming без гонок с TouchSession.
@@ -392,10 +411,22 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 
 // RegisterSessionWithProtocol регистрирует сессию с зафиксированной версией протокола и распределением padding.
 func (m *SessionManager) RegisterSessionWithProtocol(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, version byte, padding PaddingConfig, maxOuter int) (*PeerSession, error) {
+	return m.RegisterSessionWithProfile(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, version, padding, SessionProfile{}, maxOuter)
+}
+
+// RegisterSessionWithProfile регистрирует сессию с зафиксированным поведенческим профилем трафика.
+func (m *SessionManager) RegisterSessionWithProfile(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, version byte, padding PaddingConfig, profile SessionProfile, maxOuter int) (*PeerSession, error) {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
 	now := m.now()
+	var reclaimedOld *PeerSession
+	defer func() {
+		if reclaimedOld != nil {
+			reclaimedOld.Close()
+		}
+	}()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -412,12 +443,14 @@ func (m *SessionManager) RegisterSessionWithProtocol(clientID string, clientAuth
 		if canReclaim {
 			sess := newPeerSession(clientID, clientAuth, existing.AssignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
 			sess.Mode = ModeTunnel
+			sess.Profile = profile
 			var ipKey [4]byte
 			copy(ipKey[:], sess.AssignedIP.To4())
 			delete(m.bySalt, existing.Salt)
 			m.bySalt[saltKey] = sess
 			m.byIP[ipKey] = sess
 			m.byClient[clientID] = sess
+			reclaimedOld = existing
 			return sess, nil
 		}
 	}
@@ -431,6 +464,7 @@ func (m *SessionManager) RegisterSessionWithProtocol(clientID string, clientAuth
 
 	sess := newPeerSession(clientID, clientAuth, assignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
 	sess.Mode = ModeTunnel
+	sess.Profile = profile
 	m.bySalt[saltKey] = sess
 	m.byIP[ipKey] = sess
 	if clientID != "" && len(clientAuth) > 0 {
@@ -447,11 +481,16 @@ func (m *SessionManager) RegisterTransitSession(clientID string, clientAuth, sal
 	if proto == ProtoTCP {
 		maxOuter = MaxTCPFrameSize
 	}
-	return m.RegisterTransitSessionWithProtocol(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, ProtocolVersionV5, DefaultPaddingConfig(), maxOuter)
+	return m.RegisterTransitSessionWithProfile(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, ProtocolVersionV5, DefaultPaddingConfig(), SessionProfile{}, maxOuter)
 }
 
 // RegisterTransitSessionWithProtocol регистрирует транзитную сессию с зафиксированной версией протокола и padding.
 func (m *SessionManager) RegisterTransitSessionWithProtocol(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, target, proto string, targetConn *net.UDPConn, version byte, padding PaddingConfig, maxOuter int) (*PeerSession, error) {
+	return m.RegisterTransitSessionWithProfile(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, version, padding, SessionProfile{}, maxOuter)
+}
+
+// RegisterTransitSessionWithProfile регистрирует транзитную сессию с зафиксированным поведенческим профилем.
+func (m *SessionManager) RegisterTransitSessionWithProfile(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, target, proto string, targetConn *net.UDPConn, version byte, padding PaddingConfig, profile SessionProfile, maxOuter int) (*PeerSession, error) {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
@@ -468,6 +507,7 @@ func (m *SessionManager) RegisterTransitSessionWithProtocol(clientID string, cli
 	sess.Target = target
 	sess.Proto = proto
 	sess.TargetConn = targetConn
+	sess.Profile = profile
 	m.bySalt[saltKey] = sess
 	return sess, nil
 }

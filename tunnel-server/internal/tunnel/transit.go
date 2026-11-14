@@ -261,6 +261,11 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 		s.logDrop(remoteAddr, "transit proto", fmt.Errorf("неизвестный протокол %q", proto))
 		return nil
 	}
+	sessionProfile, perr := s.negotiateSessionProfile(headerVersion, proto, req, sessionPad)
+	if perr != nil {
+		s.logDrop(remoteAddr, "transit behavior profile", perr)
+		return nil
+	}
 
 	// Для auto-пробы перед последующим DialTransitTCP возвращаем подтверждение режима без лишнего UDP-сокета.
 	var targetConn *net.UDPConn
@@ -278,7 +283,7 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 		targetConn = conn
 	}
 
-	peer, err := s.sessions.RegisterTransitSessionWithProtocol(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, headerVersion, sessionPad, s.maxOuterUDP)
+	peer, err := s.sessions.RegisterTransitSessionWithProfile(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, headerVersion, sessionPad, sessionProfile, s.maxOuterUDP)
 	if err != nil {
 		if targetConn != nil {
 			_ = targetConn.Close()
@@ -286,19 +291,24 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 		s.logDrop(remoteAddr, "transit register", err)
 		return nil
 	}
+	if proto == ProtoUDP {
+		s.attachSessionShaper(peer)
+	}
 
+	respMTU := EffectiveProfileTunMTU(s.cfg.MTU, sessionPad.PathMTU, headerVersion, sessionProfile)
 	resp := HandshakeResponse{
-		MTU:        s.cfg.MTU,
+		MTU:        respMTU,
 		ServerTime: now.Unix(),
 		ServerPub:  hex.EncodeToString(srvPub),
 		Mode:       ModeTransit,
 		Target:     target,
 	}
-	applyProtocolResponseFields(&resp, headerVersion, sessionPad)
+	applyProtocolResponseFields(&resp, headerVersion, sessionPad, sessionProfile)
 	respBytes, _ := json.Marshal(resp)
 	wireResp, err := SealPacketWithOptions(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes, SealOptions{
 		Version:       headerVersion,
 		Padding:       sessionPad,
+		SamplePad:     sessionProfile.SamplePaddingLen,
 		MaxOuterBytes: s.maxOuterUDP,
 	})
 	if err != nil {
@@ -309,8 +319,8 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 	if targetConn != nil {
 		go s.udpTransitReturnLoop(peer)
 	}
-	log.Printf("[argon4-server] транзитное рукопожатие ОК: клиент=%q v%d адрес=%s proto=%s цель=%s",
-		req.ClientID, headerVersion, remoteAddr, proto, target)
+	log.Printf("[argon4-server] транзитное рукопожатие ОК: клиент=%q v%d профиль=%q адрес=%s proto=%s цель=%s",
+		req.ClientID, headerVersion, sessionProfile.Name, remoteAddr, proto, target)
 	return wireResp
 }
 
@@ -331,6 +341,10 @@ func (s *Server) udpTransitReturnLoop(sess *PeerSession) {
 			}
 			s.sessions.RemoveSession(sess.Salt[:])
 			return
+		}
+		if sess.Shaper != nil {
+			_ = sess.Shaper.EnqueueReal(buf[:n])
+			continue
 		}
 		wirePkt, err := SealPacketWithOptions(FrameTypeData, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), buf[:n], opts)
 		if err != nil {
@@ -389,6 +403,11 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 		s.logDrop(remoteUDP, "tcp transit mode", ErrTransitDenied)
 		return
 	}
+	sessionProfile, perr := s.negotiateSessionProfile(headerVersion, ProtoTCP, req, sessionPad)
+	if perr != nil {
+		s.logDrop(remoteUDP, "tcp transit behavior profile", perr)
+		return
+	}
 	target, err := s.resolveTransitTarget(req.Target, req.Mode)
 	if err != nil {
 		s.logDrop(remoteUDP, "tcp transit target", err)
@@ -405,7 +424,7 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 		_ = tcpTarget.SetNoDelay(true)
 	}
 
-	sess, err := s.sessions.RegisterTransitSessionWithProtocol(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteUDP, target, ProtoTCP, nil, headerVersion, sessionPad, MaxTCPFrameSize)
+	sess, err := s.sessions.RegisterTransitSessionWithProfile(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteUDP, target, ProtoTCP, nil, headerVersion, sessionPad, sessionProfile, MaxTCPFrameSize)
 	if err != nil {
 		s.logDrop(remoteUDP, "tcp transit register", err)
 		return
@@ -419,7 +438,7 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 		Mode:       ModeTransit,
 		Target:     target,
 	}
-	applyProtocolResponseFields(&resp, headerVersion, sessionPad)
+	applyProtocolResponseFields(&resp, headerVersion, sessionPad, sessionProfile)
 	respBytes, _ := json.Marshal(resp)
 	tcpSealOpts := sess.sealOptions(MaxTCPFrameSize)
 	wireResp, err := SealPacketWithOptions(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes, tcpSealOpts)

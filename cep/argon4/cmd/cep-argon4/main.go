@@ -37,6 +37,9 @@ type configuration struct {
 	HandshakeMaxTimeoutMs     int    `json:"handshake_max_timeout_ms,omitempty"`
 	KeepaliveMinIdleSec       int    `json:"keepalive_min_idle_sec,omitempty"`
 	KeepaliveMaxIdleSec       int    `json:"keepalive_max_idle_sec,omitempty"`
+	BehaviorProfile           string `json:"behavior_profile,omitempty"`
+	LowPowerMode              bool   `json:"low_power_mode,omitempty"`
+	VideoCallMaxDurationSec   int    `json:"video_call_max_duration_sec,omitempty"`
 }
 
 type readyStatus struct {
@@ -106,6 +109,11 @@ func run(configPath string) error {
 			HandshakeMaxTimeout:     time.Duration(config.HandshakeMaxTimeoutMs) * time.Millisecond,
 			KeepaliveMinIdle:        time.Duration(config.KeepaliveMinIdleSec) * time.Second,
 			KeepaliveMaxIdle:        time.Duration(config.KeepaliveMaxIdleSec) * time.Second,
+		},
+		Profile: argon4.ProfileConfig{
+			Name:         config.BehaviorProfile,
+			LowPowerMode: config.LowPowerMode,
+			MaxDuration:  time.Duration(config.VideoCallMaxDurationSec) * time.Second,
 		},
 	}
 

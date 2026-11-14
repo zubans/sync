@@ -33,6 +33,9 @@ func main() {
 		paddingProfile        = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль padding v5 (balanced, compact, wide)")
 		firstPacketProfile    = flag.String("first-packet-profile", envOr("ARGON_FIRST_PACKET_PROFILE", ""), "Профиль padding первого handshake-пакета")
 		pathMTU               = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU")
+		behaviorProfile       = flag.String("behavior-profile", envOr("ARGON_BEHAVIOR_PROFILE", ""), "Явный поведенческий профиль трафика v5 (пусто, baseline, video-call)")
+		lowPowerMode          = flag.Bool("low-power", envOr("ARGON_LOW_POWER", "0") == "1", "Экономный режим (снижает служебный трафик профиля video-call)")
+		videoCallMaxDuration  = flag.Duration("video-call-max-duration", envDurationOr("ARGON_VIDEO_CALL_MAX_DURATION", tunnel.DefaultVideoCallMaxDuration), "Предельная длительность активного режима video-call")
 		hsMaxAttempts         = flag.Int("handshake-max-attempts", envIntOr("ARGON_HANDSHAKE_MAX_ATTEMPTS", 0), "Максимум попыток UDP-рукопожатия")
 		hsInitialTimeout      = flag.Duration("handshake-initial-timeout", envDurationOr("ARGON_HANDSHAKE_INITIAL_TIMEOUT", 0), "Начальный таймаут ожидания ответа handshake (exponential backoff)")
 		hsMaxTimeout          = flag.Duration("handshake-max-timeout", envDurationOr("ARGON_HANDSHAKE_MAX_TIMEOUT", 0), "Потолок таймаута одной попытки handshake")
@@ -72,6 +75,18 @@ func main() {
 		}
 	}
 	maxOuterUDP := tunnel.MaxOuterBytesForPathMTU(sessionPad.PathMTU)
+	profileCfg := tunnel.ProfileConfig{
+		Name:         *behaviorProfile,
+		MaxDuration:  *videoCallMaxDuration,
+		LowPowerMode: *lowPowerMode,
+	}
+	reqProfileName, reqProfileVer, err := tunnel.ValidateProfileRequest(effVersion, tunnel.ModeTunnel, tunnel.ProtoUDP, profileCfg)
+	if err != nil {
+		log.Fatalf("Некорректный поведенческий профиль: %v", err)
+	}
+	if reqProfileName == tunnel.ProfileVideoCall {
+		log.Printf("[argon4-client] ВНИМАНИЕ: %s (лимит сеанса=%v)", tunnel.VideoCallWarning, *videoCallMaxDuration)
+	}
 
 	remoteUDP, err := net.ResolveUDPAddr("udp4", *serverAddr)
 	if err != nil {
@@ -117,8 +132,12 @@ func main() {
 		ProtocolVersion: int(effVersion),
 	}
 	if effVersion == tunnel.ProtocolVersionV5 {
-		hsReq.Capabilities = []string{"pad-v5"}
+		hsReq.Capabilities = tunnel.CapabilitiesForVersion(effVersion, true)
 		hsReq.PaddingProfile = sessionPad.Profile
+		if reqProfileName != "" || reqProfileVer > 0 {
+			hsReq.BehaviorProfile = reqProfileName
+			hsReq.ProfileVersion = reqProfileVer
+		}
 	}
 	reqBytes, _ := json.Marshal(hsReq)
 	wireReq, err := tunnel.SealPacketWithOptions(tunnel.FrameTypeHandshakeReq, salt, psk, hsKey, 1, reqBytes, tunnel.SealOptions{
@@ -174,13 +193,21 @@ func main() {
 	log.Printf("[argon4-client] рукопожатие ОК: assignedIP=%s/%d serverIP=%s mtu=%d routes=%v",
 		hsResp.AssignedIP, hsResp.SubnetCidr, hsResp.ServerIP, hsResp.MTU, hsResp.Routes)
 
+	sessionProfile, err := tunnel.VerifyClientProfileResponse(reqProfileName, reqProfileVer, hsResp, sessionPad, timingCfg, profileCfg, nil)
+	if err != nil {
+		log.Fatalf("Несовместимый поведенческий профиль сервера: %v", err)
+	}
 	var c2sSeq atomic.Uint64
 	var replay tunnel.ReplayWindow
 
 	sealOpts := tunnel.SealOptions{
 		Version:       effVersion,
 		Padding:       sessionPad,
+		SamplePad:     sessionProfile.SamplePaddingLen,
 		MaxOuterBytes: maxOuterUDP,
+	}
+	if !sessionProfile.IsActive() {
+		sealOpts.SamplePad = nil
 	}
 	openOpts := tunnel.OpenOptions{
 		ExpectedVersion: effVersion,
@@ -234,8 +261,38 @@ func main() {
 		<-kaDone
 	}()
 
+	var shaper *tunnel.TrafficShaper
+	if sessionProfile.IsActive() {
+		shaper = tunnel.NewTrafficShaper(tunnel.ShaperOptions{
+			Profile:          sessionProfile,
+			Salt:             salt,
+			PSK:              psk,
+			Key:              c2sKey,
+			Version:          effVersion,
+			MaxOuterBytes:    maxOuterUDP,
+			NextSeq:          func() uint64 { return c2sSeq.Add(1) },
+			Tracker:          tracker,
+			KeepaliveEnabled: true,
+			WriteWire: func(wire []byte) error {
+				_, werr := conn.Write(wire)
+				return werr
+			},
+			OnFatalError: func(kerr error) {
+				if loopCtx.Err() == nil {
+					log.Printf("[argon4-client] shaper: %v", kerr)
+				}
+			},
+		})
+		shaper.Start()
+		defer shaper.Close()
+	}
+
 	go func() {
 		defer close(kaDone)
+		if shaper != nil {
+			<-loopCtx.Done()
+			return
+		}
 		tunnel.RunIdleKeepalive(loopCtx, tunnel.KeepaliveOptions{
 			Timing:  timingCfg,
 			Tracker: tracker,
@@ -263,6 +320,10 @@ func main() {
 			if rerr != nil {
 				return
 			}
+			if shaper != nil {
+				_ = shaper.EnqueueReal(tunBuf[:rn])
+				continue
+			}
 			wire, serr := tunnel.SealPacketWithOptions(tunnel.FrameTypeData, salt, psk, c2sKey, c2sSeq.Add(1), tunBuf[:rn], sealOpts)
 			if serr == nil {
 				if _, werr := conn.Write(wire); werr == nil {
@@ -280,8 +341,28 @@ func main() {
 				return
 			}
 			opened, oerr := tunnel.OpenPacketWithOptions(udpBuf[:rn], psk, s2cKey, openOpts)
-			if oerr == nil && opened.FrameType == tunnel.FrameTypeData && replay.Accept(opened.Seq) && len(opened.Plaintext) > 0 {
-				_, _ = tunDev.Write(opened.Plaintext)
+			if oerr != nil || !replay.Accept(opened.Seq) {
+				continue
+			}
+			switch opened.FrameType {
+			case tunnel.FrameTypeData:
+				if shaper != nil {
+					shaper.RecordInboundActivity()
+				}
+				if len(opened.Plaintext) > 0 {
+					_, _ = tunDev.Write(opened.Plaintext)
+				}
+			case tunnel.FrameTypeBatch:
+				if subs, berr := tunnel.UnpackBatchPlaintext(opened.Plaintext, maxOuterUDP-tunnel.OverheadV5); berr == nil {
+					if shaper != nil {
+						shaper.RecordInboundActivity()
+					}
+					for _, sub := range subs {
+						if len(sub) > 0 {
+							_, _ = tunDev.Write(sub)
+						}
+					}
+				}
 			}
 		}
 	}()

@@ -430,6 +430,27 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
                 item { Field("Секрет клиента Argon4", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
             }
         }
+        if (proto == VpnProtocol.ARGON4 || proto == VpnProtocol.TRANSIT || p.useArgon) {
+            item {
+                ArgonBehaviorProfilePicker(p.argonBehaviorProfile.orEmpty()) { selected ->
+                    save(p.copy(argonBehaviorProfile = selected.ifBlank { null }))
+                }
+            }
+            if (p.argonBehaviorProfile == "video-call") {
+                item {
+                    LabeledSwitch("Режим экономии заряда Argon4", p.argonLowPowerMode) {
+                        save(p.copy(argonLowPowerMode = it))
+                    }
+                }
+                item {
+                    Text(
+                        "Предупреждение: профиль video-call увеличивает служебный трафик, добавленную задержку (до ~18 мс) и расход батареи; авто-снижение до baseline через 2 часа. Не скрывает IP сервера и активный режим связи.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
         if (proto != VpnProtocol.TRANSIT) {
             item {
                 Field(
@@ -453,6 +474,25 @@ private fun FlavorPicker(value: String, onChange: (String) -> Unit) {
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             OpenConnectFlavor.entries.forEach { f ->
                 DropdownMenuItem(text = { Text(f.title) }, onClick = { open = false; onChange(f.raw) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArgonBehaviorProfilePicker(value: String, onChange: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val options = listOf(
+        "" to "Отключён (по умолчанию)",
+        "baseline" to "Базовый (baseline)",
+        "video-call" to "Видеозвонок (video-call)",
+    )
+    val title = options.firstOrNull { it.first == value }?.second ?: value
+    Box {
+        OutlinedButton(onClick = { open = true }) { Text("Поведенческий профиль Argon4: $title") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (raw, label) ->
+                DropdownMenuItem(text = { Text(label) }, onClick = { open = false; onChange(raw) })
             }
         }
     }

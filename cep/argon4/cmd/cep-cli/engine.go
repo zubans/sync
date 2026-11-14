@@ -384,6 +384,15 @@ func (e *Engine) startArgon(index int, profile Profile, ip string, portOverride 
 	if profile.ArgonKeepaliveMaxIdleSec != 0 {
 		configuration["keepalive_max_idle_sec"] = profile.ArgonKeepaliveMaxIdleSec
 	}
+	if profile.ArgonBehaviorProfile != "" {
+		configuration["behavior_profile"] = profile.ArgonBehaviorProfile
+	}
+	if profile.ArgonLowPowerMode {
+		configuration["low_power_mode"] = true
+	}
+	if profile.ArgonVideoCallMaxDurationSec != 0 {
+		configuration["video_call_max_duration_sec"] = profile.ArgonVideoCallMaxDurationSec
+	}
 	configFile := e.privateFile(index, "argon.json")
 	if underlay {
 		configFile = e.privateFile(index, "argon-underlay.json")

@@ -80,6 +80,28 @@ struct ProfileEditor: View {
                     Text("Трафик к этому узлу (порт 51820) или через предыдущий транзитный шлюз дополнительно шифруется Argon4 (туннель или L4-транзит). Для пустого Client ID используется идентификатор профиля.")
                 }
             }
+            if p.wrappedValue.proto == .argon4 || p.wrappedValue.proto == .transit || p.wrappedValue.useArgon {
+                let profileBinding = Binding<String>(
+                    get: { p.wrappedValue.argonBehaviorProfile ?? "" },
+                    set: { p.wrappedValue.argonBehaviorProfile = $0.isEmpty ? nil : $0 }
+                )
+                Section("Поведенческий профиль Argon4") {
+                    Picker("Профиль трафика", selection: profileBinding) {
+                        Text("Отключён (по умолчанию)").tag("")
+                        Text("Базовый (baseline)").tag("baseline")
+                        Text("Видеозвонок (video-call)").tag("video-call")
+                    }
+                    if p.wrappedValue.argonBehaviorProfile == "video-call" {
+                        Toggle("Режим экономии заряда (редкие паузы/без фонового feedback)", isOn: p.argonLowPowerMode)
+                        Label(
+                            "Включает имитацию burst/feedback медиапотока поверх Argon4 v5 UDP: увеличивает служебный трафик, добавляет до ~18 мс задержки и повышенный расход батареи; авто-снижение до baseline через 2 часа. Не скрывает IP сервера и активный режим связи.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
+                }
+            }
             if p.wrappedValue.proto != .transit {
                 Section {
                     TextField("Сети", text: p.routes, prompt: Text("192.168.1.119, 10.0.0.0/8"))

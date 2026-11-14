@@ -227,7 +227,8 @@ object Argon4Timing {
                 err.kind == Argon4ErrorKind.BAD_VERSION ||
                 err.kind == Argon4ErrorKind.INVALID_PADDING ||
                 err.kind == Argon4ErrorKind.INVALID_ENVELOPE ||
-                err.kind == Argon4ErrorKind.TRAILING_DATA
+                err.kind == Argon4ErrorKind.TRAILING_DATA ||
+                err.kind == Argon4ErrorKind.PROFILE_UNSUPPORTED
         }
         return false
     }
