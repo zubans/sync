@@ -47,10 +47,14 @@ func main() {
 		mtu          = flag.Int("mtu", envIntOr("ARGON_MTU", 1380), "MTU виртуального интерфейса TUN")
 		dnsList      = flag.String("dns", envOr("ARGON_DNS", "1.1.1.1,8.8.8.8"), "DNS-серверы через запятую для передачи клиентам")
 		routesList   = flag.String("routes", envOr("ARGON_ROUTES", "0.0.0.0/0"), "Маршруты CIDR через запятую для передачи клиентам")
-		mode         = flag.String("mode", envOr("ARGON_MODE", tunnel.ModeTunnel), "Режим сервера: tunnel (L3 TUN) или transit (L4 UDP/TCP-ретранслятор без TUN)")
-		transitDest  = flag.String("transit-target", envOr("ARGON_TRANSIT_TARGET", ""), "Фиксированная цель транзита host:port (используется по умолчанию и обязательна для -transit-blind)")
-		transitAllow = flag.String("transit-allow", envOr("ARGON_TRANSIT_ALLOW", ""), "Список разрешённых целей транзита через запятую (CIDR, host, host:port, *:port или *)")
-		transitBlind = flag.Bool("transit-blind", envOr("ARGON_TRANSIT_BLIND", "0") == "1", "Слепой L4-транзит к -transit-target без расшифровки Argon4 (не требует пароля)")
+		mode            = flag.String("mode", envOr("ARGON_MODE", tunnel.ModeTunnel), "Режим сервера: tunnel (L3 TUN) или transit (L4 UDP/TCP-ретранслятор без TUN)")
+		transitDest     = flag.String("transit-target", envOr("ARGON_TRANSIT_TARGET", ""), "Фиксированная цель транзита host:port (используется по умолчанию и обязательна для -transit-blind)")
+		transitAllow    = flag.String("transit-allow", envOr("ARGON_TRANSIT_ALLOW", ""), "Список разрешённых целей транзита через запятую (CIDR, host, host:port, *:port или *)")
+		transitBlind    = flag.Bool("transit-blind", envOr("ARGON_TRANSIT_BLIND", "0") == "1", "Слепой L4-транзит к -transit-target без расшифровки Argon4 (не требует пароля)")
+		protoVersion    = flag.Int("protocol-version", envIntOr("ARGON_PROTOCOL_VERSION", int(tunnel.ProtocolVersionV5)), "Основная версия протокола Argon4 (4 или 5)")
+		allowV4         = flag.Bool("allow-v4", envOr("ARGON_ALLOW_V4", "1") == "1", "Разрешать приём legacy-сессий Argon4 v4 для обратной совместимости (без downgrade активных v5)")
+		paddingProfile  = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль распределения padding v5 (balanced, compact, wide)")
+		pathMTU         = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU для ограничения длины padding UDP-датаграмм")
 	)
 	flag.Parse()
 
@@ -62,6 +66,9 @@ func main() {
 		log.Fatal("Не задан мастер-пароль: укажите флаг -password или переменную окружения ARGON_MASTER_PASSWORD")
 	}
 
+	effVersion := byte(*protoVersion)
+	effectiveTunMTU := tunnel.EffectiveTunMTU(*mtu, *pathMTU, effVersion)
+
 	var tunDev *tunnel.TunDevice
 	var err error
 	if serverMode != tunnel.ModeTransit && !*noTun {
@@ -71,11 +78,11 @@ func main() {
 		}
 		serverIP := strings.Split(*subnetCIDR, "/")[0]
 		resolvedBackend := resolveBackend(*backendDest)
-		if err := tunnel.ConfigureInterface(tunDev.Name(), *subnetCIDR, serverIP, *mtu, *outIface, *enableNAT, resolvedBackend); err != nil {
+		if err := tunnel.ConfigureInterface(tunDev.Name(), *subnetCIDR, serverIP, effectiveTunMTU, *outIface, *enableNAT, resolvedBackend); err != nil {
 			log.Fatalf("Не удалось настроить TUN-интерфейс %q: %v", tunDev.Name(), err)
 		}
 		fmt.Printf("[argon4-server] TUN-интерфейс %s настроен (%s, mtu=%d, nat=%v, out=%q, backend=%q)\n",
-			tunDev.Name(), *subnetCIDR, *mtu, *enableNAT, *outIface, resolvedBackend)
+			tunDev.Name(), *subnetCIDR, effectiveTunMTU, *enableNAT, *outIface, resolvedBackend)
 	}
 
 	cfg := tunnel.ServerConfig{
@@ -91,13 +98,19 @@ func main() {
 			Memory:  uint32(*argonMem),
 			Threads: uint8(*argonLanes),
 		},
-		MTU:           *mtu,
-		DNS:           splitTrim(*dnsList),
-		Routes:        splitTrim(*routesList),
-		Mode:          serverMode,
-		TransitTarget: strings.TrimSpace(*transitDest),
-		TransitAllow:  splitTrim(*transitAllow),
-		TransitBlind:  *transitBlind,
+		MTU:             effectiveTunMTU,
+		DNS:             splitTrim(*dnsList),
+		Routes:          splitTrim(*routesList),
+		Mode:            serverMode,
+		TransitTarget:   strings.TrimSpace(*transitDest),
+		TransitAllow:    splitTrim(*transitAllow),
+		TransitBlind:    *transitBlind,
+		ProtocolVersion: effVersion,
+		DisallowV4:      !*allowV4,
+		Padding: tunnel.PaddingConfig{
+			Profile: *paddingProfile,
+			PathMTU: *pathMTU,
+		},
 	}
 
 	var srv *tunnel.Server

@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	// Версия протокола ("Argon 4" tunnel envelope v4)
-	ProtocolVersion byte = 0x04
+	// Версии протокола Argon4: v4 (базовая без padding) и v5 (аутентифицированный padding переменной длины).
+	ProtocolVersionV4 byte = 0x04
+	ProtocolVersionV5 byte = 0x05
+	ProtocolVersion   byte = ProtocolVersionV5
 
 	// Типы кадров протокола Argon4
 	FrameTypeHandshakeReq  byte = 0x01
@@ -42,11 +44,16 @@ var (
 	// Фиксированная доменная соль для быстрого ключа заголовка (PSK), защищающего от DoS и сигнатур DPI.
 	pskDomainSalt = []byte("argon4-psk-v4-01")
 
-	ErrPacketTooShort   = errors.New("пакет туннеля слишком короткий")
-	ErrBadVersion       = errors.New("неподдерживаемая версия протокола")
-	ErrHeaderAuthFailed = errors.New("ошибка проверки заголовка пакета по мастер-паролю")
-	ErrAuthFailed       = errors.New("ошибка проверки подлинности / расшифровки по мастер-паролю")
-	ErrReplayPacket     = errors.New("обнаружен повтор пакета (replay)")
+	ErrPacketTooShort    = errors.New("пакет туннеля слишком короткий")
+	ErrBadVersion        = errors.New("неподдерживаемая версия протокола")
+	ErrHeaderAuthFailed  = errors.New("ошибка проверки заголовка пакета по мастер-паролю")
+	ErrAuthFailed        = errors.New("ошибка проверки подлинности / расшифровки по мастер-паролю")
+	ErrReplayPacket      = errors.New("обнаружен повтор пакета (replay)")
+	ErrInvalidPadding    = errors.New("повреждённый или некорректный padding кадра")
+	ErrInvalidEnvelope   = errors.New("некорректная длина или структура конверта кадра")
+	ErrTrailingData      = errors.New("обнаружены лишние байты после полезной нагрузки и padding")
+	ErrMTUExceeded       = errors.New("длина пакета или padding превышает допустимый path MTU")
+	ErrDowngradeRejected = errors.New("обнаружена попытка понижения версии протокола (downgrade)")
 )
 
 // ArgonParams задаёт параметры вывода ключа Argon2id (время, память в КиБ и параллелизм).
@@ -157,13 +164,48 @@ func BuildAAD(version, frameType byte, salt []byte, seq uint64) []byte {
 	return aad
 }
 
-// SealPacketWithSeq шифрует полезную нагрузку в кадр протокола Argon4 с обфускацией заголовка и монотонным счётчиком seq.
+// SealOptions задаёт версию протокола, профиль padding и предельный размер внешнего кадра.
+type SealOptions struct {
+	Version       byte
+	Padding       PaddingConfig
+	UseFixedPad   bool
+	FixedPadding  int
+	MaxOuterBytes int
+}
+
+// OpenOptions задаёт политику проверки версии, совместимости и границ MTU при разборе кадра.
+type OpenOptions struct {
+	ExpectedVersion byte
+	AllowV4         bool
+	MaxOuterBytes   int
+	MaxPayloadBytes int
+}
+
+// OpenedPacket представляет расшифрованный и проверенный кадр Argon4.
+type OpenedPacket struct {
+	Version   byte
+	FrameType byte
+	Salt      []byte
+	Seq       uint64
+	Plaintext []byte
+}
+
+// SealPacketWithSeq шифрует полезную нагрузку в кадр протокола Argon4 (по умолчанию v5 с переменным padding).
+func SealPacketWithSeq(frameType byte, salt, psk, key []byte, seq uint64, plaintext []byte) ([]byte, error) {
+	return SealPacketWithOptions(frameType, salt, psk, key, seq, plaintext, SealOptions{
+		Version:       ProtocolVersionV5,
+		Padding:       DefaultPaddingConfig(),
+		MaxOuterBytes: MaxTCPFrameSize,
+	})
+}
+
+// SealPacketWithOptions шифрует кадр Argon4 v4 или v5 с явной версией, padding и проверкой внешнего MTU.
 // На проводе заголовок полностью неотличим от случайного шума (без открытых байт версии или типа кадра):
 //
 //	[0..16]   Соль сессии (16 случайных байт)
 //	[16..30]  Замаскированные метаданные: (Version[1] || FrameType[1] || AuthCheck[4] || Seq[8]) XOR HMAC(psk, salt)
 //	[30..]    Шифротекст AES-256-GCM + тег аутентификации (16 байт)
-func SealPacketWithSeq(frameType byte, salt, psk, key []byte, seq uint64, plaintext []byte) ([]byte, error) {
+func SealPacketWithOptions(frameType byte, salt, psk, key []byte, seq uint64, plaintext []byte, opts SealOptions) ([]byte, error) {
 	if len(salt) != SaltSize {
 		return nil, fmt.Errorf("некорректная длина соли: %d", len(salt))
 	}
@@ -173,6 +215,42 @@ func SealPacketWithSeq(frameType byte, salt, psk, key []byte, seq uint64, plaint
 	if seq == 0 {
 		return nil, errors.New("счётчик пакета seq должен быть >= 1")
 	}
+	version := opts.Version
+	if version == 0 {
+		version = ProtocolVersionV5
+	}
+	if version != ProtocolVersionV4 && version != ProtocolVersionV5 {
+		return nil, fmt.Errorf("%w: 0x%02x", ErrBadVersion, version)
+	}
+
+	maxOuter := opts.MaxOuterBytes
+	if maxOuter <= 0 {
+		maxOuter = MaxOuterBytesForPathMTU(opts.Padding.PathMTU)
+	}
+
+	var envelope []byte
+	if version == ProtocolVersionV5 {
+		var padLen int
+		var err error
+		if opts.UseFixedPad {
+			padLen = opts.FixedPadding
+		} else {
+			padLen, err = SamplePaddingLen(opts.Padding, len(plaintext), maxOuter)
+			if err != nil {
+				return nil, err
+			}
+		}
+		envelope, err = PackEnvelopeV5(plaintext, padLen, maxOuter)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if maxOuter > 0 && OverheadV4+len(plaintext) > maxOuter {
+			return nil, fmt.Errorf("%w: кадр v4 (%d байт) превышает лимит %d байт", ErrMTUExceeded, OverheadV4+len(plaintext), maxOuter)
+		}
+		envelope = plaintext
+	}
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -183,10 +261,10 @@ func SealPacketWithSeq(frameType byte, salt, psk, key []byte, seq uint64, plaint
 	}
 
 	var meta [MetaSize]byte
-	meta[0] = ProtocolVersion
+	meta[0] = version
 	meta[1] = frameType
 	binary.BigEndian.PutUint64(meta[6:14], seq)
-	chk := computeHeaderCheck(psk, salt, ProtocolVersion, frameType, meta[6:14])
+	chk := computeHeaderCheck(psk, salt, version, frameType, meta[6:14])
 	copy(meta[2:6], chk[:])
 
 	// 12-байтный nonce для AES-256-GCM: AuthCheck[4] || Seq[8]
@@ -194,21 +272,21 @@ func SealPacketWithSeq(frameType byte, salt, psk, key []byte, seq uint64, plaint
 	copy(nonce[:], meta[2:14])
 
 	mask := computeHeaderMask(psk, salt)
-	out := make([]byte, HeaderSize, HeaderSize+len(plaintext)+TagSize)
+	out := make([]byte, HeaderSize, HeaderSize+len(envelope)+TagSize)
 	copy(out[0:SaltSize], salt)
 	for i := 0; i < MetaSize; i++ {
 		out[SaltSize+i] = meta[i] ^ mask[i]
 	}
 
-	aad := BuildAAD(ProtocolVersion, frameType, salt, seq)
-	out = gcm.Seal(out, nonce[:], plaintext, aad)
+	aad := BuildAAD(version, frameType, salt, seq)
+	out = gcm.Seal(out, nonce[:], envelope, aad)
 	return out, nil
 }
 
-// ParseAndVerifyHeader снимает маску с заголовка кадра Argon4 и проверяет 4-байтный код подлинности заголовка по PSK.
+// ParseAndVerifyHeader снимает маску с заголовка кадра Argon4 (v4/v5) и проверяет 4-байтный код подлинности заголовка по PSK.
 // Выполняется за <1 мкс и позволяет отбросить любой чужой/мусорный UDP-пакет без запуска Argon2id.
 func ParseAndVerifyHeader(packet, psk []byte) (version, frameType byte, salt []byte, nonce [NonceSize]byte, seq uint64, ciphertext []byte, err error) {
-	if len(packet) < HeaderSize+TagSize {
+	if len(packet) < OverheadV4 {
 		return 0, 0, nil, nonce, 0, nil, ErrPacketTooShort
 	}
 	if len(psk) != KeySize {
@@ -221,7 +299,7 @@ func ParseAndVerifyHeader(packet, psk []byte) (version, frameType byte, salt []b
 		meta[i] = packet[SaltSize+i] ^ mask[i]
 	}
 	version = meta[0]
-	if version != ProtocolVersion {
+	if version != ProtocolVersionV4 && version != ProtocolVersionV5 {
 		return 0, 0, nil, nonce, 0, nil, ErrBadVersion
 	}
 	frameType = meta[1]
@@ -236,29 +314,78 @@ func ParseAndVerifyHeader(packet, psk []byte) (version, frameType byte, salt []b
 	if subtle.ConstantTimeCompare(meta[2:6], expectedChk[:]) != 1 {
 		return 0, 0, nil, nonce, 0, nil, ErrHeaderAuthFailed
 	}
+	if version == ProtocolVersionV5 && len(packet) < OverheadV5 {
+		return 0, 0, nil, nonce, 0, nil, ErrPacketTooShort
+	}
 	copy(nonce[:], meta[2:14])
 	ciphertext = packet[HeaderSize:]
 	return version, frameType, salt, nonce, seq, ciphertext, nil
 }
 
-// OpenPacketWithKey проверяет заголовок и расшифровывает кадр Argon4 указанным ключом (рукопожатия или направления).
+// OpenPacketWithKey проверяет заголовок и расшифровывает кадр Argon4 v4 или v5 указанным ключом.
 func OpenPacketWithKey(packet, psk, key []byte) (frameType byte, salt []byte, seq uint64, plaintext []byte, err error) {
-	version, fType, s, nonce, pktSeq, ciphertext, err := ParseAndVerifyHeader(packet, psk)
+	opened, err := OpenPacketWithOptions(packet, psk, key, OpenOptions{
+		AllowV4:       true,
+		MaxOuterBytes: MaxTCPFrameSize,
+	})
 	if err != nil {
 		return 0, nil, 0, nil, err
 	}
+	return opened.FrameType, opened.Salt, opened.Seq, opened.Plaintext, nil
+}
+
+// OpenPacketWithOptions проверяет ограничения размера/версии, заголовок PSK, тег GCM и конверт padding.
+func OpenPacketWithOptions(packet, psk, key []byte, opts OpenOptions) (OpenedPacket, error) {
+	if opts.MaxOuterBytes > 0 && len(packet) > opts.MaxOuterBytes {
+		return OpenedPacket{}, fmt.Errorf("%w: входящий кадр %d байт превышает предел %d байт", ErrMTUExceeded, len(packet), opts.MaxOuterBytes)
+	}
+	version, fType, s, nonce, pktSeq, ciphertext, err := ParseAndVerifyHeader(packet, psk)
+	if err != nil {
+		return OpenedPacket{}, err
+	}
+	if opts.ExpectedVersion != 0 {
+		if version != opts.ExpectedVersion {
+			if opts.ExpectedVersion == ProtocolVersionV5 && version == ProtocolVersionV4 {
+				return OpenedPacket{}, ErrDowngradeRejected
+			}
+			return OpenedPacket{}, ErrBadVersion
+		}
+	} else if version == ProtocolVersionV4 && !opts.AllowV4 {
+		return OpenedPacket{}, ErrBadVersion
+	}
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return 0, nil, 0, nil, err
+		return OpenedPacket{}, err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return 0, nil, 0, nil, err
+		return OpenedPacket{}, err
 	}
 	aad := BuildAAD(version, fType, s, pktSeq)
 	pt, err := gcm.Open(nil, nonce[:], ciphertext, aad)
 	if err != nil {
-		return 0, nil, 0, nil, ErrAuthFailed
+		return OpenedPacket{}, ErrAuthFailed
 	}
-	return fType, s, pktSeq, pt, nil
+
+	var payload []byte
+	if version == ProtocolVersionV5 {
+		payload, err = UnpackEnvelopeV5(pt, opts.MaxPayloadBytes)
+		if err != nil {
+			return OpenedPacket{}, err
+		}
+	} else {
+		if opts.MaxPayloadBytes > 0 && len(pt) > opts.MaxPayloadBytes {
+			return OpenedPacket{}, fmt.Errorf("%w: полезная нагрузка %d байт превышает предел %d", ErrMTUExceeded, len(pt), opts.MaxPayloadBytes)
+		}
+		payload = pt
+	}
+
+	return OpenedPacket{
+		Version:   version,
+		FrameType: fType,
+		Salt:      s,
+		Seq:       pktSeq,
+		Plaintext: payload,
+	}, nil
 }

@@ -357,6 +357,18 @@ func (e *Engine) startArgon(index int, profile Profile, ip string, portOverride 
 	if listen != "" {
 		configuration["listen"] = listen
 	}
+	if profile.ArgonProtocolVersion != 0 {
+		configuration["protocol_version"] = profile.ArgonProtocolVersion
+	}
+	if profile.ArgonPaddingProfile != "" {
+		configuration["padding_profile"] = profile.ArgonPaddingProfile
+	}
+	if profile.ArgonFirstPacketProfile != "" {
+		configuration["first_packet_profile"] = profile.ArgonFirstPacketProfile
+	}
+	if profile.ArgonPathMTU != 0 {
+		configuration["path_mtu"] = profile.ArgonPathMTU
+	}
 	configFile := e.privateFile(index, "argon.json")
 	if underlay {
 		configFile = e.privateFile(index, "argon-underlay.json")

@@ -80,6 +80,26 @@ class TunnelSettings(private val context: Context) {
         }.getOrDefault(RoutingMode.SELECTED_APPS)
         set(value) = prefs.edit().putString(KEY_ROUTING_MODE, value.name).apply()
 
+    /** Версия протокола Argon4 (`4` или `5`, по умолчанию `5` с аутентифицированным padding). */
+    var protocolVersion: Int
+        get() = prefs.getInt(KEY_PROTOCOL_VERSION, 5)
+        set(value) = prefs.edit().putInt(KEY_PROTOCOL_VERSION, if (value == 4) 4 else 5).apply()
+
+    /** Профиль распределения переменной длины padding (`balanced`, `compact`, `wide`). */
+    var paddingProfile: String
+        get() = prefs.getString(KEY_PADDING_PROFILE, "balanced")?.ifBlank { "balanced" } ?: "balanced"
+        set(value) = prefs.edit().putString(KEY_PADDING_PROFILE, value.trim().lowercase().ifEmpty { "balanced" }).apply()
+
+    /** Отдельный профиль padding для первого handshake-пакета (пусто = равен paddingProfile). */
+    var firstPacketProfile: String
+        get() = prefs.getString(KEY_FIRST_PACKET_PROFILE, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_FIRST_PACKET_PROFILE, value.trim().lowercase()).apply()
+
+    /** Ограничение внешнего path MTU для предотвращения фрагментации UDP-кадров v5. */
+    var pathMtu: Int
+        get() = prefs.getInt(KEY_PATH_MTU, 1500)
+        set(value) = prefs.edit().putInt(KEY_PATH_MTU, value.coerceIn(576, 9000)).apply()
+
     /**
      * Выбранные для маршрутизации пакеты приложений.
      * По умолчанию всегда включён Contact Sync (`com.example.contactsync`).
@@ -154,6 +174,10 @@ class TunnelSettings(private val context: Context) {
         const val KEY_TUN_NAME = "tun_name"
         const val KEY_ROUTING_MODE = "routing_mode"
         const val KEY_SELECTED_PACKAGES = "selected_packages"
+        const val KEY_PROTOCOL_VERSION = "protocol_version"
+        const val KEY_PADDING_PROFILE = "padding_profile"
+        const val KEY_FIRST_PACKET_PROFILE = "first_packet_profile"
+        const val KEY_PATH_MTU = "path_mtu"
 
         @Volatile
         private var inMemoryMasterPassword: String = ""

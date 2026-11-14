@@ -28,7 +28,11 @@ type Profile struct {
 	IgnoreCertErrors  bool   `json:"ignoreCertErrors"`
 	Routes            string `json:"routes"`
 	UseArgon          bool   `json:"useArgon"`
-	ArgonPassword     string `json:"argonPassword"`
+	ArgonPassword           string `json:"argonPassword"`
+	ArgonProtocolVersion    int    `json:"argonProtocolVersion,omitempty"`
+	ArgonPaddingProfile     string `json:"argonPaddingProfile,omitempty"`
+	ArgonFirstPacketProfile string `json:"argonFirstPacketProfile,omitempty"`
+	ArgonPathMTU            int    `json:"argonPathMTU,omitempty"`
 }
 
 type Plan struct {
@@ -259,13 +263,26 @@ func hopClientID(hop *Profile) string {
 }
 
 func argon4BaseOptions(hop *Profile, serverAddr, password, clientID string) map[string]any {
-	return map[string]any{
+	opts := map[string]any{
 		"type":          argon4Type,
 		"server":        serverAddr,
 		"password":      password,
 		"client_id":     clientID,
 		"client_secret": hop.ClientSecret,
 	}
+	if hop.ArgonProtocolVersion != 0 {
+		opts["protocol_version"] = hop.ArgonProtocolVersion
+	}
+	if hop.ArgonPaddingProfile != "" {
+		opts["padding_profile"] = hop.ArgonPaddingProfile
+	}
+	if hop.ArgonFirstPacketProfile != "" {
+		opts["first_packet_profile"] = hop.ArgonFirstPacketProfile
+	}
+	if hop.ArgonPathMTU != 0 {
+		opts["path_mtu"] = hop.ArgonPathMTU
+	}
+	return opts
 }
 
 func hopTargetPortAndProto(hop *Profile) (port, proto string, err error) {
@@ -494,17 +511,7 @@ func argon4HopOptions(hop *Profile, resolvedIP string) (map[string]any, error) {
 	if resolvedIP != "" {
 		host = resolvedIP
 	}
-	clientID := strings.TrimSpace(hop.ClientID)
-	if clientID == "" {
-		clientID = hop.ID
-	}
-	return map[string]any{
-		"type":          argon4Type,
-		"server":        net.JoinHostPort(host, port),
-		"password":      hop.Password,
-		"client_id":     clientID,
-		"client_secret": hop.ClientSecret,
-	}, nil
+	return argon4BaseOptions(hop, net.JoinHostPort(host, port), hop.Password, hopClientID(hop)), nil
 }
 
 func openConnectOptions(hop *Profile, server string) (map[string]any, error) {

@@ -22,13 +22,17 @@ func (e *argon4Endpoint) transitTarget(destination M.Socksaddr) string {
 
 func (e *argon4Endpoint) transitConfig(target, proto string) argon4.ClientConfig {
 	return argon4.ClientConfig{
-		Server:         e.options.Server,
-		MasterPassword: e.options.Password,
-		ClientID:       e.options.ClientID,
-		ClientSecret:   e.options.ClientSecret,
-		Mode:           argon4.ModeTransit,
-		Target:         target,
-		Proto:          proto,
+		Server:             e.options.Server,
+		MasterPassword:     e.options.Password,
+		ClientID:           e.options.ClientID,
+		ClientSecret:       e.options.ClientSecret,
+		Mode:               argon4.ModeTransit,
+		Target:             target,
+		Proto:              proto,
+		ProtocolVersion:    e.options.ProtocolVersion,
+		PaddingProfile:     e.options.PaddingProfile,
+		FirstPacketProfile: e.options.FirstPacketProfile,
+		PathMTU:            e.options.PathMTU,
 	}
 }
 

@@ -11,12 +11,20 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
     public var target: String?
     public var proto: String?
     public var listen: String?
+    public var protocolVersion: Int?
+    public var paddingProfile: String?
+    public var firstPacketProfile: String?
+    public var pathMTU: Int?
 
     enum CodingKeys: String, CodingKey {
         case server, password, mode, target, proto, listen
         case clientID = "client_id"
         case clientSecret = "client_secret"
         case readyFile = "ready_file"
+        case protocolVersion = "protocol_version"
+        case paddingProfile = "padding_profile"
+        case firstPacketProfile = "first_packet_profile"
+        case pathMTU = "path_mtu"
     }
 
     public init(
@@ -49,6 +57,10 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
         self.target = target
         self.proto = proto
         self.listen = listen
+        self.protocolVersion = profile.argonProtocolVersion
+        self.paddingProfile = profile.argonPaddingProfile
+        self.firstPacketProfile = profile.argonFirstPacketProfile
+        self.pathMTU = profile.argonPathMTU
     }
 }
 

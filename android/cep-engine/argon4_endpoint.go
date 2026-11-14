@@ -34,14 +34,18 @@ func withArgon4Endpoint(registry *endpoint.Registry) *endpoint.Registry {
 }
 
 type argon4Options struct {
-	Server       string `json:"server"`
-	Password     string `json:"password"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	Detour       string `json:"detour"`
-	Mode         string `json:"mode,omitempty"`
-	Target       string `json:"target,omitempty"`
-	Proto        string `json:"proto,omitempty"`
+	Server             string `json:"server"`
+	Password           string `json:"password"`
+	ClientID           string `json:"client_id"`
+	ClientSecret       string `json:"client_secret"`
+	Detour             string `json:"detour"`
+	Mode               string `json:"mode,omitempty"`
+	Target             string `json:"target,omitempty"`
+	Proto              string `json:"proto,omitempty"`
+	ProtocolVersion    int    `json:"protocol_version,omitempty"`
+	PaddingProfile     string `json:"padding_profile,omitempty"`
+	FirstPacketProfile string `json:"first_packet_profile,omitempty"`
+	PathMTU            int    `json:"path_mtu,omitempty"`
 }
 
 // argon4Endpoint передаёт сырые IPv4-пакеты Argon4 через packet-device sing-box
@@ -94,13 +98,17 @@ func newArgon4Endpoint(ctx context.Context, _ adapter.Router, logger log.Context
 		return ep, nil
 	}
 	client, err := argon4.NewClient(argon4.ClientConfig{
-		Server:         options.Server,
-		MasterPassword: options.Password,
-		ClientID:       options.ClientID,
-		ClientSecret:   options.ClientSecret,
-		Mode:           options.Mode,
-		Target:         options.Target,
-		Proto:          options.Proto,
+		Server:             options.Server,
+		MasterPassword:     options.Password,
+		ClientID:           options.ClientID,
+		ClientSecret:       options.ClientSecret,
+		Mode:               options.Mode,
+		Target:             options.Target,
+		Proto:              options.Proto,
+		ProtocolVersion:    options.ProtocolVersion,
+		PaddingProfile:     options.PaddingProfile,
+		FirstPacketProfile: options.FirstPacketProfile,
+		PathMTU:            options.PathMTU,
 	}, outboundDialer)
 	if err != nil {
 		cancelLoop()

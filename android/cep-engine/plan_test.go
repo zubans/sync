@@ -295,3 +295,34 @@ func TestTransitValidationAndConfig(t *testing.T) {
 		t.Fatalf("redact не скрыл пароль: %v", redacted)
 	}
 }
+
+func TestArgon4V5OptionsPropagateToEndpointConfig(t *testing.T) {
+	plan, err := parsePlan(testPlan(Profile{
+		ID:                      "a1",
+		Name:                    "Argon v5",
+		Proto:                   "argon4",
+		Server:                  "argon.example.com",
+		Password:                "secret",
+		ArgonProtocolVersion:    5,
+		ArgonPaddingProfile:     "wide",
+		ArgonFirstPacketProfile: "compact",
+		ArgonPathMTU:            1420,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := buildConfig(plan, []string{"1.2.3.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := cfg["endpoints"].([]any)[0].(map[string]any)
+	if ep["protocol_version"] != float64(5) && ep["protocol_version"] != 5 {
+		t.Fatalf("ожидалась protocol_version=5, получено %v", ep["protocol_version"])
+	}
+	if ep["padding_profile"] != "wide" || ep["first_packet_profile"] != "compact" {
+		t.Fatalf("не переданы профили padding: %v", ep)
+	}
+	if ep["path_mtu"] != float64(1420) && ep["path_mtu"] != 1420 {
+		t.Fatalf("не передан path_mtu=1420: %v", ep["path_mtu"])
+	}
+}

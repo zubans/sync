@@ -142,5 +142,31 @@ final class Argon4Tests: XCTestCase {
         XCTAssertEqual(profile.clientID, "client")
         XCTAssertEqual(profile.clientSecret, "owner")
         XCTAssertFalse(profile.useArgon)
+        XCTAssertNil(profile.argonProtocolVersion)
+        XCTAssertNil(profile.argonPaddingProfile)
+        XCTAssertNil(profile.argonFirstPacketProfile)
+        XCTAssertNil(profile.argonPathMTU)
+    }
+
+    func testArgonV5PaddingAndVersionFieldsEncodeInConfiguration() throws {
+        var profile = Profile(name: "Argon v5", proto: .argon4)
+        profile.server = "vpn.example.com"
+        profile.password = "master-secret"
+        profile.argonProtocolVersion = 5
+        profile.argonPaddingProfile = "wide"
+        profile.argonFirstPacketProfile = "compact"
+        profile.argonPathMTU = 1420
+        let configuration = try Argon4Configuration(
+            profile: profile,
+            resolvedIP: "192.0.2.10",
+            readyFile: "/tmp/ready.json",
+            underlay: false
+        )
+        let data = try JSONEncoder().encode(configuration)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["protocol_version"] as? Int, 5)
+        XCTAssertEqual(object["padding_profile"] as? String, "wide")
+        XCTAssertEqual(object["first_packet_profile"] as? String, "compact")
+        XCTAssertEqual(object["path_mtu"] as? Int, 1420)
     }
 }

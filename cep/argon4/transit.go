@@ -61,6 +61,8 @@ type TransitStreamConn struct {
 	psk       []byte
 	c2sKey    []byte
 	s2cKey    []byte
+	version   byte
+	padding   PaddingConfig
 	seq       atomic.Uint64
 	replay    ReplayWindow
 	readMu    sync.Mutex
@@ -76,6 +78,10 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 	}
 	if config.MasterPassword == "" {
 		return nil, HandshakeResponse{}, fmt.Errorf("не задан мастер-пароль Argon4")
+	}
+	ver, pad, firstPad, _, err := resolveTransportOptions(config, false)
+	if err != nil {
+		return nil, HandshakeResponse{}, err
 	}
 	raw, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", config.Server)
 	if err != nil {
@@ -111,19 +117,26 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 		mode = ModeTransit
 	}
 	req := HandshakeRequest{
-		ClientID:   config.ClientID,
-		ClientAuth: hex.EncodeToString(ClientAuthToken(psk, config.ClientID, config.ClientSecret)),
-		ClientPub:  hex.EncodeToString(pubKey),
-		Timestamp:  time.Now().Unix(),
-		Mode:       mode,
-		Target:     config.Target,
-		Proto:      ProtoTCP,
+		ClientID:        config.ClientID,
+		ClientAuth:      hex.EncodeToString(ClientAuthToken(psk, config.ClientID, config.ClientSecret)),
+		ClientPub:       hex.EncodeToString(pubKey),
+		Timestamp:       time.Now().Unix(),
+		Mode:            mode,
+		Target:          config.Target,
+		Proto:           ProtoTCP,
+		ProtocolVersion: int(ver),
+		Capabilities:    capabilitiesForVersion(ver),
+		PaddingProfile:  pad.Profile,
 	}
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
 		return nil, HandshakeResponse{}, err
 	}
-	wireReq, err := SealPacketWithSeq(FrameTypeHandshakeReq, salt[:], psk, hsKey, 1, reqBytes)
+	wireReq, err := SealPacketWithOptions(FrameTypeHandshakeReq, salt[:], psk, hsKey, 1, reqBytes, SealOptions{
+		Version:       ver,
+		Padding:       firstPad,
+		MaxOuterBytes: MaxTCPFrameSize,
+	})
 	if err != nil {
 		return nil, HandshakeResponse{}, err
 	}
@@ -142,13 +155,26 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 	}
 	_ = raw.SetDeadline(time.Time{})
 
-	ft, respSalt, _, plainResp, err := OpenPacketWithKey(wireResp, psk, hsKey)
-	if err != nil || ft != FrameTypeHandshakeResp || !bytes.Equal(respSalt, salt[:]) {
+	respVer, ft, respSalt, _, _, _, herr := ParseAndVerifyHeader(wireResp, psk)
+	if herr != nil || ft != FrameTypeHandshakeResp || !bytes.Equal(respSalt, salt[:]) {
 		return nil, HandshakeResponse{}, fmt.Errorf("Argon4 TCP transit: неверный ответ handshake")
 	}
+	if ver == ProtocolVersionV5 && respVer == ProtocolVersionV4 {
+		return nil, HandshakeResponse{}, ErrDowngradeRejected
+	}
+	opened, err := OpenPacketWithOptions(wireResp, psk, hsKey, OpenOptions{
+		ExpectedVersion: ver,
+		MaxOuterBytes:   MaxTCPFrameSize,
+	})
+	if err != nil {
+		return nil, HandshakeResponse{}, fmt.Errorf("Argon4 TCP transit: %w", err)
+	}
 	var resp HandshakeResponse
-	if err := json.Unmarshal(plainResp, &resp); err != nil {
+	if err := json.Unmarshal(opened.Plaintext, &resp); err != nil {
 		return nil, HandshakeResponse{}, fmt.Errorf("Argon4 TCP transit: ошибка JSON handshake: %w", err)
+	}
+	if err := validateHandshakeProtocol(ver, resp); err != nil {
+		return nil, HandshakeResponse{}, err
 	}
 	srvPub, err := hex.DecodeString(resp.ServerPub)
 	if err != nil || len(srvPub) != X25519KeySize {
@@ -164,6 +190,9 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 	if resp.Mode == "" {
 		resp.Mode = ModeTransit
 	}
+	if resp.ProtocolVersion == 0 {
+		resp.ProtocolVersion = int(ver)
+	}
 	stream := &TransitStreamConn{
 		raw:      raw,
 		response: resp,
@@ -171,6 +200,8 @@ func DialTransitTCP(ctx context.Context, config ClientConfig) (*TransitStreamCon
 		psk:      psk,
 		c2sKey:   c2sKey,
 		s2cKey:   s2cKey,
+		version:  ver,
+		padding:  pad,
 	}
 	ok = true
 	return stream, resp, nil
@@ -192,26 +223,61 @@ func (c *TransitStreamConn) Read(p []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		_, ft, salt, _, seq, _, err := ParseAndVerifyHeader(frame, c.psk)
-		if err != nil || !bytes.Equal(salt, c.salt[:]) || !c.replay.Check(seq) {
+		version, _, salt, _, seq, _, err := ParseAndVerifyHeader(frame, c.psk)
+		if err != nil {
+			return 0, err
+		}
+		ver := c.version
+		if ver == 0 {
+			ver = ProtocolVersionV5
+		}
+		if version != ver {
+			if ver == ProtocolVersionV5 && version == ProtocolVersionV4 {
+				return 0, ErrDowngradeRejected
+			}
+			return 0, ErrBadVersion
+		}
+		if !bytes.Equal(salt, c.salt[:]) || !c.replay.Check(seq) {
 			continue
 		}
-		ft, _, seq, plaintext, err := OpenPacketWithKey(frame, c.psk, c.s2cKey)
-		if err != nil || !c.replay.Accept(seq) {
+		opened, err := OpenPacketWithOptions(frame, c.psk, c.s2cKey, OpenOptions{
+			ExpectedVersion: ver,
+			MaxOuterBytes:   MaxTCPFrameSize,
+		})
+		if err != nil {
+			return 0, err
+		}
+		if !c.replay.Accept(opened.Seq) {
 			continue
 		}
-		if ft == FrameTypeKeepalive {
+		if opened.FrameType == FrameTypeKeepalive {
 			continue
 		}
-		if ft != FrameTypeData || len(plaintext) == 0 {
+		if opened.FrameType != FrameTypeData || len(opened.Plaintext) == 0 {
 			continue
 		}
-		c.pending = plaintext
+		c.pending = opened.Plaintext
 	}
 
 	n := copy(p, c.pending)
 	c.pending = c.pending[n:]
 	return n, nil
+}
+
+func (c *TransitStreamConn) writeFrameLocked(frameType byte, payload []byte) error {
+	ver := c.version
+	if ver == 0 {
+		ver = ProtocolVersionV5
+	}
+	wire, err := SealPacketWithOptions(frameType, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), payload, SealOptions{
+		Version:       ver,
+		Padding:       c.padding,
+		MaxOuterBytes: MaxTCPFrameSize,
+	})
+	if err != nil {
+		return err
+	}
+	return WriteTCPFrame(c.raw, wire)
 }
 
 func (c *TransitStreamConn) Write(p []byte) (int, error) {
@@ -227,11 +293,7 @@ func (c *TransitStreamConn) Write(p []byte) (int, error) {
 		if len(chunk) > TransitTCPChunkSize {
 			chunk = p[:TransitTCPChunkSize]
 		}
-		wire, err := SealPacketWithSeq(FrameTypeData, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), chunk)
-		if err != nil {
-			return written, err
-		}
-		if err := WriteTCPFrame(c.raw, wire); err != nil {
+		if err := c.writeFrameLocked(FrameTypeData, chunk); err != nil {
 			return written, err
 		}
 		written += len(chunk)
@@ -244,24 +306,14 @@ func (c *TransitStreamConn) Write(p []byte) (int, error) {
 func (c *TransitStreamConn) WriteKeepalive() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-
-	wire, err := SealPacketWithSeq(FrameTypeKeepalive, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), []byte("ping"))
-	if err != nil {
-		return err
-	}
-	return WriteTCPFrame(c.raw, wire)
+	return c.writeFrameLocked(FrameTypeKeepalive, []byte("ping"))
 }
 
 // CloseWrite сигнализирует удалённому серверу о завершении записи потока (half-close).
 func (c *TransitStreamConn) CloseWrite() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-
-	wire, err := SealPacketWithSeq(FrameTypeKeepalive, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), []byte("fin"))
-	if err != nil {
-		return err
-	}
-	return WriteTCPFrame(c.raw, wire)
+	return c.writeFrameLocked(FrameTypeKeepalive, []byte("fin"))
 }
 
 func (c *TransitStreamConn) Close() error {

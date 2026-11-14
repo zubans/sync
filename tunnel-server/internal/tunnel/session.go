@@ -38,29 +38,35 @@ var (
 
 // HandshakeRequest передаётся зашифрованным внутри кадра FrameTypeHandshakeReq.
 type HandshakeRequest struct {
-	ClientID   string   `json:"clientId"`
-	ClientAuth string   `json:"clientAuth,omitempty"`
-	ClientPub  string   `json:"clientPub"`
-	Requested  string   `json:"requestedIp,omitempty"`
-	Apps       []string `json:"apps,omitempty"`
-	Timestamp  int64    `json:"timestamp"`
-	Mode       string   `json:"mode,omitempty"`
-	Target     string   `json:"target,omitempty"`
-	Proto      string   `json:"proto,omitempty"`
+	ClientID        string   `json:"clientId"`
+	ClientAuth      string   `json:"clientAuth,omitempty"`
+	ClientPub       string   `json:"clientPub"`
+	Requested       string   `json:"requestedIp,omitempty"`
+	Apps            []string `json:"apps,omitempty"`
+	Timestamp       int64    `json:"timestamp"`
+	Mode            string   `json:"mode,omitempty"`
+	Target          string   `json:"target,omitempty"`
+	Proto           string   `json:"proto,omitempty"`
+	ProtocolVersion int      `json:"protocolVersion,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	PaddingProfile  string   `json:"paddingProfile,omitempty"`
 }
 
 // HandshakeResponse возвращается сервером зашифрованным внутри кадра FrameTypeHandshakeResp.
 type HandshakeResponse struct {
-	AssignedIP string   `json:"assignedIp,omitempty"`
-	ServerIP   string   `json:"serverIp,omitempty"`
-	SubnetCidr int      `json:"subnetCidr,omitempty"`
-	MTU        int      `json:"mtu,omitempty"`
-	DNS        []string `json:"dns,omitempty"`
-	Routes     []string `json:"routes,omitempty"`
-	ServerTime int64    `json:"serverTime"`
-	ServerPub  string   `json:"serverPub"`
-	Mode       string   `json:"mode,omitempty"`
-	Target     string   `json:"target,omitempty"`
+	AssignedIP      string   `json:"assignedIp,omitempty"`
+	ServerIP        string   `json:"serverIp,omitempty"`
+	SubnetCidr      int      `json:"subnetCidr,omitempty"`
+	MTU             int      `json:"mtu,omitempty"`
+	DNS             []string `json:"dns,omitempty"`
+	Routes          []string `json:"routes,omitempty"`
+	ServerTime      int64    `json:"serverTime"`
+	ServerPub       string   `json:"serverPub"`
+	Mode            string   `json:"mode,omitempty"`
+	Target          string   `json:"target,omitempty"`
+	ProtocolVersion int      `json:"protocolVersion,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	PaddingProfile  string   `json:"paddingProfile,omitempty"`
 }
 
 // ReplayWindow реализует 64-пакетное скользящее окно защиты от повтора (anti-replay) по принципу RFC 6479 / WireGuard.
@@ -119,22 +125,41 @@ func (w *ReplayWindow) Accept(seq uint64) bool {
 // PeerSession хранит состояние аутентифицированного клиента, раздельные сессионные ключи направлений (PFS) и окно повторов.
 // При reconnect объект не изменяется: SessionManager подменяет его новым, поэтому читатели видят согласованные соль и ключи.
 type PeerSession struct {
-	ClientID   string
-	ClientAuth []byte
-	AssignedIP net.IP
-	Salt       [SaltSize]byte
-	C2SKey     []byte
-	S2CKey     []byte
-	Mode       string
-	Target     string
-	Proto      string
-	TargetConn *net.UDPConn
+	ClientID        string
+	ClientAuth      []byte
+	AssignedIP      net.IP
+	Salt            [SaltSize]byte
+	C2SKey          []byte
+	S2CKey          []byte
+	ProtocolVersion byte
+	Padding         PaddingConfig
+	MaxOuterBytes   int
+	Mode            string
+	Target          string
+	Proto           string
+	TargetConn      *net.UDPConn
 
 	stateMu    sync.RWMutex
 	remoteAddr *net.UDPAddr
 	lastSeen   time.Time
 	replay     ReplayWindow
 	s2cSeq     atomic.Uint64
+}
+
+func (s *PeerSession) sealOptions(defaultMaxOuter int) SealOptions {
+	ver := s.ProtocolVersion
+	if ver == 0 {
+		ver = ProtocolVersionV5
+	}
+	maxOuter := s.MaxOuterBytes
+	if maxOuter <= 0 {
+		maxOuter = defaultMaxOuter
+	}
+	return SealOptions{
+		Version:       ver,
+		Padding:       s.Padding,
+		MaxOuterBytes: maxOuter,
+	}
 }
 
 // Close освобождает связанные с транзитной сессией сетевые ресурсы.
@@ -167,16 +192,25 @@ func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
 	return &clone
 }
 
-func newPeerSession(clientID string, clientAuth []byte, assignedIP net.IP, salt [SaltSize]byte, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, now time.Time) *PeerSession {
+func newPeerSession(clientID string, clientAuth []byte, assignedIP net.IP, salt [SaltSize]byte, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, now time.Time, version byte, padding PaddingConfig, maxOuter int) *PeerSession {
+	if version == 0 {
+		version = ProtocolVersionV5
+	}
+	if maxOuter <= 0 {
+		maxOuter = DefaultMaxOuterUDPSize
+	}
 	return &PeerSession{
-		ClientID:   clientID,
-		ClientAuth: append([]byte(nil), clientAuth...),
-		AssignedIP: append(net.IP(nil), assignedIP...),
-		Salt:       salt,
-		C2SKey:     append([]byte(nil), c2sKey...),
-		S2CKey:     append([]byte(nil), s2cKey...),
-		remoteAddr: cloneUDPAddr(remoteAddr),
-		lastSeen:   now,
+		ClientID:        clientID,
+		ClientAuth:      append([]byte(nil), clientAuth...),
+		AssignedIP:      append(net.IP(nil), assignedIP...),
+		Salt:            salt,
+		C2SKey:          append([]byte(nil), c2sKey...),
+		S2CKey:          append([]byte(nil), s2cKey...),
+		ProtocolVersion: version,
+		Padding:         padding,
+		MaxOuterBytes:   maxOuter,
+		remoteAddr:      cloneUDPAddr(remoteAddr),
+		lastSeen:        now,
 	}
 }
 
@@ -302,6 +336,11 @@ func (m *SessionManager) DeriveHandshakeKey(salt []byte) ([]byte, error) {
 
 // RegisterSession закрепляет за проверенным клиентом виртуальный IP в туннеле и сохраняет ключи сессии (c2s/s2c).
 func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr) (*PeerSession, error) {
+	return m.RegisterSessionWithProtocol(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, ProtocolVersionV5, DefaultPaddingConfig(), DefaultMaxOuterUDPSize)
+}
+
+// RegisterSessionWithProtocol регистрирует сессию с зафиксированной версией протокола и распределением padding.
+func (m *SessionManager) RegisterSessionWithProtocol(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, version byte, padding PaddingConfig, maxOuter int) (*PeerSession, error) {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
@@ -320,7 +359,7 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 			len(clientAuth) == len(existing.ClientAuth) &&
 			subtle.ConstantTimeCompare(existing.ClientAuth, clientAuth) == 1
 		if canReclaim {
-			sess := newPeerSession(clientID, clientAuth, existing.AssignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now)
+			sess := newPeerSession(clientID, clientAuth, existing.AssignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
 			sess.Mode = ModeTunnel
 			var ipKey [4]byte
 			copy(ipKey[:], sess.AssignedIP.To4())
@@ -339,7 +378,7 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 	var ipKey [4]byte
 	copy(ipKey[:], assignedIP.To4())
 
-	sess := newPeerSession(clientID, clientAuth, assignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now)
+	sess := newPeerSession(clientID, clientAuth, assignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
 	sess.Mode = ModeTunnel
 	m.bySalt[saltKey] = sess
 	m.byIP[ipKey] = sess
@@ -353,6 +392,15 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 
 // RegisterTransitSession регистрирует L4-транзитную сессию без выделения виртуального IP из пула туннеля.
 func (m *SessionManager) RegisterTransitSession(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, target, proto string, targetConn *net.UDPConn) (*PeerSession, error) {
+	maxOuter := DefaultMaxOuterUDPSize
+	if proto == ProtoTCP {
+		maxOuter = MaxTCPFrameSize
+	}
+	return m.RegisterTransitSessionWithProtocol(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, ProtocolVersionV5, DefaultPaddingConfig(), maxOuter)
+}
+
+// RegisterTransitSessionWithProtocol регистрирует транзитную сессию с зафиксированной версией протокола и padding.
+func (m *SessionManager) RegisterTransitSessionWithProtocol(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, target, proto string, targetConn *net.UDPConn, version byte, padding PaddingConfig, maxOuter int) (*PeerSession, error) {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
@@ -364,7 +412,7 @@ func (m *SessionManager) RegisterTransitSession(clientID string, clientAuth, sal
 		return nil, err
 	}
 
-	sess := newPeerSession(clientID, clientAuth, nil, saltKey, c2sKey, s2cKey, remoteAddr, now)
+	sess := newPeerSession(clientID, clientAuth, nil, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
 	sess.Mode = ModeTransit
 	sess.Target = target
 	sess.Proto = proto

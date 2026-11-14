@@ -68,6 +68,10 @@ data class CepProfile(
     /** Подключаться к узлу внутри обфускации Argon4 (без отдельного поля сервера). */
     val useArgon: Boolean = false,
     val argonPassword: String = "",
+    val argonProtocolVersion: Int? = null,
+    val argonPaddingProfile: String? = null,
+    val argonFirstPacketProfile: String? = null,
+    val argonPathMTU: Int? = null,
 ) {
     val protocol: VpnProtocol? get() = VpnProtocol.of(proto)
 }

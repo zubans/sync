@@ -29,8 +29,12 @@ type Profile struct {
 	AuthGroup         string `json:"authGroup"`
 	IgnoreCertErrors  bool   `json:"ignoreCertErrors"`
 	Routes            string `json:"routes"`
-	UseArgon          bool   `json:"useArgon"`
-	ArgonPassword     string `json:"argonPassword"`
+	UseArgon                bool   `json:"useArgon"`
+	ArgonPassword           string `json:"argonPassword"`
+	ArgonProtocolVersion    int    `json:"argonProtocolVersion,omitempty"`
+	ArgonPaddingProfile     string `json:"argonPaddingProfile,omitempty"`
+	ArgonFirstPacketProfile string `json:"argonFirstPacketProfile,omitempty"`
+	ArgonPathMTU            int    `json:"argonPathMTU,omitempty"`
 }
 
 type Chain struct {

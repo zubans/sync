@@ -242,7 +242,7 @@ func matchTransitRule(rule, host string, port int) bool {
 	return sameHost(ruleHost, host)
 }
 
-func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPub, c2sKey, s2cKey []byte, req HandshakeRequest, now time.Time, remoteAddr *net.UDPAddr) []byte {
+func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPub, c2sKey, s2cKey []byte, headerVersion byte, sessionPad PaddingConfig, req HandshakeRequest, now time.Time, remoteAddr *net.UDPAddr) []byte {
 	if req.Mode == ModeTunnel {
 		s.logDrop(remoteAddr, "transit mode mismatch", ErrTransitDenied)
 		return nil
@@ -278,7 +278,7 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 		targetConn = conn
 	}
 
-	peer, err := s.sessions.RegisterTransitSession(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn)
+	peer, err := s.sessions.RegisterTransitSessionWithProtocol(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, headerVersion, sessionPad, s.maxOuterUDP)
 	if err != nil {
 		if targetConn != nil {
 			_ = targetConn.Close()
@@ -294,8 +294,13 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 		Mode:       ModeTransit,
 		Target:     target,
 	}
+	applyProtocolResponseFields(&resp, headerVersion, sessionPad)
 	respBytes, _ := json.Marshal(resp)
-	wireResp, err := SealPacketWithSeq(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes)
+	wireResp, err := SealPacketWithOptions(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes, SealOptions{
+		Version:       headerVersion,
+		Padding:       sessionPad,
+		MaxOuterBytes: s.maxOuterUDP,
+	})
 	if err != nil {
 		s.sessions.RemoveSession(salt)
 		return nil
@@ -304,8 +309,8 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 	if targetConn != nil {
 		go s.udpTransitReturnLoop(peer)
 	}
-	log.Printf("[argon4-server] транзитное рукопожатие ОК: клиент=%q адрес=%s proto=%s цель=%s",
-		req.ClientID, remoteAddr, proto, target)
+	log.Printf("[argon4-server] транзитное рукопожатие ОК: клиент=%q v%d адрес=%s proto=%s цель=%s",
+		req.ClientID, headerVersion, remoteAddr, proto, target)
 	return wireResp
 }
 
@@ -315,6 +320,7 @@ func (s *Server) udpTransitReturnLoop(sess *PeerSession) {
 	}
 	buf := make([]byte, 65535)
 	psk := s.sessions.PSK()
+	opts := sess.sealOptions(s.maxOuterUDP)
 	for {
 		_ = sess.TargetConn.SetReadDeadline(time.Now().Add(SessionIdleTimeout))
 		n, err := sess.TargetConn.Read(buf)
@@ -322,7 +328,7 @@ func (s *Server) udpTransitReturnLoop(sess *PeerSession) {
 			s.sessions.RemoveSession(sess.Salt[:])
 			return
 		}
-		wirePkt, err := SealPacketWithSeq(FrameTypeData, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), buf[:n])
+		wirePkt, err := SealPacketWithOptions(FrameTypeData, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), buf[:n], opts)
 		if err != nil {
 			continue
 		}
@@ -365,13 +371,13 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 
 	psk := s.sessions.PSK()
 	remoteUDP := tcpToUDPAddr(clientConn.RemoteAddr())
-	_, frameType, salt, _, _, _, err := ParseAndVerifyHeader(hsFrame, psk)
-	if err != nil || frameType != FrameTypeHandshakeReq {
+	headerVersion, frameType, salt, _, _, _, err := ParseAndVerifyHeader(hsFrame, psk)
+	if err != nil || frameType != FrameTypeHandshakeReq || !s.isHandshakeVersionAllowed(headerVersion) {
 		s.logDrop(remoteUDP, "tcp header", err)
 		return
 	}
 
-	hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, now, ok := s.authenticateHandshake(hsFrame, psk, salt, remoteUDP)
+	hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, sessionPad, now, ok := s.authenticateHandshake(hsFrame, psk, salt, headerVersion, MaxTCPFrameSize, remoteUDP)
 	if !ok {
 		return
 	}
@@ -395,7 +401,7 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 		_ = tcpTarget.SetNoDelay(true)
 	}
 
-	sess, err := s.sessions.RegisterTransitSession(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteUDP, target, ProtoTCP, nil)
+	sess, err := s.sessions.RegisterTransitSessionWithProtocol(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteUDP, target, ProtoTCP, nil, headerVersion, sessionPad, MaxTCPFrameSize)
 	if err != nil {
 		s.logDrop(remoteUDP, "tcp transit register", err)
 		return
@@ -409,8 +415,10 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 		Mode:       ModeTransit,
 		Target:     target,
 	}
+	applyProtocolResponseFields(&resp, headerVersion, sessionPad)
 	respBytes, _ := json.Marshal(resp)
-	wireResp, err := SealPacketWithSeq(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes)
+	tcpSealOpts := sess.sealOptions(MaxTCPFrameSize)
+	wireResp, err := SealPacketWithOptions(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes, tcpSealOpts)
 	if err != nil {
 		return
 	}
@@ -419,8 +427,8 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 	}
 	_ = clientConn.SetReadDeadline(time.Time{})
 
-	log.Printf("[argon4-server] TCP-транзит ОК: клиент=%q адрес=%s цель=%s",
-		req.ClientID, clientConn.RemoteAddr(), target)
+	log.Printf("[argon4-server] TCP-транзит ОК: клиент=%q v%d адрес=%s цель=%s",
+		req.ClientID, headerVersion, clientConn.RemoteAddr(), target)
 
 	var writeMu sync.Mutex
 	var closeOnce sync.Once
@@ -439,7 +447,7 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 			_ = targetRaw.SetReadDeadline(time.Now().Add(SessionIdleTimeout))
 			n, rerr := targetRaw.Read(buf)
 			if n > 0 {
-				wirePkt, serr := SealPacketWithSeq(FrameTypeData, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), buf[:n])
+				wirePkt, serr := SealPacketWithOptions(FrameTypeData, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), buf[:n], tcpSealOpts)
 				if serr != nil {
 					errCh <- serr
 					return
@@ -461,6 +469,10 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 
 	// Клиент -> цель (проверяем анти-повтор, расшифровываем C2S и пишем в цель).
 	go func() {
+		openOpts := OpenOptions{
+			ExpectedVersion: sess.ProtocolVersion,
+			MaxOuterBytes:   MaxTCPFrameSize,
+		}
 		for {
 			_ = clientConn.SetReadDeadline(time.Now().Add(SessionIdleTimeout))
 			pkt, rerr := ReadTCPFrame(clientConn)
@@ -468,16 +480,20 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 				errCh <- rerr
 				return
 			}
-			_, ft, frameSalt, _, seq, _, perr := ParseAndVerifyHeader(pkt, psk)
+			frameVer, ft, frameSalt, _, seq, _, perr := ParseAndVerifyHeader(pkt, psk)
 			if perr != nil || len(frameSalt) != SaltSize || !bytes.Equal(frameSalt, sess.Salt[:]) {
 				errCh <- fmt.Errorf("некорректный заголовок TCP-транзита")
+				return
+			}
+			if frameVer != sess.ProtocolVersion {
+				errCh <- ErrDowngradeRejected
 				return
 			}
 			if !sess.CheckReplay(seq) {
 				errCh <- ErrReplayPacket
 				return
 			}
-			_, _, _, plaintext, oerr := OpenPacketWithKey(pkt, psk, sess.C2SKey)
+			opened, oerr := OpenPacketWithOptions(pkt, psk, sess.C2SKey, openOpts)
 			if oerr != nil {
 				errCh <- oerr
 				return
@@ -486,6 +502,7 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 				errCh <- ErrReplayPacket
 				return
 			}
+			plaintext := opened.Plaintext
 			s.sessions.TouchSession(sess, remoteUDP)
 
 			switch ft {
@@ -496,7 +513,7 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 					}
 					continue
 				}
-				pong, serr := SealPacketWithSeq(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte("pong"))
+				pong, serr := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte("pong"), tcpSealOpts)
 				if serr == nil {
 					writeMu.Lock()
 					werr := WriteTCPFrame(clientConn, pong)

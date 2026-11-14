@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,20 +27,29 @@ const (
 // ClientConfig — параметры одного Argon4-туннеля. UDP-соединение создаётся через
 // dialer sing-box, поэтому работают detour и VpnService.protect на Android.
 type ClientConfig struct {
-	Server         string
-	MasterPassword string
-	ClientID       string
-	ClientSecret   string
-	Mode           string
-	Target         string
-	Proto          string
+	Server             string
+	MasterPassword     string
+	ClientID           string
+	ClientSecret       string
+	Mode               string
+	Target             string
+	Proto              string
+	ProtocolVersion    int
+	PaddingProfile     string
+	FirstPacketProfile string
+	Padding            *PaddingConfig
+	PathMTU            int
 }
 
 // Client — клиентская Argon4-сессия с раздельными ключами направлений и anti-replay.
 // После Connect поля сессии неизменны; записывать пакеты можно из разных горутин.
 type Client struct {
-	config ClientConfig
-	dialer N.Dialer
+	config             ClientConfig
+	dialer             N.Dialer
+	protocolVersion    byte
+	padding            PaddingConfig
+	firstPacketPadding PaddingConfig
+	maxOuterUDP        int
 
 	conn        net.Conn
 	response    HandshakeResponse
@@ -52,6 +63,67 @@ type Client struct {
 	closeOnce   sync.Once
 }
 
+func resolveTransportOptions(config ClientConfig, isUDP bool) (version byte, pad PaddingConfig, firstPad PaddingConfig, maxOuterUDP int, err error) {
+	switch config.ProtocolVersion {
+	case 0, int(ProtocolVersionV5):
+		version = ProtocolVersionV5
+	case int(ProtocolVersionV4):
+		version = ProtocolVersionV4
+	default:
+		return 0, PaddingConfig{}, PaddingConfig{}, 0, fmt.Errorf("%w: %d", ErrBadVersion, config.ProtocolVersion)
+	}
+
+	var basePad PaddingConfig
+	if config.Padding != nil {
+		basePad = *config.Padding
+	}
+	if strings.TrimSpace(config.PaddingProfile) != "" {
+		basePad.Profile = strings.TrimSpace(config.PaddingProfile)
+	}
+	if config.PathMTU != 0 {
+		basePad.PathMTU = config.PathMTU
+	}
+
+	pad, err = NormalizePaddingConfig(basePad, isUDP)
+	if err != nil {
+		return 0, PaddingConfig{}, PaddingConfig{}, 0, err
+	}
+	firstPad = pad
+	if fp := strings.TrimSpace(config.FirstPacketProfile); fp != "" {
+		preset, perr := PresetPaddingConfig(fp, pad.PathMTU)
+		if perr != nil {
+			return 0, PaddingConfig{}, PaddingConfig{}, 0, perr
+		}
+		preset, perr = NormalizePaddingConfig(preset, isUDP)
+		if perr != nil {
+			return 0, PaddingConfig{}, PaddingConfig{}, 0, perr
+		}
+		firstPad = preset
+	}
+	maxOuterUDP = MaxOuterBytesForPathMTU(pad.PathMTU)
+	return version, pad, firstPad, maxOuterUDP, nil
+}
+
+func capabilitiesForVersion(version byte) []string {
+	if version == ProtocolVersionV5 {
+		return []string{"pad-v5"}
+	}
+	return nil
+}
+
+func validateHandshakeProtocol(expectedVersion byte, response HandshakeResponse) error {
+	if response.ProtocolVersion == 0 {
+		return nil
+	}
+	if expectedVersion == ProtocolVersionV5 && byte(response.ProtocolVersion) == ProtocolVersionV4 {
+		return ErrDowngradeRejected
+	}
+	if byte(response.ProtocolVersion) != expectedVersion {
+		return fmt.Errorf("%w: %d", ErrBadVersion, response.ProtocolVersion)
+	}
+	return nil
+}
+
 func NewClient(config ClientConfig, dialer N.Dialer) (*Client, error) {
 	if config.Server == "" {
 		return nil, fmt.Errorf("не указан сервер Argon4")
@@ -62,7 +134,18 @@ func NewClient(config ClientConfig, dialer N.Dialer) (*Client, error) {
 	if dialer == nil {
 		return nil, fmt.Errorf("не задан dialer Argon4")
 	}
-	return &Client{config: config, dialer: dialer}, nil
+	ver, pad, firstPad, maxOuter, err := resolveTransportOptions(config, true)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		config:             config,
+		dialer:             dialer,
+		protocolVersion:    ver,
+		padding:            pad,
+		firstPacketPadding: firstPad,
+		maxOuterUDP:        maxOuter,
+	}, nil
 }
 
 // Connect выполняет X25519-handshake. При потере ответа повторяется тот же зашифрованный
@@ -96,19 +179,26 @@ func (c *Client) Connect(ctx context.Context) error {
 	defer clear(privateKey)
 
 	request := HandshakeRequest{
-		ClientID:   c.config.ClientID,
-		ClientAuth: hex.EncodeToString(ClientAuthToken(c.psk, c.config.ClientID, c.config.ClientSecret)),
-		ClientPub:  hex.EncodeToString(publicKey),
-		Timestamp:  time.Now().Unix(),
-		Mode:       c.config.Mode,
-		Target:     c.config.Target,
-		Proto:      c.config.Proto,
+		ClientID:        c.config.ClientID,
+		ClientAuth:      hex.EncodeToString(ClientAuthToken(c.psk, c.config.ClientID, c.config.ClientSecret)),
+		ClientPub:       hex.EncodeToString(publicKey),
+		Timestamp:       time.Now().Unix(),
+		Mode:            c.config.Mode,
+		Target:          c.config.Target,
+		Proto:           c.config.Proto,
+		ProtocolVersion: int(c.protocolVersion),
+		Capabilities:    capabilitiesForVersion(c.protocolVersion),
+		PaddingProfile:  c.padding.Profile,
 	}
 	plaintext, err := json.Marshal(request)
 	if err != nil {
 		return err
 	}
-	wireRequest, err := SealPacketWithSeq(FrameTypeHandshakeReq, c.salt[:], c.psk, handshakeKey, 1, plaintext)
+	wireRequest, err := SealPacketWithOptions(FrameTypeHandshakeReq, c.salt[:], c.psk, handshakeKey, 1, plaintext, SealOptions{
+		Version:       c.protocolVersion,
+		Padding:       c.firstPacketPadding,
+		MaxOuterBytes: c.maxOuterUDP,
+	})
 	if err != nil {
 		return err
 	}
@@ -130,6 +220,10 @@ func (c *Client) Connect(ctx context.Context) error {
 		if err := validateHandshakeResponse(response); err != nil {
 			return err
 		}
+		response.MTU = EffectiveTunMTU(response.MTU, c.padding.PathMTU, c.protocolVersion)
+	}
+	if response.ProtocolVersion == 0 {
+		response.ProtocolVersion = int(c.protocolVersion)
 	}
 	serverPublic, err := hex.DecodeString(response.ServerPub)
 	if err != nil || len(serverPublic) != X25519KeySize {
@@ -180,13 +274,27 @@ func (c *Client) handshake(ctx context.Context, conn net.Conn, wireRequest, hand
 				lastErr = err
 				break
 			}
-			frameType, salt, _, plaintext, err := OpenPacketWithKey(buffer[:n], c.psk, handshakeKey)
+			version, frameType, salt, _, _, _, err := ParseAndVerifyHeader(buffer[:n], c.psk)
 			if err != nil || frameType != FrameTypeHandshakeResp || !bytes.Equal(salt, c.salt[:]) {
 				continue
 			}
+			opened, err := OpenPacketWithOptions(buffer[:n], c.psk, handshakeKey, OpenOptions{
+				ExpectedVersion: c.protocolVersion,
+				MaxOuterBytes:   c.maxOuterUDP,
+			})
+			if err != nil {
+				if version != c.protocolVersion || errors.Is(err, ErrDowngradeRejected) || errors.Is(err, ErrBadVersion) ||
+					errors.Is(err, ErrInvalidPadding) || errors.Is(err, ErrTrailingData) || errors.Is(err, ErrInvalidEnvelope) {
+					return HandshakeResponse{}, err
+				}
+				continue
+			}
 			var response HandshakeResponse
-			if err := json.Unmarshal(plaintext, &response); err != nil {
+			if err := json.Unmarshal(opened.Plaintext, &response); err != nil {
 				return HandshakeResponse{}, fmt.Errorf("Argon4: неверный ответ handshake: %w", err)
+			}
+			if err := validateHandshakeProtocol(c.protocolVersion, response); err != nil {
+				return HandshakeResponse{}, err
 			}
 			return response, nil
 		}
@@ -263,7 +371,11 @@ func (c *Client) WritePacket(plaintext []byte) error {
 			return fmt.Errorf("Argon4 переносит только IPv4-пакеты")
 		}
 	}
-	packet, err := SealPacketWithSeq(FrameTypeData, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), plaintext)
+	packet, err := SealPacketWithOptions(FrameTypeData, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), plaintext, SealOptions{
+		Version:       c.protocolVersion,
+		Padding:       c.padding,
+		MaxOuterBytes: c.maxOuterUDP,
+	})
 	if err != nil {
 		return err
 	}
@@ -276,7 +388,11 @@ func (c *Client) WriteKeepalive() error {
 	if c.conn == nil {
 		return net.ErrClosed
 	}
-	packet, err := SealPacketWithSeq(FrameTypeKeepalive, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), []byte("ping"))
+	packet, err := SealPacketWithOptions(FrameTypeKeepalive, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), []byte("ping"), SealOptions{
+		Version:       c.protocolVersion,
+		Padding:       c.padding,
+		MaxOuterBytes: c.maxOuterUDP,
+	})
 	if err != nil {
 		return err
 	}
@@ -290,23 +406,32 @@ func (c *Client) ReadPacket() ([]byte, error) {
 	if c.conn == nil {
 		return nil, net.ErrClosed
 	}
+	maxPayload := c.maxOuterUDP - OverheadV4
+	if c.protocolVersion == ProtocolVersionV5 {
+		maxPayload = c.maxOuterUDP - OverheadV5
+	}
 	buffer := make([]byte, 65535)
 	for {
 		n, err := c.conn.Read(buffer)
 		if err != nil {
 			return nil, err
 		}
-		_, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(buffer[:n], c.psk)
-		if err != nil || !bytes.Equal(salt, c.salt[:]) || !c.replay.Check(seq) {
+		version, _, salt, _, seq, _, err := ParseAndVerifyHeader(buffer[:n], c.psk)
+		if err != nil || version != c.protocolVersion || !bytes.Equal(salt, c.salt[:]) || !c.replay.Check(seq) {
 			continue
 		}
-		frameType, _, seq, plaintext, err := OpenPacketWithKey(buffer[:n], c.psk, c.s2cKey)
-		if err != nil || !c.replay.Accept(seq) {
+		opened, err := OpenPacketWithOptions(buffer[:n], c.psk, c.s2cKey, OpenOptions{
+			ExpectedVersion: c.protocolVersion,
+			MaxOuterBytes:   c.maxOuterUDP,
+			MaxPayloadBytes: maxPayload,
+		})
+		if err != nil || !c.replay.Accept(opened.Seq) {
 			continue
 		}
-		if frameType != FrameTypeData {
+		if opened.FrameType != FrameTypeData {
 			continue
 		}
+		plaintext := opened.Plaintext
 		if !c.transitMode {
 			if _, _, ok := ParseIPv4Addrs(plaintext); !ok {
 				continue

@@ -133,6 +133,7 @@ class ArgonVpnService : VpnService() {
                     emptyList()
                 }
 
+                val transport = resolveTransportConfig(settings)
                 val (handshake, sessionKeys) = performHandshake(
                     socket = socket,
                     serverAddr = serverAddr,
@@ -142,9 +143,10 @@ class ArgonVpnService : VpnService() {
                     clientId = settings.clientId,
                     clientSecret = settings.clientSecret,
                     apps = appsList,
+                    transport = transport,
                 )
 
-                val pfd = establishTun(settings, handshake)
+                val pfd = establishTun(settings, handshake, transport)
                 tunPfd = pfd
 
                 val routedCount = if (settings.routingMode == RoutingMode.SELECTED_APPS) settings.selectedPackages.size else -1
@@ -161,6 +163,7 @@ class ArgonVpnService : VpnService() {
                 runPacketLoops(
                     pfd, socket, serverAddr, salt, psk,
                     sessionKeys.c2sKey, sessionKeys.s2cKey,
+                    transport,
                 )
             }.onFailure { err ->
                 _status.value = _status.value.copy(
@@ -174,6 +177,43 @@ class ArgonVpnService : VpnService() {
         }
     }
 
+    private data class ResolvedTransportConfig(
+        val version: Byte,
+        val padding: com.example.argontunnel.crypto.PaddingConfig,
+        val firstPacketPadding: com.example.argontunnel.crypto.PaddingConfig,
+        val maxOuterBytes: Int,
+        val maxPayloadBytes: Int,
+    )
+
+    private fun resolveTransportConfig(settings: TunnelSettings): ResolvedTransportConfig {
+        val version = Argon4Crypto.resolveVersion(settings.protocolVersion)
+        val padding = Argon4Crypto.normalizePaddingConfig(
+            Argon4Crypto.presetPaddingConfig(settings.paddingProfile, settings.pathMtu),
+            isUdp = true,
+        )
+        val firstPadding = if (settings.firstPacketProfile.isNotBlank()) {
+            Argon4Crypto.normalizePaddingConfig(
+                Argon4Crypto.presetPaddingConfig(settings.firstPacketProfile, padding.pathMtu),
+                isUdp = true,
+            )
+        } else {
+            padding
+        }
+        val maxOuterBytes = Argon4Crypto.maxOuterBytesForPathMtu(padding.pathMtu)
+        val overhead = if (version == Argon4Crypto.PROTOCOL_VERSION_V4) {
+            Argon4Crypto.OVERHEAD_V4
+        } else {
+            Argon4Crypto.OVERHEAD_V5
+        }
+        return ResolvedTransportConfig(
+            version = version,
+            padding = padding,
+            firstPacketPadding = firstPadding,
+            maxOuterBytes = maxOuterBytes,
+            maxPayloadBytes = (maxOuterBytes - overhead).coerceAtLeast(0),
+        )
+    }
+
     private suspend fun sendTestMaterial(material: String) {
         val settings = TunnelSettings(applicationContext)
         val password = settings.masterPassword
@@ -182,19 +222,26 @@ class ArgonVpnService : VpnService() {
             return
         }
         runCatching {
+            val transport = resolveTransportConfig(settings)
             val salt = Argon4Crypto.newSalt()
             val psk = Argon4Crypto.derivePSK(password)
             val key = Argon4Crypto.deriveKey(password, salt)
             val socket = createBoundSocket(settings.bindInterface)
             socket.use { sock ->
                 val serverAddr = InetSocketAddress(InetAddress.getByName(settings.serverHost), settings.serverPort)
-                val packetBytes = Argon4Crypto.sealPacketWithSeq(
+                val rawMaterial = material.toByteArray(Charsets.UTF_8)
+                val packetBytes = Argon4Crypto.sealPacketWithOptions(
                     frameType = Argon4Crypto.FRAME_KEEPALIVE,
                     salt = salt,
                     psk = psk,
                     key = key,
                     seq = 1L,
-                    plaintext = material.toByteArray(Charsets.UTF_8),
+                    plaintext = rawMaterial,
+                    options = com.example.argontunnel.crypto.SealOptions(
+                        version = transport.version,
+                        padding = transport.firstPacketPadding,
+                        maxOuterBytes = transport.maxOuterBytes,
+                    ),
                 )
                 sock.send(DatagramPacket(packetBytes, packetBytes.size, serverAddr))
                 _status.value = _status.value.copy(
@@ -234,6 +281,7 @@ class ArgonVpnService : VpnService() {
         clientId: String,
         clientSecret: String,
         apps: List<String>,
+        transport: ResolvedTransportConfig,
     ): Pair<HandshakeResponse, Argon4Crypto.SessionKeys> {
         val keyPair = Argon4Crypto.generateX25519Keypair()
         try {
@@ -244,15 +292,23 @@ class ArgonVpnService : VpnService() {
                 clientPub = Argon4Crypto.bytesToHex(keyPair.publicKey),
                 apps = apps,
                 timestamp = System.currentTimeMillis() / 1000,
+                protocolVersion = transport.version.toInt(),
+                capabilities = Argon4Crypto.capabilitiesForVersion(transport.version),
+                paddingProfile = transport.padding.profile,
             )
             val reqJson = json.encodeToString(req).toByteArray(Charsets.UTF_8)
-            val wireReq = Argon4Crypto.sealPacketWithSeq(
+            val wireReq = Argon4Crypto.sealPacketWithOptions(
                 frameType = Argon4Crypto.FRAME_HANDSHAKE_REQ,
                 salt = salt,
                 psk = psk,
                 key = key,
                 seq = 1L,
                 plaintext = reqJson,
+                options = com.example.argontunnel.crypto.SealOptions(
+                    version = transport.version,
+                    padding = transport.firstPacketPadding,
+                    maxOuterBytes = transport.maxOuterBytes,
+                ),
             )
 
             val recvBuf = ByteArray(4096)
@@ -260,11 +316,41 @@ class ArgonVpnService : VpnService() {
             repeat(3) {
                 try {
                     socket.send(DatagramPacket(wireReq, wireReq.size, serverAddr))
-                    val dp = DatagramPacket(recvBuf, recvBuf.size)
-                    socket.receive(dp)
-                    val opened = Argon4Crypto.openPacket(dp.data, dp.length, psk, key)
-                    if (opened.frameType == Argon4Crypto.FRAME_HANDSHAKE_RESP) {
+                    while (true) {
+                        val dp = DatagramPacket(recvBuf, recvBuf.size)
+                        socket.receive(dp)
+                        val header = runCatching {
+                            Argon4Crypto.parseAndVerifyHeader(dp.data, dp.length, psk)
+                        }.getOrNull() ?: continue
+                        if (!header.salt.contentEquals(salt) || header.frameType != Argon4Crypto.FRAME_HANDSHAKE_RESP) {
+                            continue
+                        }
+                        val opened = try {
+                            Argon4Crypto.openPacketWithOptions(
+                                packet = dp.data,
+                                length = dp.length,
+                                psk = psk,
+                                key = key,
+                                options = com.example.argontunnel.crypto.OpenOptions(
+                                    expectedVersion = transport.version,
+                                    allowV4 = false,
+                                    maxOuterBytes = transport.maxOuterBytes,
+                                ),
+                            )
+                        } catch (ex: com.example.argontunnel.crypto.Argon4ProtocolException) {
+                            if (ex.kind == com.example.argontunnel.crypto.Argon4ErrorKind.DOWNGRADE_REJECTED ||
+                                ex.kind == com.example.argontunnel.crypto.Argon4ErrorKind.BAD_VERSION ||
+                                ex.kind == com.example.argontunnel.crypto.Argon4ErrorKind.INVALID_PADDING ||
+                                ex.kind == com.example.argontunnel.crypto.Argon4ErrorKind.INVALID_ENVELOPE ||
+                                ex.kind == com.example.argontunnel.crypto.Argon4ErrorKind.TRAILING_DATA
+                            ) {
+                                throw ex
+                            }
+                            lastErr = ex
+                            continue
+                        }
                         val response = json.decodeFromString<HandshakeResponse>(opened.plaintext.decodeToString())
+                        Argon4Crypto.validateHandshakeProtocol(transport.version, response)
                         val sharedSecret = Argon4Crypto.computeX25519Shared(
                             keyPair.privateKey,
                             Argon4Crypto.hexToBytes(response.serverPub),
@@ -275,6 +361,8 @@ class ArgonVpnService : VpnService() {
                             sharedSecret.fill(0)
                         }
                     }
+                } catch (ex: com.example.argontunnel.crypto.Argon4ProtocolException) {
+                    throw ex
                 } catch (t: Throwable) {
                     lastErr = t
                 }
@@ -289,10 +377,15 @@ class ArgonVpnService : VpnService() {
         }
     }
 
-    private fun establishTun(settings: TunnelSettings, hs: HandshakeResponse): ParcelFileDescriptor {
+    private fun establishTun(
+        settings: TunnelSettings,
+        hs: HandshakeResponse,
+        transport: ResolvedTransportConfig,
+    ): ParcelFileDescriptor {
+        val effectiveMtu = Argon4Crypto.effectiveTunMtu(hs.mtu, transport.padding.pathMtu, transport.version)
         val builder = Builder()
             .setSession(settings.tunInterfaceName.ifBlank { "argon0" })
-            .setMtu(hs.mtu.coerceIn(1280, 1500))
+            .setMtu(effectiveMtu.coerceIn(Argon4Crypto.MIN_PATH_MTU, 1500))
             .addAddress(hs.assignedIp, hs.subnetCidr)
 
         // DNS-серверы из настроек сервера или публичные 1.1.1.1
@@ -334,6 +427,7 @@ class ArgonVpnService : VpnService() {
         psk: ByteArray,
         c2sKey: SecretKey,
         s2cKey: SecretKey,
+        transport: ResolvedTransportConfig,
     ) {
         socket.soTimeout = 0
         val seqCounter = AtomicLong(1L)
@@ -344,6 +438,17 @@ class ArgonVpnService : VpnService() {
         val replayWindow = ReplayWindow()
 
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val dataSealOptions = com.example.argontunnel.crypto.SealOptions(
+            version = transport.version,
+            padding = transport.padding,
+            maxOuterBytes = transport.maxOuterBytes,
+        )
+        val dataOpenOptions = com.example.argontunnel.crypto.OpenOptions(
+            expectedVersion = transport.version,
+            allowV4 = false,
+            maxOuterBytes = transport.maxOuterBytes,
+            maxPayloadBytes = transport.maxPayloadBytes,
+        )
 
         // 1. Чтение IP-пакетов из TUN -> шифрование Argon4 -> отправка по UDP на сервер Ubuntu
         val tunToUdp = scope.launch {
@@ -353,7 +458,7 @@ class ArgonVpnService : VpnService() {
                     val n = tunIn.read(buf)
                     if (n <= 0) continue
                     val seq = seqCounter.getAndIncrement()
-                    val encrypted = Argon4Crypto.sealPacketWithSeq(
+                    val encrypted = Argon4Crypto.sealPacketWithOptions(
                         frameType = Argon4Crypto.FRAME_DATA,
                         salt = salt,
                         psk = psk,
@@ -362,6 +467,7 @@ class ArgonVpnService : VpnService() {
                         plaintext = buf,
                         offset = 0,
                         length = n,
+                        options = dataSealOptions,
                     )
                     socket.send(DatagramPacket(encrypted, encrypted.size, serverAddr))
                     val pCount = txPkts.incrementAndGet()
@@ -380,8 +486,14 @@ class ArgonVpnService : VpnService() {
                 while (isActive) {
                     val dp = DatagramPacket(buf, buf.size)
                     socket.receive(dp)
+                    val header = runCatching {
+                        Argon4Crypto.parseAndVerifyHeader(dp.data, dp.length, psk)
+                    }.getOrNull() ?: continue
+                    if (header.version != transport.version || !header.salt.contentEquals(salt)) {
+                        continue
+                    }
                     val opened = runCatching {
-                        Argon4Crypto.openPacket(dp.data, dp.length, psk, s2cKey)
+                        Argon4Crypto.openPacketWithOptions(dp.data, dp.length, psk, s2cKey, dataOpenOptions)
                     }.getOrNull() ?: continue
 
                     if (!replayWindow.accept(opened.seq)) {
@@ -400,19 +512,21 @@ class ArgonVpnService : VpnService() {
             }
         }
 
-        // 3. Периодический Keepalive
+        // 3. Периодический Keepalive (в v5 защищён случайным padding)
         val keepalive = scope.launch {
+            val pingBytes = "ping".toByteArray(Charsets.UTF_8)
             while (isActive) {
                 delay(25_000)
                 runCatching {
                     val seq = seqCounter.getAndIncrement()
-                    val ka = Argon4Crypto.sealPacketWithSeq(
+                    val ka = Argon4Crypto.sealPacketWithOptions(
                         frameType = Argon4Crypto.FRAME_KEEPALIVE,
                         salt = salt,
                         psk = psk,
                         key = c2sKey,
                         seq = seq,
-                        plaintext = "ping".toByteArray(Charsets.UTF_8),
+                        plaintext = pingBytes,
+                        options = dataSealOptions,
                     )
                     socket.send(DatagramPacket(ka, ka.size, serverAddr))
                 }

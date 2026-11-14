@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -85,6 +86,11 @@ func main() {
 	echoData := flag.Bool("echo-data", false, "возвращать data-кадры с переставленными IPv4-адресами")
 	mode := flag.String("mode", "tunnel", "режим сервера: tunnel, transit, auto")
 	transitAllow := flag.String("transit-allow", "", "CIDR/host:port через запятую для L4-транзита")
+	protoVersion := flag.Int("protocol-version", int(tunnel.ProtocolVersionV5), "версия протокола Argon4 (4 или 5)")
+	allowV4 := flag.Bool("allow-v4", true, "разрешать приём legacy v4")
+	paddingProfile := flag.String("padding-profile", tunnel.PaddingProfileBalanced, "профиль padding v5")
+	pathMTU := flag.Int("path-mtu", tunnel.DefaultPathMTU, "ограничение внешнего path MTU")
+	wireLog := flag.String("wire-log", "", "файл для записи длин (in/out) зашифрованных UDP-кадров")
 	flag.Parse()
 	if *password == "" || *addrFile == "" {
 		log.Fatal("flags -password and -addr-file are required")
@@ -105,15 +111,21 @@ func main() {
 		defer echo.Close()
 	}
 	srv, err := tunnel.NewServer(tunnel.ServerConfig{
-		ListenAddr:     *listen,
-		SubnetCIDR:     "10.44.0.1/24",
-		MasterPassword: *password,
-		ArgonParams:    tunnel.DefaultParams,
-		MTU:            1380,
-		DNS:            []string{"1.1.1.1"},
-		Routes:         []string{"0.0.0.0/0"},
-		Mode:           *mode,
-		TransitAllow:   allowList,
+		ListenAddr:      *listen,
+		SubnetCIDR:      "10.44.0.1/24",
+		MasterPassword:  *password,
+		ArgonParams:     tunnel.DefaultParams,
+		MTU:             1380,
+		DNS:             []string{"1.1.1.1"},
+		Routes:          []string{"0.0.0.0/0"},
+		Mode:            *mode,
+		TransitAllow:    allowList,
+		ProtocolVersion: byte(*protoVersion),
+		DisallowV4:      !*allowV4,
+		Padding: tunnel.PaddingConfig{
+			Profile: *paddingProfile,
+			PathMTU: *pathMTU,
+		},
 	}, tunDevice)
 	if err != nil {
 		log.Fatal(err)
@@ -143,6 +155,19 @@ func main() {
 		log.Fatal(err)
 	}
 
+	var wireLogMu sync.Mutex
+	logWire := func(dir string, size int) {
+		if *wireLog == "" {
+			return
+		}
+		wireLogMu.Lock()
+		defer wireLogMu.Unlock()
+		if f, oerr := os.OpenFile(*wireLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); oerr == nil {
+			_, _ = fmt.Fprintf(f, "%s %d\n", dir, size)
+			_ = f.Close()
+		}
+	}
+
 	if echo != nil {
 		go func() {
 			buffer := make([]byte, 65535)
@@ -153,6 +178,7 @@ func main() {
 				}
 				response, remoteAddr := srv.SealTunPacket(buffer[:n])
 				if response != nil && remoteAddr != nil {
+					logWire("tx", len(response))
 					_, _ = conn.WriteToUDP(response, remoteAddr)
 				}
 			}
@@ -165,6 +191,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		logWire("rx", n)
 		response := srv.HandlePacket(buf[:n], remoteAddr)
 		if response == nil {
 			continue
@@ -173,6 +200,7 @@ func main() {
 			*dropResponses--
 			continue
 		}
+		logWire("tx", len(response))
 		if _, err := conn.WriteToUDP(response, remoteAddr); err != nil {
 			log.Printf("write response: %v", err)
 		}

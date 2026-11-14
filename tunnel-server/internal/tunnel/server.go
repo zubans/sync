@@ -30,6 +30,9 @@ type ServerConfig struct {
 	TransitTarget   string
 	TransitAllow    []string
 	TransitBlind    bool
+	ProtocolVersion byte
+	DisallowV4      bool
+	Padding         PaddingConfig
 }
 
 type handshakeResponseCacheEntry struct {
@@ -41,16 +44,19 @@ type handshakeResponseCacheEntry struct {
 
 // Server реализует шифрованный шлюз Argon4 (режим tunnel поверх TUN и режим L4 transit поверх UDP/TCP).
 type Server struct {
-	cfg            ServerConfig
-	sessions       *SessionManager
-	udpConn        *net.UDPConn
-	tcpListener    *net.TCPListener
-	tun            io.ReadWriteCloser
-	lastErrLog     atomic.Int64
-	handshakeMu    sync.Mutex
-	handshakeCache map[[SaltSize]byte]handshakeResponseCacheEntry
-	blindMu        sync.Mutex
-	blindUDP       map[string]*blindUDPPeer
+	cfg             ServerConfig
+	protocolVersion byte
+	padding         PaddingConfig
+	maxOuterUDP     int
+	sessions        *SessionManager
+	udpConn         *net.UDPConn
+	tcpListener     *net.TCPListener
+	tun             io.ReadWriteCloser
+	lastErrLog      atomic.Int64
+	handshakeMu     sync.Mutex
+	handshakeCache  map[[SaltSize]byte]handshakeResponseCacheEntry
+	blindMu         sync.Mutex
+	blindUDP        map[string]*blindUDPPeer
 }
 
 func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
@@ -60,6 +66,23 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 	if cfg.Mode != ModeTunnel && cfg.Mode != ModeTransit {
 		return nil, fmt.Errorf("неизвестный режим сервера %q (ожидается %q или %q)", cfg.Mode, ModeTunnel, ModeTransit)
 	}
+	effVersion := cfg.ProtocolVersion
+	if effVersion == 0 {
+		effVersion = ProtocolVersionV5
+	}
+	if effVersion != ProtocolVersionV4 && effVersion != ProtocolVersionV5 {
+		return nil, fmt.Errorf("%w: 0x%02x", ErrBadVersion, effVersion)
+	}
+	if effVersion == ProtocolVersionV4 && cfg.DisallowV4 {
+		return nil, fmt.Errorf("несовместимая конфигурация: выбрана версия v4 при запрете v4")
+	}
+
+	resolvedPadding, err := NormalizePaddingConfig(cfg.Padding, !cfg.TransitBlind)
+	if err != nil {
+		return nil, err
+	}
+	maxOuterUDP := MaxOuterBytesForPathMTU(resolvedPadding.PathMTU)
+
 	if cfg.TransitBlind {
 		if cfg.Mode != ModeTransit {
 			return nil, fmt.Errorf("режим -transit-blind поддерживается только при -mode %s", ModeTransit)
@@ -74,6 +97,7 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 	if cfg.MTU <= 0 {
 		cfg.MTU = 1380
 	}
+	cfg.MTU = EffectiveTunMTU(cfg.MTU, resolvedPadding.PathMTU, effVersion)
 	if cfg.SubnetCIDR == "" {
 		cfg.SubnetCIDR = "10.44.0.1/24"
 	}
@@ -91,11 +115,14 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:            cfg,
-		sessions:       sm,
-		tun:            tunDev,
-		handshakeCache: make(map[[SaltSize]byte]handshakeResponseCacheEntry),
-		blindUDP:       make(map[string]*blindUDPPeer),
+		cfg:             cfg,
+		protocolVersion: effVersion,
+		padding:         resolvedPadding,
+		maxOuterUDP:     maxOuterUDP,
+		sessions:        sm,
+		tun:             tunDev,
+		handshakeCache:  make(map[[SaltSize]byte]handshakeResponseCacheEntry),
+		blindUDP:        make(map[string]*blindUDPPeer),
 	}, nil
 }
 
@@ -215,6 +242,16 @@ func (s *Server) udpToTunLoop() error {
 	}
 }
 
+func (s *Server) isHandshakeVersionAllowed(version byte) bool {
+	if version == s.protocolVersion {
+		return true
+	}
+	if s.protocolVersion == ProtocolVersionV5 && version == ProtocolVersionV4 && !s.cfg.DisallowV4 {
+		return true
+	}
+	return false
+}
+
 // HandlePacket обрабатывает один входящий кадр от remoteAddr и при необходимости возвращает зашифрованный ответ.
 func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 	if s.cfg.Mode == ModeTransit && s.cfg.TransitBlind {
@@ -224,17 +261,25 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 	if s.sessions == nil {
 		return nil
 	}
+	if s.maxOuterUDP > 0 && len(pkt) > s.maxOuterUDP {
+		s.logDrop(remoteAddr, "mtu", ErrMTUExceeded)
+		return nil
+	}
 
 	psk := s.sessions.PSK()
-	_, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(pkt, psk)
+	version, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(pkt, psk)
 	if err != nil {
 		s.logDrop(remoteAddr, "header", err)
 		return nil
 	}
 
 	if frameType == FrameTypeHandshakeReq {
-		log.Printf("[argon4-server] получен handshake от %s", remoteAddr)
-		return s.handleHandshake(pkt, psk, salt, remoteAddr)
+		if !s.isHandshakeVersionAllowed(version) {
+			s.logDrop(remoteAddr, "handshake version", ErrBadVersion)
+			return nil
+		}
+		log.Printf("[argon4-server] получен handshake (v%d) от %s", version, remoteAddr)
+		return s.handleHandshake(pkt, psk, salt, version, remoteAddr)
 	}
 
 	sess := s.sessions.LookupBySalt(salt)
@@ -243,11 +288,18 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 		s.logDrop(remoteAddr, "no session", fmt.Errorf("frame type %d", frameType))
 		return nil
 	}
+	if version != sess.ProtocolVersion {
+		s.logDrop(remoteAddr, "downgrade", ErrDowngradeRejected)
+		return nil
+	}
 	if !sess.CheckReplay(seq) {
 		s.logDrop(remoteAddr, "replay pre-check", ErrReplayPacket)
 		return nil
 	}
-	_, _, _, plaintext, err := OpenPacketWithKey(pkt, psk, sess.C2SKey)
+	opened, err := OpenPacketWithOptions(pkt, psk, sess.C2SKey, OpenOptions{
+		ExpectedVersion: sess.ProtocolVersion,
+		MaxOuterBytes:   s.maxOuterUDP,
+	})
 	if err != nil {
 		s.logDrop(remoteAddr, "c2s auth", err)
 		return nil
@@ -256,13 +308,14 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 		s.logDrop(remoteAddr, "replay commit", ErrReplayPacket)
 		return nil
 	}
+	plaintext := opened.Plaintext
 
 	// Обновляем адрес клиента только после успешной проверки GCM-тега и защиты от повтора (невозможно угнать сессию повтором пакета).
 	s.sessions.TouchSession(sess, remoteAddr)
 
 	switch frameType {
 	case FrameTypeKeepalive:
-		wirePong, err := SealPacketWithSeq(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte("pong"))
+		wirePong, err := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte("pong"), sess.sealOptions(s.maxOuterUDP))
 		if err == nil {
 			return wirePong
 		}
@@ -332,43 +385,66 @@ func (s *Server) cacheHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAdd
 	s.handshakeMu.Unlock()
 }
 
-func (s *Server) authenticateHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) (
+func (s *Server) authenticateHandshake(pkt, psk, salt []byte, headerVersion byte, maxOuter int, remoteAddr *net.UDPAddr) (
 	hsKey []byte,
 	req HandshakeRequest,
 	clientAuth []byte,
 	srvPub []byte,
 	c2sKey []byte,
 	s2cKey []byte,
+	sessionPad PaddingConfig,
 	now time.Time,
 	ok bool,
 ) {
 	hsKey, err := s.sessions.DeriveHandshakeKey(salt)
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake derive", err)
-		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
-	_, _, _, plaintext, err := OpenPacketWithKey(pkt, psk, hsKey)
+	opened, err := OpenPacketWithOptions(pkt, psk, hsKey, OpenOptions{
+		ExpectedVersion: headerVersion,
+		AllowV4:         true,
+		MaxOuterBytes:   maxOuter,
+	})
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake open", err)
-		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
-	if err := json.Unmarshal(plaintext, &req); err != nil {
+	if err := json.Unmarshal(opened.Plaintext, &req); err != nil {
 		s.logDrop(remoteAddr, "handshake json", err)
-		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
+	}
+	if headerVersion == ProtocolVersionV5 {
+		if req.ProtocolVersion != 0 && req.ProtocolVersion != int(ProtocolVersionV5) {
+			s.logDrop(remoteAddr, "handshake inner version mismatch", ErrDowngradeRejected)
+			return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
+		}
+		sessionPad = s.padding
+		if req.PaddingProfile != "" && req.PaddingProfile != PaddingProfileCustom {
+			preset, perr := PresetPaddingConfig(req.PaddingProfile, s.padding.PathMTU)
+			if perr != nil {
+				s.logDrop(remoteAddr, "handshake padding profile", perr)
+				return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
+			}
+			sessionPad = preset
+		}
+	} else if req.ProtocolVersion == int(ProtocolVersionV5) {
+		s.logDrop(remoteAddr, "handshake downgraded", ErrDowngradeRejected)
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
 	now = time.Now()
 	reqTime := time.Unix(req.Timestamp, 0)
 	if now.Sub(reqTime).Abs() > HandshakeClockSkew {
 		s.logDrop(remoteAddr, "handshake timestamp", ErrClockSkew)
-		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
 	clientPub, err := hex.DecodeString(req.ClientPub)
 	if err != nil || len(clientPub) != X25519KeySize {
 		s.logDrop(remoteAddr, "handshake clientPub", fmt.Errorf("некорректный ключ X25519"))
-		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
 	if req.ClientAuth != "" {
@@ -377,7 +453,7 @@ func (s *Server) authenticateHandshake(pkt, psk, salt []byte, remoteAddr *net.UD
 
 	srvPriv, srvPub, err := GenerateX25519Keypair()
 	if err != nil {
-		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 	sharedSecret, err := ComputeX25519Shared(srvPriv, clientPub)
 	for i := range srvPriv {
@@ -385,35 +461,43 @@ func (s *Server) authenticateHandshake(pkt, psk, salt []byte, remoteAddr *net.UD
 	}
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake ecdh", err)
-		return nil, HandshakeRequest{}, nil, nil, nil, nil, time.Time{}, false
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
 	c2sKey, s2cKey = DeriveSessionKeys(hsKey, sharedSecret, salt)
 	for i := range sharedSecret {
 		sharedSecret[i] = 0
 	}
-	return hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, now, true
+	return hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, sessionPad, now, true
 }
 
-func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) []byte {
+func applyProtocolResponseFields(resp *HandshakeResponse, version byte, pad PaddingConfig) {
+	resp.ProtocolVersion = int(version)
+	if version == ProtocolVersionV5 {
+		resp.Capabilities = []string{"pad-v5"}
+		resp.PaddingProfile = pad.Profile
+	}
+}
+
+func (s *Server) handleHandshake(pkt, psk, salt []byte, headerVersion byte, remoteAddr *net.UDPAddr) []byte {
 	if cached := s.cachedHandshakeResponse(pkt, salt, remoteAddr); cached != nil {
 		return cached
 	}
 
-	hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, now, ok := s.authenticateHandshake(pkt, psk, salt, remoteAddr)
+	hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, sessionPad, now, ok := s.authenticateHandshake(pkt, psk, salt, headerVersion, s.maxOuterUDP, remoteAddr)
 	if !ok {
 		return nil
 	}
 
 	if s.cfg.Mode == ModeTransit {
-		return s.handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPub, c2sKey, s2cKey, req, now, remoteAddr)
+		return s.handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPub, c2sKey, s2cKey, headerVersion, sessionPad, req, now, remoteAddr)
 	}
 	if req.Mode != "" && req.Mode != ModeTunnel && req.Mode != ModeAuto {
 		s.logDrop(remoteAddr, "tunnel mode mismatch", ErrTransitDenied)
 		return nil
 	}
 
-	peer, err := s.sessions.RegisterSession(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr)
+	peer, err := s.sessions.RegisterSessionWithProtocol(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, headerVersion, sessionPad, s.maxOuterUDP)
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake register", err)
 		return nil
@@ -430,14 +514,19 @@ func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr)
 		ServerPub:  hex.EncodeToString(srvPub),
 		Mode:       ModeTunnel,
 	}
+	applyProtocolResponseFields(&resp, headerVersion, sessionPad)
 	respBytes, _ := json.Marshal(resp)
-	wireResp, err := SealPacketWithSeq(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes)
+	wireResp, err := SealPacketWithOptions(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes, SealOptions{
+		Version:       headerVersion,
+		Padding:       sessionPad,
+		MaxOuterBytes: s.maxOuterUDP,
+	})
 	if err != nil {
 		return nil
 	}
 	s.cacheHandshakeResponse(pkt, salt, remoteAddr, wireResp)
-	log.Printf("[argon4-server] рукопожатие ОК: клиент=%q адрес=%s выдан=%s приложения=%v",
-		req.ClientID, remoteAddr, peer.AssignedIP, req.Apps)
+	log.Printf("[argon4-server] рукопожатие ОК: клиент=%q v%d адрес=%s выдан=%s приложения=%v",
+		req.ClientID, headerVersion, remoteAddr, peer.AssignedIP, req.Apps)
 	return wireResp
 }
 
@@ -451,7 +540,7 @@ func (s *Server) SealTunPacket(ipPkt []byte) ([]byte, *net.UDPAddr) {
 	if sess == nil {
 		return nil, nil
 	}
-	wirePkt, err := SealPacketWithSeq(FrameTypeData, sess.Salt[:], s.sessions.PSK(), sess.S2CKey, sess.NextS2CSeq(), ipPkt)
+	wirePkt, err := SealPacketWithOptions(FrameTypeData, sess.Salt[:], s.sessions.PSK(), sess.S2CKey, sess.NextS2CSeq(), ipPkt, sess.sealOptions(s.maxOuterUDP))
 	if err != nil {
 		return nil, nil
 	}

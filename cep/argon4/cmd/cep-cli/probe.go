@@ -52,12 +52,16 @@ func probeProfile(profile Profile) string {
 			return fmt.Sprintf("слепой транзит %s (TCP доступен)", endpointText(endpoint))
 		}
 		client, err := argon4.NewClient(argon4.ClientConfig{
-			Server:         endpointText(endpoint),
-			MasterPassword: profile.Password,
-			ClientID:       valueOr(profile.ClientID, profile.ID),
-			ClientSecret:   profile.ClientSecret,
-			Mode:           argon4.ModeTransit,
-			Proto:          argon4.ProtoUDP,
+			Server:             endpointText(endpoint),
+			MasterPassword:     profile.Password,
+			ClientID:           valueOr(profile.ClientID, profile.ID),
+			ClientSecret:       profile.ClientSecret,
+			Mode:               argon4.ModeTransit,
+			Proto:              argon4.ProtoUDP,
+			ProtocolVersion:    profile.ArgonProtocolVersion,
+			PaddingProfile:     profile.ArgonPaddingProfile,
+			FirstPacketProfile: profile.ArgonFirstPacketProfile,
+			PathMTU:            profile.ArgonPathMTU,
 		})
 		if err != nil {
 			return "ОШИБКА: " + err.Error()
@@ -72,10 +76,14 @@ func probeProfile(profile Profile) string {
 		return "Argon4-транзит handshake успешен"
 	case "argon4":
 		client, err := argon4.NewClient(argon4.ClientConfig{
-			Server:         endpointText(endpoint),
-			MasterPassword: profile.Password,
-			ClientID:       valueOr(profile.ClientID, profile.ID),
-			ClientSecret:   profile.ClientSecret,
+			Server:             endpointText(endpoint),
+			MasterPassword:     profile.Password,
+			ClientID:           valueOr(profile.ClientID, profile.ID),
+			ClientSecret:       profile.ClientSecret,
+			ProtocolVersion:    profile.ArgonProtocolVersion,
+			PaddingProfile:     profile.ArgonPaddingProfile,
+			FirstPacketProfile: profile.ArgonFirstPacketProfile,
+			PathMTU:            profile.ArgonPathMTU,
 		})
 		if err != nil {
 			return "ОШИБКА: " + err.Error()

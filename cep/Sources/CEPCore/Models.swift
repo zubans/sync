@@ -91,6 +91,14 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
     public var useArgon: Bool = false
     /// Мастер-пароль Argon2id.
     public var argonPassword: String = ""
+    /// Явная версия протокола Argon4 (по умолчанию nil -> v5).
+    public var argonProtocolVersion: Int? = nil
+    /// Профиль padding Argon4 ("balanced", "compact", "wide").
+    public var argonPaddingProfile: String? = nil
+    /// Отдельный профиль padding первого handshake-пакета Argon4.
+    public var argonFirstPacketProfile: String? = nil
+    /// Внешний path MTU для расчёта бюджета padding Argon4.
+    public var argonPathMTU: Int? = nil
 
     public init(name: String, proto: VPNProtocol) {
         self.name = name
@@ -116,6 +124,10 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
         routes = try c.decodeIfPresent(String.self, forKey: .routes) ?? ""
         useArgon = try c.decodeIfPresent(Bool.self, forKey: .useArgon) ?? false
         argonPassword = try c.decodeIfPresent(String.self, forKey: .argonPassword) ?? ""
+        argonProtocolVersion = try c.decodeIfPresent(Int.self, forKey: .argonProtocolVersion)
+        argonPaddingProfile = try c.decodeIfPresent(String.self, forKey: .argonPaddingProfile)
+        argonFirstPacketProfile = try c.decodeIfPresent(String.self, forKey: .argonFirstPacketProfile)
+        argonPathMTU = try c.decodeIfPresent(Int.self, forKey: .argonPathMTU)
     }
 }
 

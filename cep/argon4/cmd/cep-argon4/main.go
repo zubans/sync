@@ -18,16 +18,20 @@ import (
 )
 
 type configuration struct {
-	Server       string `json:"server"`
-	Password     string `json:"password"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	ReadyFile    string `json:"ready_file"`
-	TunName      string `json:"tun_name"`
-	Mode         string `json:"mode,omitempty"`
-	Target       string `json:"target,omitempty"`
-	Proto        string `json:"proto,omitempty"`
-	Listen       string `json:"listen,omitempty"`
+	Server             string `json:"server"`
+	Password           string `json:"password"`
+	ClientID           string `json:"client_id"`
+	ClientSecret       string `json:"client_secret"`
+	ReadyFile          string `json:"ready_file"`
+	TunName            string `json:"tun_name"`
+	Mode               string `json:"mode,omitempty"`
+	Target             string `json:"target,omitempty"`
+	Proto              string `json:"proto,omitempty"`
+	Listen             string `json:"listen,omitempty"`
+	ProtocolVersion    int    `json:"protocol_version,omitempty"`
+	PaddingProfile     string `json:"padding_profile,omitempty"`
+	FirstPacketProfile string `json:"first_packet_profile,omitempty"`
+	PathMTU            int    `json:"path_mtu,omitempty"`
 }
 
 type readyStatus struct {
@@ -80,13 +84,17 @@ func run(configPath string) error {
 		mode = argon4.ModeTunnel
 	}
 	clientCfg := argon4.ClientConfig{
-		Server:         config.Server,
-		MasterPassword: config.Password,
-		ClientID:       config.ClientID,
-		ClientSecret:   config.ClientSecret,
-		Mode:           mode,
-		Target:         config.Target,
-		Proto:          config.Proto,
+		Server:             config.Server,
+		MasterPassword:     config.Password,
+		ClientID:           config.ClientID,
+		ClientSecret:       config.ClientSecret,
+		Mode:               mode,
+		Target:             config.Target,
+		Proto:              config.Proto,
+		ProtocolVersion:    config.ProtocolVersion,
+		PaddingProfile:     config.PaddingProfile,
+		FirstPacketProfile: config.FirstPacketProfile,
+		PathMTU:            config.PathMTU,
 	}
 
 	var proxy *argon4.TransitProxy

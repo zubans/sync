@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -20,19 +21,36 @@ import (
 
 func main() {
 	var (
-		serverAddr  = flag.String("server", envOr("ARGON_SERVER_ADDR", "tunnel:51820"), "UDP-адрес и порт сервера Argon4 на Ubuntu")
-		bindIface   = flag.String("interface", envOr("ARGON_CLIENT_INTERFACE", ""), "Исходящий сетевой интерфейс клиента для отправки зашифрованных пакетов (например, eth0)")
-		tunName     = flag.String("tun", envOr("ARGON_CLIENT_TUN", "argon-client0"), "Имя виртуального TUN-интерфейса на клиенте")
-		masterPass  = flag.String("password", envOr("ARGON_MASTER_PASSWORD", ""), "Мастер-пароль для вывода ключа Argon2id")
-		clientID    = flag.String("client-id", envOr("ARGON_CLIENT_ID", "docker-e2e-client"), "Идентификатор клиента")
-		probeURL    = flag.String("probe-url", envOr("ARGON_PROBE_URL", ""), "HTTP URL для контрольного запроса через шифрованный TUN-интерфейс (например, http://10.44.0.1:80/admin/login)")
-		sendPayload = flag.String("send-material", "", "Строка материала для одноразового шифрования и отправки через выбранный интерфейс")
+		serverAddr         = flag.String("server", envOr("ARGON_SERVER_ADDR", "tunnel:51820"), "UDP-адрес и порт сервера Argon4 на Ubuntu")
+		bindIface          = flag.String("interface", envOr("ARGON_CLIENT_INTERFACE", ""), "Исходящий сетевой интерфейс клиента для отправки зашифрованных пакетов (например, eth0)")
+		tunName            = flag.String("tun", envOr("ARGON_CLIENT_TUN", "argon-client0"), "Имя виртуального TUN-интерфейса на клиенте")
+		masterPass         = flag.String("password", envOr("ARGON_MASTER_PASSWORD", ""), "Мастер-пароль для вывода ключа Argon2id")
+		clientID           = flag.String("client-id", envOr("ARGON_CLIENT_ID", "docker-e2e-client"), "Идентификатор клиента")
+		probeURL           = flag.String("probe-url", envOr("ARGON_PROBE_URL", ""), "HTTP URL для контрольного запроса через шифрованный TUN-интерфейс (например, http://10.44.0.1:80/admin/login)")
+		sendPayload        = flag.String("send-material", "", "Строка материала для одноразового шифрования и отправки через выбранный интерфейс")
+		protoVersion       = flag.Int("protocol-version", envIntOr("ARGON_PROTOCOL_VERSION", int(tunnel.ProtocolVersionV5)), "Версия протокола Argon4 (4 или 5)")
+		paddingProfile     = flag.String("padding-profile", envOr("ARGON_PADDING_PROFILE", tunnel.PaddingProfileBalanced), "Профиль padding v5 (balanced, compact, wide)")
+		firstPacketProfile = flag.String("first-packet-profile", envOr("ARGON_FIRST_PACKET_PROFILE", ""), "Профиль padding первого handshake-пакета")
+		pathMTU            = flag.Int("path-mtu", envIntOr("ARGON_PATH_MTU", tunnel.DefaultPathMTU), "Внешний path MTU")
 	)
 	flag.Parse()
 
 	if *masterPass == "" {
 		log.Fatal("Не задан мастер-пароль: укажите флаг -password или переменную окружения ARGON_MASTER_PASSWORD")
 	}
+	effVersion := byte(*protoVersion)
+	sessionPad, err := tunnel.NormalizePaddingConfig(tunnel.PaddingConfig{Profile: *paddingProfile, PathMTU: *pathMTU}, true)
+	if err != nil {
+		log.Fatalf("Некорректные параметры padding: %v", err)
+	}
+	firstPad := sessionPad
+	if *firstPacketProfile != "" {
+		firstPad, err = tunnel.NormalizePaddingConfig(tunnel.PaddingConfig{Profile: *firstPacketProfile, PathMTU: *pathMTU}, true)
+		if err != nil {
+			log.Fatalf("Некорректный профиль первого пакета: %v", err)
+		}
+	}
+	maxOuterUDP := tunnel.MaxOuterBytesForPathMTU(sessionPad.PathMTU)
 
 	remoteUDP, err := net.ResolveUDPAddr("udp4", *serverAddr)
 	if err != nil {
@@ -70,16 +88,25 @@ func main() {
 	// 1. Выполнение зашифрованного рукопожатия (Handshake) с эфемерным X25519
 	clientAuth := tunnel.ClientAuthToken(psk, *clientID, *clientID)
 	hsReq := tunnel.HandshakeRequest{
-		ClientID:   *clientID,
-		ClientAuth: hex.EncodeToString(clientAuth),
-		ClientPub:  hex.EncodeToString(clientPub),
-		Apps:       []string{"com.example.contactsync", "kb", "cep"},
-		Timestamp:  time.Now().Unix(),
+		ClientID:        *clientID,
+		ClientAuth:      hex.EncodeToString(clientAuth),
+		ClientPub:       hex.EncodeToString(clientPub),
+		Apps:            []string{"com.example.contactsync", "kb", "cep"},
+		Timestamp:       time.Now().Unix(),
+		ProtocolVersion: int(effVersion),
+	}
+	if effVersion == tunnel.ProtocolVersionV5 {
+		hsReq.Capabilities = []string{"pad-v5"}
+		hsReq.PaddingProfile = sessionPad.Profile
 	}
 	reqBytes, _ := json.Marshal(hsReq)
-	wireReq, err := tunnel.SealPacketWithSeq(tunnel.FrameTypeHandshakeReq, salt, psk, hsKey, 1, reqBytes)
+	wireReq, err := tunnel.SealPacketWithOptions(tunnel.FrameTypeHandshakeReq, salt, psk, hsKey, 1, reqBytes, tunnel.SealOptions{
+		Version:       effVersion,
+		Padding:       firstPad,
+		MaxOuterBytes: maxOuterUDP,
+	})
 	if err != nil {
-		log.Fatalf("SealPacketWithSeq handshake failed: %v", err)
+		log.Fatalf("SealPacketWithOptions handshake failed: %v", err)
 	}
 
 	if _, err := conn.Write(wireReq); err != nil {
@@ -93,14 +120,20 @@ func main() {
 		log.Fatalf("Read handshake response failed: %v", err)
 	}
 
-	fType, _, _, plainResp, err := tunnel.OpenPacketWithKey(buf[:n], psk, hsKey)
-	if err != nil || fType != tunnel.FrameTypeHandshakeResp {
-		log.Fatalf("OpenPacketWithKey handshake response failed: type=%d err=%v", fType, err)
+	openedResp, err := tunnel.OpenPacketWithOptions(buf[:n], psk, hsKey, tunnel.OpenOptions{
+		ExpectedVersion: effVersion,
+		MaxOuterBytes:   maxOuterUDP,
+	})
+	if err != nil || openedResp.FrameType != tunnel.FrameTypeHandshakeResp {
+		log.Fatalf("OpenPacketWithOptions handshake response failed: type=%d err=%v", openedResp.FrameType, err)
 	}
 
 	var hsResp tunnel.HandshakeResponse
-	if err := json.Unmarshal(plainResp, &hsResp); err != nil {
+	if err := json.Unmarshal(openedResp.Plaintext, &hsResp); err != nil {
 		log.Fatalf("Unmarshal handshake response failed: %v", err)
+	}
+	if hsResp.ProtocolVersion != 0 && byte(hsResp.ProtocolVersion) != effVersion {
+		log.Fatalf("Server downgraded or mismatched protocol version: got %d want %d", hsResp.ProtocolVersion, effVersion)
 	}
 	srvPub, err := hex.DecodeString(hsResp.ServerPub)
 	if err != nil || len(srvPub) != tunnel.X25519KeySize {
@@ -121,10 +154,20 @@ func main() {
 	var c2sSeq atomic.Uint64
 	var replay tunnel.ReplayWindow
 
+	sealOpts := tunnel.SealOptions{
+		Version:       effVersion,
+		Padding:       sessionPad,
+		MaxOuterBytes: maxOuterUDP,
+	}
+	openOpts := tunnel.OpenOptions{
+		ExpectedVersion: effVersion,
+		MaxOuterBytes:   maxOuterUDP,
+	}
+
 	if *sendPayload != "" {
-		pkt, err := tunnel.SealPacketWithSeq(tunnel.FrameTypeKeepalive, salt, psk, c2sKey, c2sSeq.Add(1), []byte(*sendPayload))
+		pkt, err := tunnel.SealPacketWithOptions(tunnel.FrameTypeKeepalive, salt, psk, c2sKey, c2sSeq.Add(1), []byte(*sendPayload), sealOpts)
 		if err != nil {
-			log.Fatalf("SealPacketWithSeq material failed: %v", err)
+			log.Fatalf("SealPacketWithOptions material failed: %v", err)
 		}
 		if _, err := conn.Write(pkt); err != nil {
 			log.Fatalf("Write material failed: %v", err)
@@ -134,11 +177,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("Read keepalive pong failed: %v", err)
 		}
-		_, _, seq, pong, err := tunnel.OpenPacketWithKey(buf[:n], psk, s2cKey)
-		if err != nil || !replay.Accept(seq) {
-			log.Fatalf("OpenPacketWithKey keepalive pong failed: %v", err)
+		openedPong, err := tunnel.OpenPacketWithOptions(buf[:n], psk, s2cKey, openOpts)
+		if err != nil || !replay.Accept(openedPong.Seq) {
+			log.Fatalf("OpenPacketWithOptions keepalive pong failed: %v", err)
 		}
-		log.Printf("[argon4-client] зашифрованный материал доставлен и подтверждён сервером: %q", string(pong))
+		log.Printf("[argon4-client] зашифрованный материал доставлен и подтверждён сервером: %q", string(openedPong.Plaintext))
 	}
 
 	if *probeURL == "" {
@@ -168,7 +211,7 @@ func main() {
 			if rerr != nil {
 				return
 			}
-			wire, serr := tunnel.SealPacketWithSeq(tunnel.FrameTypeData, salt, psk, c2sKey, c2sSeq.Add(1), tunBuf[:rn])
+			wire, serr := tunnel.SealPacketWithOptions(tunnel.FrameTypeData, salt, psk, c2sKey, c2sSeq.Add(1), tunBuf[:rn], sealOpts)
 			if serr == nil {
 				_, _ = conn.Write(wire)
 			}
@@ -182,9 +225,9 @@ func main() {
 			if rerr != nil {
 				return
 			}
-			ft, _, seq, pt, oerr := tunnel.OpenPacketWithKey(udpBuf[:rn], psk, s2cKey)
-			if oerr == nil && ft == tunnel.FrameTypeData && replay.Accept(seq) && len(pt) > 0 {
-				_, _ = tunDev.Write(pt)
+			opened, oerr := tunnel.OpenPacketWithOptions(udpBuf[:rn], psk, s2cKey, openOpts)
+			if oerr == nil && opened.FrameType == tunnel.FrameTypeData && replay.Accept(opened.Seq) && len(opened.Plaintext) > 0 {
+				_, _ = tunDev.Write(opened.Plaintext)
 			}
 		}
 	}()
@@ -204,6 +247,15 @@ func main() {
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
+	}
+	return def
+}
+
+func envIntOr(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }
