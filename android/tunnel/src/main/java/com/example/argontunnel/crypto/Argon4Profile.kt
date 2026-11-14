@@ -375,6 +375,48 @@ object Argon4Profile {
         return eff
     }
 
+    /** Формирует эффективный профиль baseline при истечении срока действия video-call. */
+    fun downgradeToBaseline(
+        profile: SessionBehaviorProfile,
+        randIntFn: (Int) -> Int = Argon4Profile::defaultRandInt,
+    ): SessionBehaviorProfile {
+        val basePadProfile = if (profile.padding.profile.isEmpty() || profile.padding.profile == Argon4Crypto.PADDING_PROFILE_CUSTOM) {
+            Argon4Crypto.PADDING_PROFILE_BALANCED
+        } else {
+            profile.padding.profile
+        }
+        val basePad = Argon4Crypto.resolvePaddingConfig(
+            PaddingConfig(profile = basePadProfile, pathMtu = profile.padding.pathMtu),
+            isUdp = true,
+        )
+        val timing = if (profile.keepaliveMinIdleMs >= 10_000L && profile.keepaliveMaxIdleMs > profile.keepaliveMinIdleMs) {
+            ArgonTimingConfig(
+                keepaliveMinIdleMs = profile.keepaliveMinIdleMs,
+                keepaliveMaxIdleMs = profile.keepaliveMaxIdleMs,
+            )
+        } else {
+            ArgonTimingConfig()
+        }
+        val base = sampleBaselineArchetype("", basePad, timing, randIntFn)
+        val maxAddedDelay = if (profile.maxAddedDelayMs in 1L until base.maxAddedDelayMs) {
+            profile.maxAddedDelayMs
+        } else {
+            base.maxAddedDelayMs
+        }
+        val coalesceMax = min(base.coalesceMaxWindowMs, maxAddedDelay)
+        val coalesceMin = min(base.coalesceMinWindowMs, coalesceMax)
+        return base.copy(
+            version = max(BEHAVIOR_PROFILE_VERSION, profile.version),
+            maxAddedDelayMs = maxAddedDelay,
+            coalesceMinWindowMs = coalesceMin,
+            coalesceMaxWindowMs = coalesceMax,
+            maxQueuePackets = if (profile.maxQueuePackets > 0) profile.maxQueuePackets else base.maxQueuePackets,
+            maxQueueBytes = if (profile.maxQueueBytes > 0) profile.maxQueueBytes else base.maxQueueBytes,
+            lowPowerMode = profile.lowPowerMode,
+            maxDurationMs = 0L,
+        )
+    }
+
     /** Упаковывает от 2 до [MAX_BATCH_COUNT] мелких пакетов в контейнер [Argon4Crypto.FRAME_BATCH]. */
     fun packBatchPlaintext(packets: List<ByteArray>): ByteArray {
         if (packets.size < 2 || packets.size > MAX_BATCH_COUNT) {
@@ -680,23 +722,17 @@ class ArgonTrafficShaper(
         val batched: Int = 0,
     )
 
-    private val profile: SessionBehaviorProfile = profile.copy(
+    private var profile: SessionBehaviorProfile = profile.copy(
         maxQueuePackets = if (profile.maxQueuePackets > 0) profile.maxQueuePackets else Argon4Profile.DEFAULT_MAX_QUEUE_PACKETS,
         maxQueueBytes = if (profile.maxQueueBytes > 0) profile.maxQueueBytes else Argon4Profile.DEFAULT_MAX_QUEUE_BYTES,
         coalesceMaxPackets = if (profile.coalesceMaxPackets > 0) profile.coalesceMaxPackets else 6,
         coalesceMaxBytes = if (profile.coalesceMaxBytes > 0) profile.coalesceMaxBytes else 900,
     )
+    private val downgradeTarget: SessionBehaviorProfile = Argon4Profile.downgradeToBaseline(this.profile, randIntFn)
+    private val effectiveVersion: Byte = if (version.toInt() == 0) Argon4Crypto.PROTOCOL_VERSION_V5 else version
     private val saltCopy = salt.copyOf()
     private val pskCopy = psk.copyOf()
     private val maxOuter = if (maxOuterBytes > 0) maxOuterBytes else Argon4Crypto.maxOuterBytesForPathMtu(this.profile.padding.pathMtu)
-    private val sealOptions = SealOptions(
-        version = if (version.toInt() == 0) Argon4Crypto.PROTOCOL_VERSION_V5 else version,
-        padding = this.profile.padding,
-        samplePad = { payloadLen, outerLimit ->
-            this.profile.samplePaddingLen(payloadLen, outerLimit, randIntFn)
-        },
-        maxOuterBytes = this.maxOuter,
-    )
 
     private val lock = Any()
     private val notifyCh = Channel<Unit>(Channel.CONFLATED)
@@ -768,26 +804,36 @@ class ArgonTrafficShaper(
     /** Добавляет реальный IP-пакет в приоритетную очередь или бросает [QueueFullException]. */
     fun enqueueReal(pkt: ByteArray) {
         val now = clock.nowMs()
+        var expiredMsg: String? = null
+        var overflow = false
         synchronized(lock) {
             if (closed) throw IllegalStateException("Шейпер Argon4 остановлен")
+            expiredMsg = maybeExpireLocked(now)
             if (realQueue.size >= profile.maxQueuePackets ||
                 (realQueue.isNotEmpty() && queuedBytes + pkt.size > profile.maxQueueBytes)
             ) {
-                droppedBackpressure.incrementAndGet()
-                signalWake()
-                throw QueueFullException("Очередь поведенческого шейпера переполнена")
+                overflow = true
+            } else {
+                val copied = pkt.copyOf()
+                val deadline = now + profile.maxAddedDelayMs
+                var coalesceAt = now
+                if (profile.coalesceEnabled && copied.size <= profile.coalesceThreshold && profile.coalesceMaxWindowMs > 0L) {
+                    val cw = Argon4Timing.randomDurationBetween(profile.coalesceMinWindowMs, profile.coalesceMaxWindowMs, randUnit)
+                    coalesceAt = min(now + cw, deadline)
+                }
+                realQueue.addLast(QueuedPacket(copied, coalesceAt, deadline))
+                queuedBytes += copied.size
+                lastRealOutMs = now
+                nextKaAtMs = UNSET_TIME_MS
             }
-            val copied = pkt.copyOf()
-            val deadline = now + profile.maxAddedDelayMs
-            var coalesceAt = now
-            if (profile.coalesceEnabled && !expired && copied.size <= profile.coalesceThreshold && profile.coalesceMaxWindowMs > 0L) {
-                val cw = Argon4Timing.randomDurationBetween(profile.coalesceMinWindowMs, profile.coalesceMaxWindowMs, randUnit)
-                coalesceAt = min(now + cw, deadline)
-            }
-            realQueue.addLast(QueuedPacket(copied, coalesceAt, deadline))
-            queuedBytes += copied.size
-            lastRealOutMs = now
-            nextKaAtMs = UNSET_TIME_MS
+        }
+        if (expiredMsg != null) {
+            onDowngrade?.invoke(expiredMsg!!)
+        }
+        if (overflow) {
+            droppedBackpressure.incrementAndGet()
+            signalWake()
+            throw QueueFullException("Очередь поведенческого шейпера переполнена")
         }
         tracker.touch()
         signalWake()
@@ -812,31 +858,52 @@ class ArgonTrafficShaper(
         signalWake()
     }
 
+    /** Возвращает эффективный поведенческий профиль с учётом истечения maxDuration. */
+    fun effectiveProfile(): SessionBehaviorProfile {
+        var expiredMsg: String? = null
+        val prof = synchronized(lock) {
+            expiredMsg = maybeExpireLocked(clock.nowMs())
+            profile
+        }
+        if (expiredMsg != null) {
+            onDowngrade?.invoke(expiredMsg!!)
+        }
+        return prof
+    }
+
     /** Возвращает текущую статистику и статус деградации профиля. */
-    fun stats(): ShaperStats = synchronized(lock) {
-        ShaperStats(
-            activeProfile = profile.name,
-            activeArchetype = profile.archetype,
-            sentDataFrames = sentDataFrames.get(),
-            sentBatchFrames = sentBatchFrames.get(),
-            coalescedPackets = coalescedPackets.get(),
-            sentControlFrames = sentControlFrames.get(),
-            sentKeepalives = sentKeepalives.get(),
-            droppedBackpressure = droppedBackpressure.get(),
-            queueDepth = realQueue.size,
-            queuedBytes = queuedBytes,
-            profileDowngraded = profileDowngraded.get(),
-        )
+    fun stats(): ShaperStats {
+        var expiredMsg: String? = null
+        val snapshot = synchronized(lock) {
+            expiredMsg = maybeExpireLocked(clock.nowMs())
+            ShaperStats(
+                activeProfile = profile.name,
+                activeArchetype = profile.archetype,
+                sentDataFrames = sentDataFrames.get(),
+                sentBatchFrames = sentBatchFrames.get(),
+                coalescedPackets = coalescedPackets.get(),
+                sentControlFrames = sentControlFrames.get(),
+                sentKeepalives = sentKeepalives.get(),
+                droppedBackpressure = droppedBackpressure.get(),
+                queueDepth = realQueue.size,
+                queuedBytes = queuedBytes,
+                profileDowngraded = profileDowngraded.get(),
+            )
+        }
+        if (expiredMsg != null) {
+            onDowngrade?.invoke(expiredMsg!!)
+        }
+        return snapshot
     }
 
     private suspend fun runLoop() {
         try {
             while (true) {
-                val (item, waitMs, shouldStop) = nextStep(clock.nowMs())
+                val (item, activeProfile, waitMs, shouldStop) = nextStep(clock.nowMs())
                 if (shouldStop) return
                 if (item != null) {
                     try {
-                        emitItem(item)
+                        emitItem(item, activeProfile)
                     } catch (ce: CancellationException) {
                         throw ce
                     } catch (err: Throwable) {
@@ -874,26 +941,39 @@ class ArgonTrafficShaper(
 
     private data class StepDecision(
         val item: SendItem?,
+        val profile: SessionBehaviorProfile,
         val waitMs: Long,
         val stop: Boolean,
     )
 
+    private fun maybeExpireLocked(nowMs: Long): String? {
+        if (profile.maxDurationMs <= 0L || expired || nowMs < startedAtMs + profile.maxDurationMs) {
+            return null
+        }
+        val prevName = profile.name
+        val maxDurMs = profile.maxDurationMs
+        expired = true
+        profile = downgradeTarget
+        ctrlQueue.clear()
+        nextFbAtMs = UNSET_TIME_MS
+        nextKaAtMs = UNSET_TIME_MS
+        tokens = 0
+        nextSlotAtMs = UNSET_TIME_MS
+        nextKfAtMs = UNSET_TIME_MS
+        profileDowngraded.set(true)
+        return "Время профиля '$prevName' истекло ($maxDurMs мс); профиль снижен до '${profile.name}' (${profile.archetype})"
+    }
+
     private fun nextStep(nowMs: Long): StepDecision {
         var expiredMsg: String? = null
         val decision = synchronized(lock) {
-            if (closed) return@synchronized StepDecision(null, 0L, true)
-            if (profile.maxDurationMs > 0L && !expired && nowMs >= startedAtMs + profile.maxDurationMs) {
-                expired = true
-                ctrlQueue.clear()
-                nextFbAtMs = UNSET_TIME_MS
-                nextKaAtMs = UNSET_TIME_MS
-                profileDowngraded.set(true)
-                expiredMsg = "Время профиля '${profile.name}' истекло (${profile.maxDurationMs} мс); фоновый трафик снижен до baseline"
-            }
+            if (closed) return@synchronized StepDecision(null, profile, 0L, true)
+            expiredMsg = maybeExpireLocked(nowMs)
+            val activeProfile = profile
 
             if (realQueue.isNotEmpty()) {
                 val (item, wait) = stepRealLocked(nowMs)
-                return@synchronized StepDecision(item, wait, false)
+                return@synchronized StepDecision(item, activeProfile, wait, false)
             }
             if (ctrlQueue.isNotEmpty()) {
                 val payload = ctrlQueue.removeFirst()
@@ -902,9 +982,9 @@ class ArgonTrafficShaper(
                     payload = payload.toByteArray(Charsets.UTF_8),
                     isPing = payload == Argon4Profile.KEEPALIVE_PING_PAYLOAD,
                 )
-                return@synchronized StepDecision(item, 0L, false)
+                return@synchronized StepDecision(item, activeProfile, 0L, false)
             }
-            StepDecision(stepIdleLocked(nowMs), computeIdleWaitLocked(nowMs), false)
+            StepDecision(stepIdleLocked(nowMs), activeProfile, computeIdleWaitLocked(nowMs), false)
         }
         if (expiredMsg != null) {
             onDowngrade?.invoke(expiredMsg!!)
@@ -929,8 +1009,7 @@ class ArgonTrafficShaper(
         val mustFlushNow = nowMs >= head.deadlineMs ||
             realQueue.size >= profile.highWatermark() ||
             realQueue.size >= profile.coalesceMaxPackets ||
-            head.payload.size > profile.coalesceThreshold ||
-            expired
+            head.payload.size > profile.coalesceThreshold
 
         if (!mustFlushNow && profile.coalesceEnabled && allCoalesceableLocked() && nowMs < head.coalesceAtMs) {
             return null to (head.coalesceAtMs - nowMs)
@@ -964,7 +1043,7 @@ class ArgonTrafficShaper(
 
     private fun popRealLocked(): SendItem {
         val head = realQueue.first()
-        if (profile.coalesceEnabled && !expired && realQueue.size >= 2 && head.payload.size <= profile.coalesceThreshold) {
+        if (profile.coalesceEnabled && realQueue.size >= 2 && head.payload.size <= profile.coalesceThreshold) {
             val targetMaxOuter = when {
                 profile.targetMaxOuter > 0 && maxOuter > 0 -> min(profile.targetMaxOuter, maxOuter)
                 profile.targetMaxOuter > 0 -> profile.targetMaxOuter
@@ -1099,7 +1178,16 @@ class ArgonTrafficShaper(
         nextKaAtMs = nowMs + Argon4Timing.randomDurationBetween(minI, maxI, randUnit)
     }
 
-    private suspend fun emitItem(item: SendItem) {
+    private fun sealOptionsFor(activeProfile: SessionBehaviorProfile): SealOptions = SealOptions(
+        version = effectiveVersion,
+        padding = activeProfile.padding,
+        samplePad = { payloadLen, outerLimit ->
+            activeProfile.samplePaddingLen(payloadLen, outerLimit, randIntFn)
+        },
+        maxOuterBytes = maxOuter,
+    )
+
+    private suspend fun emitItem(item: SendItem, activeProfile: SessionBehaviorProfile) {
         val seq = nextSeq()
         val wire = Argon4Crypto.sealPacketWithOptions(
             frameType = item.frameType,
@@ -1108,7 +1196,7 @@ class ArgonTrafficShaper(
             key = key,
             seq = seq,
             plaintext = item.payload,
-            options = sealOptions,
+            options = sealOptionsFor(activeProfile),
         )
         writeWire(wire)
         when (item.frameType) {

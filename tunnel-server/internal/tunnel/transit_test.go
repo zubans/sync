@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -95,11 +97,11 @@ func TestAuthenticatedUDPTransit(t *testing.T) {
 	}()
 
 	srv, err := NewServer(ServerConfig{
-		ListenAddr:    "127.0.0.1:0",
+		ListenAddr:     "127.0.0.1:0",
 		MasterPassword: "transit-password",
-		ArgonParams:   testFastArgonParams(),
-		Mode:          ModeTransit,
-		TransitTarget: echoConn.LocalAddr().String(),
+		ArgonParams:    testFastArgonParams(),
+		Mode:           ModeTransit,
+		TransitTarget:  echoConn.LocalAddr().String(),
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -271,11 +273,11 @@ func TestTransitTargetPolicyAndWrongPassword(t *testing.T) {
 	defer echoConn.Close()
 
 	srv, err := NewServer(ServerConfig{
-		ListenAddr:    "127.0.0.1:0",
+		ListenAddr:     "127.0.0.1:0",
 		MasterPassword: "correct-password",
-		ArgonParams:   testFastArgonParams(),
-		Mode:          ModeTransit,
-		TransitTarget: echoConn.LocalAddr().String(),
+		ArgonParams:    testFastArgonParams(),
+		Mode:           ModeTransit,
+		TransitTarget:  echoConn.LocalAddr().String(),
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -456,4 +458,299 @@ func TestBlindTransitZeroKnowledgePassthrough(t *testing.T) {
 	if err != nil || string(got) != "blind-tcp-stream" {
 		t.Fatalf("ошибка blind TCP: got=%q err=%v", got, err)
 	}
+}
+
+func TestTransitAllowCIDRPinsVerifiedIPWithoutReLookup(t *testing.T) {
+	// 1. UDP-транзит: домен разрешается в [127.0.0.2, 127.0.0.1] при правиле 127.0.0.1/32.
+	// Повторный вызов LookupIP намеренно вернул бы только 127.0.0.2, чтобы выявить любой повторный DNS-запрос.
+	udpEcho, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpEcho.Close()
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, rerr := udpEcho.ReadFromUDP(buf)
+			if rerr != nil {
+				return
+			}
+			_, _ = udpEcho.WriteToUDP(append([]byte("echo:"), buf[:n]...), addr)
+		}
+	}()
+
+	udpPort := udpEcho.LocalAddr().(*net.UDPAddr).Port
+	var udpLookups atomic.Int32
+	udpSrv, err := NewServer(ServerConfig{
+		ListenAddr:     "127.0.0.1:0",
+		MasterPassword: "cidr-pin-password",
+		ArgonParams:    testFastArgonParams(),
+		Mode:           ModeTransit,
+		TransitAllow:   []string{"127.0.0.1/32:" + strconv.Itoa(udpPort)},
+		LookupIP: func(host string) ([]net.IP, error) {
+			switch host {
+			case "dual.example.test":
+				if udpLookups.Add(1) == 1 {
+					return []net.IP{net.IPv4(127, 0, 0, 2), net.IPv4(127, 0, 0, 1)}, nil
+				}
+				return []net.IP{net.IPv4(127, 0, 0, 2)}, nil
+			case "denied.example.test":
+				return []net.IP{net.IPv4(127, 0, 0, 2)}, nil
+			default:
+				return nil, fmt.Errorf("unexpected lookup for %q", host)
+			}
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := udpSrv.StartTransit(); err != nil {
+		t.Fatal(err)
+	}
+	defer udpSrv.Close()
+	go func() { _ = udpSrv.Run() }()
+
+	cliUDP, err := net.DialUDP("udp4", nil, udpSrv.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cliUDP.Close()
+
+	targetHostPort := net.JoinHostPort("dual.example.test", strconv.Itoa(udpPort))
+	psk, salt, reqWire, finish := doTransitClientSetup(t, "cidr-pin-password", ModeTransit, targetHostPort, ProtoUDP)
+	if _, err := cliUDP.Write(reqWire); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4096)
+	_ = cliUDP.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := cliUDP.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, c2s, s2c := finish(buf[:n])
+	if resp.Target != udpEcho.LocalAddr().String() {
+		t.Fatalf("ожидалась фиксация проверенного IP %q в resp.Target, получено %q", udpEcho.LocalAddr().String(), resp.Target)
+	}
+	if gotLookups := udpLookups.Load(); gotLookups != 1 {
+		t.Fatalf("ожидалось ровно 1 разрешение DNS без повторного lookup, выполнено %d", gotLookups)
+	}
+
+	dataWire, err := SealPacketWithSeq(FrameTypeData, salt, psk, c2s, 1, []byte("udp-pinned"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cliUDP.Write(dataWire); err != nil {
+		t.Fatal(err)
+	}
+	_ = cliUDP.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err = cliUDP.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ft, _, _, plain, err := OpenPacketWithKey(buf[:n], psk, s2c)
+	if err != nil || ft != FrameTypeData || string(plain) != "echo:udp-pinned" {
+		t.Fatalf("ошибка эхо UDP через зафиксированный IP: ft=%d plain=%q err=%v", ft, plain, err)
+	}
+
+	// Отклонённый домен, у которого нет IP в 127.0.0.1/32, не допускается.
+	_, _, deniedWire, _ := doTransitClientSetup(t, "cidr-pin-password", ModeTransit, net.JoinHostPort("denied.example.test", strconv.Itoa(udpPort)), ProtoUDP)
+	if deniedResp := udpSrv.HandlePacket(deniedWire, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 41001}); deniedResp != nil {
+		t.Fatalf("домен с IP вне CIDR-правила должен отклоняться")
+	}
+
+	// Дополнительно проверяем выбор именно разрешённого IP при обратном порядке [127.0.0.1, 127.0.0.2] и правиле 127.0.0.2/32.
+	onlySecond, err := NewServer(ServerConfig{
+		ListenAddr:     "127.0.0.1:0",
+		MasterPassword: "cidr-pin-password",
+		ArgonParams:    testFastArgonParams(),
+		Mode:           ModeTransit,
+		TransitAllow:   []string{"127.0.0.2/32:*"},
+		LookupIP: func(host string) ([]net.IP, error) {
+			return []net.IP{net.IPv4(127, 0, 0, 1), net.IPv4(127, 0, 0, 2)}, nil
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer onlySecond.Close()
+	pinned, rerr := onlySecond.resolveTransitTarget("reversed.example.test:443", ModeTransit)
+	if rerr != nil || pinned != "127.0.0.2:443" {
+		t.Fatalf("ожидалась фиксация разрешённого IP 127.0.0.2:443, получено err=%v target=%q", rerr, pinned)
+	}
+
+	// 2. TCP-транзит: аналогичная одноразовая резолюция без повторного DNS при DialTimeout.
+	tcpEcho, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpEcho.Close()
+	go func() {
+		for {
+			c, aerr := tcpEcho.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(c)
+		}
+	}()
+
+	tcpPort := tcpEcho.Addr().(*net.TCPAddr).Port
+	var tcpLookups atomic.Int32
+	tcpSrv, err := NewServer(ServerConfig{
+		ListenAddr:     "127.0.0.1:0",
+		MasterPassword: "tcp-cidr-password",
+		ArgonParams:    testFastArgonParams(),
+		Mode:           ModeTransit,
+		TransitAllow:   []string{"127.0.0.1/32:" + strconv.Itoa(tcpPort)},
+		LookupIP: func(host string) ([]net.IP, error) {
+			if tcpLookups.Add(1) == 1 {
+				return []net.IP{net.IPv4(127, 0, 0, 2), net.IPv4(127, 0, 0, 1)}, nil
+			}
+			return []net.IP{net.IPv4(127, 0, 0, 2)}, nil
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tcpSrv.StartTransit(); err != nil {
+		t.Fatal(err)
+	}
+	defer tcpSrv.Close()
+	go func() { _ = tcpSrv.Run() }()
+
+	tc, err := net.DialTCP("tcp4", nil, tcpSrv.TCPLocalAddr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tc.Close()
+
+	tPSK, tSalt, tReqWire, tFinish := doTransitClientSetup(t, "tcp-cidr-password", ModeTransit, net.JoinHostPort("dual-tcp.example.test", strconv.Itoa(tcpPort)), ProtoTCP)
+	if err := WriteTCPFrame(tc, tReqWire); err != nil {
+		t.Fatal(err)
+	}
+	tRespWire, err := ReadTCPFrame(tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tResp, tC2S, tS2C := tFinish(tRespWire)
+	if tResp.Target != tcpEcho.Addr().String() {
+		t.Fatalf("TCP transit: ожидался target %q, получено %q", tcpEcho.Addr().String(), tResp.Target)
+	}
+	if gotLookups := tcpLookups.Load(); gotLookups != 1 {
+		t.Fatalf("TCP transit: ожидалось 1 разрешение DNS, выполнено %d", gotLookups)
+	}
+
+	tDataWire, err := SealPacketWithSeq(FrameTypeData, tSalt, tPSK, tC2S, 1, []byte("tcp-pinned"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteTCPFrame(tc, tDataWire); err != nil {
+		t.Fatal(err)
+	}
+	_ = tc.SetReadDeadline(time.Now().Add(3 * time.Second))
+	tEchoWire, err := ReadTCPFrame(tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ftTCP, _, _, tPlain, err := OpenPacketWithKey(tEchoWire, tPSK, tS2C)
+	if err != nil || ftTCP != FrameTypeData || string(tPlain) != "tcp-pinned" {
+		t.Fatalf("ошибка эхо TCP через зафиксированный IP: ft=%d plain=%q err=%v", ftTCP, tPlain, err)
+	}
+}
+
+func TestBlindUDPIdleTimeoutPreservesMappingOnOneWayTraffic(t *testing.T) {
+	type recvPkt struct {
+		addr *net.UDPAddr
+		data string
+	}
+	targetConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer targetConn.Close()
+
+	recvCh := make(chan recvPkt, 32)
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, rerr := targetConn.ReadFromUDP(buf)
+			if rerr != nil {
+				return
+			}
+			recvCh <- recvPkt{addr: addr, data: string(buf[:n])}
+		}
+	}()
+
+	const idleTimeout = 180 * time.Millisecond
+	blindSrv, err := NewServer(ServerConfig{
+		ListenAddr:          "127.0.0.1:0",
+		Mode:                ModeTransit,
+		TransitBlind:        true,
+		TransitTarget:       targetConn.LocalAddr().String(),
+		BlindUDPIdleTimeout: idleTimeout,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := blindSrv.StartTransit(); err != nil {
+		t.Fatal(err)
+	}
+	defer blindSrv.Close()
+	go func() { _ = blindSrv.Run() }()
+
+	cliConn, err := net.DialUDP("udp4", nil, blindSrv.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cliConn.Close()
+
+	// Односторонний поток клиент -> цель длительностью > 2.5 * idleTimeout без единого ответа от цели.
+	var firstRemote *net.UDPAddr
+	for i := 0; i < 10; i++ {
+		msg := fmt.Sprintf("oneway-%d", i)
+		if _, err := cliConn.Write([]byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-recvCh:
+			if got.data != msg {
+				t.Fatalf("неожиданная нагрузка #%d: got=%q want=%q", i, got.data, msg)
+			}
+			if firstRemote == nil {
+				firstRemote = got.addr
+			} else if got.addr.Port != firstRemote.Port || !got.addr.IP.Equal(firstRemote.IP) {
+				t.Fatalf("blind UDP пересоздал сокет на #%d при активном одностороннем трафике: был %v, стал %v", i, firstRemote, got.addr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("таймаут приёма пакета #%d на цели", i)
+		}
+		time.Sleep(45 * time.Millisecond)
+	}
+
+	// После >450 мс одностороннего потока обратный ответ на исходный исходящий порт всё ещё должен дойти до клиента.
+	if _, err := targetConn.WriteToUDP([]byte("late-reply"), firstRemote); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 2048)
+	_ = cliConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := cliConn.Read(buf)
+	if err != nil || string(buf[:n]) != "late-reply" {
+		t.Fatalf("ожидался поздний ответ на неизменённый порт: got=%q err=%v", string(buf[:n]), err)
+	}
+
+	// После полного простоя в обоих направлениях mapping должен корректно закрыться.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		blindSrv.blindMu.Lock()
+		remaining := len(blindSrv.blindUDP)
+		blindSrv.blindMu.Unlock()
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	t.Fatalf("blind UDP mapping не очистился после полного двустороннего простоя")
 }

@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -269,5 +271,110 @@ func TestClientVideoCallBatchWriteReadRoundTrip(t *testing.T) {
 	mu.Unlock()
 	if !batched {
 		t.Fatalf("малые пакеты должны были объединиться в FrameTypeBatch")
+	}
+}
+
+func TestVideoCallExpiryDowngradesToBaselineBatchAndClientProfile(t *testing.T) {
+	salt := []byte("cep-exp-salt-16!")
+	psk := make([]byte, 32)
+	key := make([]byte, 32)
+	var seq atomic.Uint64
+
+	clk := newFakeClock(time.Unix(1700002000, 0))
+	prof, err := BuildSessionProfile(ProfileConfig{
+		Name:        ProfileVideoCall,
+		MaxDuration: 2 * time.Second,
+	}, DefaultPaddingConfig(), DefaultTimingConfig(), nil)
+	if err != nil {
+		t.Fatalf("BuildSessionProfile: %v", err)
+	}
+
+	type wireEv struct {
+		frameType byte
+		outerLen  int
+		plain     []byte
+	}
+	sentCh := make(chan wireEv, 16)
+	shaper := NewTrafficShaper(ShaperOptions{
+		Profile:          prof,
+		Salt:             salt,
+		PSK:              psk,
+		Key:              key,
+		Version:          ProtocolVersionV5,
+		MaxOuterBytes:    DefaultMaxOuterUDPSize,
+		NextSeq:          func() uint64 { return seq.Add(1) },
+		Clock:            clk,
+		Tracker:          NewActivityTracker(clk),
+		RandUnit:         func() float64 { return 0.5 },
+		KeepaliveEnabled: false,
+		WriteWire: func(wire []byte) error {
+			fType, _, _, plain, oerr := OpenPacketWithKey(wire, psk, key)
+			if oerr != nil {
+				return oerr
+			}
+			sentCh <- wireEv{frameType: fType, outerLen: len(wire), plain: plain}
+			return nil
+		},
+	})
+	shaper.Start()
+	defer func() {
+		shaper.Close()
+		<-shaper.Done()
+	}()
+
+	cli := &Client{profile: prof, shaper: shaper}
+	if cli.Profile().Name != ProfileVideoCall {
+		t.Fatalf("до истечения срока Client.Profile() должен быть video-call, получено %q", cli.Profile().Name)
+	}
+
+	// До истечения maxDuration пакет 350 Б дополняется корзинами MediumBins (>= 620 Б).
+	medBefore := make([]byte, 350)
+	medBefore[0] = 0x45
+	if err := shaper.EnqueueReal(medBefore); err != nil {
+		t.Fatalf("EnqueueReal medBefore: %v", err)
+	}
+	clk.Advance(30 * time.Millisecond)
+	evBefore := <-sentCh
+	if evBefore.frameType != FrameTypeData || evBefore.outerLen < 620 {
+		t.Fatalf("до истечения срока ожидался video-call padding >= 620 Б, получено %+v", evBefore)
+	}
+
+	// Истекает MaxDuration -> переключение статистики, Client.Profile(), padding и агрегации.
+	clk.Advance(2100 * time.Millisecond)
+	stAfter := shaper.Stats()
+	if !stAfter.ProfileDowngraded || stAfter.ActiveProfile != ProfileBaseline || !strings.HasPrefix(stAfter.ActiveArchetype, "baseline-") {
+		t.Fatalf("после истечения срока ожидался профиль baseline, получено %+v", stAfter)
+	}
+	if gotProf := cli.Profile(); gotProf.Name != ProfileBaseline {
+		t.Fatalf("Client.Profile() после истечения срока должен возвращать baseline, получено %q", gotProf.Name)
+	}
+
+	medAfter := make([]byte, 350)
+	medAfter[0] = 0x45
+	if err := shaper.EnqueueReal(medAfter); err != nil {
+		t.Fatalf("EnqueueReal medAfter: %v", err)
+	}
+	clk.Advance(25 * time.Millisecond)
+	evAfter := <-sentCh
+	if evAfter.frameType != FrameTypeData || evAfter.outerLen >= 620 {
+		t.Fatalf("после снижения до baseline внешний пакет 350 Б должен быть < 620 Б, получено %d Б", evAfter.outerLen)
+	}
+
+	small1 := bytes.Repeat([]byte{'a'}, 70)
+	small2 := bytes.Repeat([]byte{'b'}, 70)
+	if err := shaper.EnqueueReal(small1); err != nil {
+		t.Fatalf("EnqueueReal small1: %v", err)
+	}
+	if err := shaper.EnqueueReal(small2); err != nil {
+		t.Fatalf("EnqueueReal small2: %v", err)
+	}
+	clk.Advance(20 * time.Millisecond)
+	batchEv := <-sentCh
+	if batchEv.frameType != FrameTypeBatch {
+		t.Fatalf("ожидался FrameTypeBatch после снижения до baseline, получено frameType=%d", batchEv.frameType)
+	}
+	items, err := UnpackBatchPlaintext(batchEv.plain, DefaultMaxOuterUDPSize)
+	if err != nil || len(items) != 2 || !bytes.Equal(items[0], small1) || !bytes.Equal(items[1], small2) {
+		t.Fatalf("некорректный batch после снижения: items=%d err=%v", len(items), err)
 	}
 }

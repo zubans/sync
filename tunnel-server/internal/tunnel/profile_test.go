@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -626,5 +627,142 @@ func TestProfileUDPReorderWithinReplayWindowAndWireSizes(t *testing.T) {
 		if totalWire > 1210 {
 			t.Fatalf("SamplePaddingLen выдал внешний пакет %d Б > 1210 Б", totalWire)
 		}
+	}
+}
+
+func TestVideoCallExpiryDowngradesPaddingCoalescingAndStats(t *testing.T) {
+	salt := []byte("expiry-salt-16!!")
+	psk := make([]byte, 32)
+	key := make([]byte, 32)
+	var seq atomic.Uint64
+
+	base := time.Unix(1700001000, 0)
+	clk := newFakeClock(base)
+	prof, err := BuildSessionProfile(ProfileConfig{
+		Name:        ProfileVideoCall,
+		MaxDuration: 2 * time.Second,
+	}, DefaultPaddingConfig(), DefaultTimingConfig(), nil)
+	if err != nil {
+		t.Fatalf("BuildSessionProfile: %v", err)
+	}
+
+	type wireEv struct {
+		frameType byte
+		outerLen  int
+		plain     []byte
+	}
+	sentCh := make(chan wireEv, 16)
+	shaper := NewTrafficShaper(ShaperOptions{
+		Profile:          prof,
+		Salt:             salt,
+		PSK:              psk,
+		Key:              key,
+		Version:          ProtocolVersionV5,
+		MaxOuterBytes:    DefaultMaxOuterUDPSize,
+		NextSeq:          func() uint64 { return seq.Add(1) },
+		Clock:            clk,
+		Tracker:          NewActivityTracker(clk),
+		RandUnit:         func() float64 { return 0.5 },
+		KeepaliveEnabled: false,
+		IsServer:         true,
+		WriteWire: func(wire []byte) error {
+			fType, _, _, plain, oerr := OpenPacketWithKey(wire, psk, key)
+			if oerr != nil {
+				return oerr
+			}
+			sentCh <- wireEv{
+				frameType: fType,
+				outerLen:  len(wire),
+				plain:     plain,
+			}
+			return nil
+		},
+	})
+	shaper.Start()
+	defer func() {
+		shaper.Close()
+		<-shaper.Done()
+		if active := clk.ActiveTimers(); active != 0 {
+			t.Fatalf("после Close() остались висящие таймеры: %d", active)
+		}
+	}()
+	clk.WaitUntilTimerArmed(t, clk.Now())
+
+	// 1. До истечения maxDuration пакет 350 Б попадает в MediumBins video-call (>= 620 Б), а статистика показывает video-call.
+	if st := shaper.Stats(); st.ActiveProfile != ProfileVideoCall || st.ProfileDowngraded {
+		t.Fatalf("до истечения срока ожидался профиль video-call, получено: %+v", st)
+	}
+	medPktBefore := makeTestIPv4Packet(net.IPv4(10, 44, 0, 2), net.IPv4(10, 44, 0, 1), bytes.Repeat([]byte{'m'}, 330))
+	if err := shaper.EnqueueReal(medPktBefore); err != nil {
+		t.Fatalf("EnqueueReal before expiry: %v", err)
+	}
+	clk.WaitUntilTimerArmed(t, clk.Now())
+	clk.Advance(30 * time.Millisecond)
+	evBefore := <-sentCh
+	if evBefore.frameType != FrameTypeData || evBefore.outerLen < 620 {
+		t.Fatalf("до истечения срока пакет 350 Б должен был дополниться корзиной MediumBins (>=620 Б): %+v", evBefore)
+	}
+
+	// 2. Перешагиваем MaxDuration (2s): таймер срабатывает даже без keepalive.
+	clk.WaitUntilTimerArmed(t, clk.Now())
+	clk.Advance(2100 * time.Millisecond)
+	clk.WaitUntilTimerArmed(t, clk.Now())
+
+	stAfter := shaper.Stats()
+	if !stAfter.ProfileDowngraded || stAfter.ActiveProfile != ProfileBaseline || !strings.HasPrefix(stAfter.ActiveArchetype, "baseline-") {
+		t.Fatalf("после истечения срока статистика должна перейти на baseline: %+v", stAfter)
+	}
+	eff := shaper.EffectiveProfile()
+	if eff.Name != ProfileBaseline || len(eff.MediumBins) != 0 {
+		t.Fatalf("EffectiveProfile должен быть снижен до baseline без MediumBins: %+v", eff)
+	}
+
+	// PeerSession.sealOptions (прямой путь ответа сервера) также обязан использовать сниженный padding baseline.
+	sess := &PeerSession{ProtocolVersion: ProtocolVersionV5, Shaper: shaper}
+	sessOpts := sess.sealOptions(DefaultMaxOuterUDPSize)
+	if sessOpts.SamplePad == nil {
+		t.Fatalf("ожидалась функция SamplePad для активного baseline после снижения")
+	}
+	directPad, err := sessOpts.SamplePad(350, DefaultMaxOuterUDPSize)
+	if err != nil {
+		t.Fatalf("PeerSession SamplePad after expiry: %v", err)
+	}
+	if OverheadV5+350+directPad >= 620 {
+		t.Fatalf("PeerSession.sealOptions продолжил применять video-call padding: pad=%d (outer=%d)", directPad, OverheadV5+350+directPad)
+	}
+
+	// 3. После истечения срока пакет 350 Б должен получать умеренный padding baseline (< 620 Б).
+	medPktAfter := makeTestIPv4Packet(net.IPv4(10, 44, 0, 2), net.IPv4(10, 44, 0, 1), bytes.Repeat([]byte{'n'}, 330))
+	if err := shaper.EnqueueReal(medPktAfter); err != nil {
+		t.Fatalf("EnqueueReal after expiry: %v", err)
+	}
+	clk.WaitUntilTimerArmed(t, clk.Now())
+	clk.Advance(25 * time.Millisecond)
+	evAfter := <-sentCh
+	if evAfter.frameType != FrameTypeData || evAfter.outerLen >= 620 {
+		t.Fatalf("после истечения срока video-call пакет 350 Б не должен попадать в MediumBins (>=620 Б), получено %d Б", evAfter.outerLen)
+	}
+
+	// 4. Мелкие пакеты после истечения срока снова агрегируются в FrameTypeBatch.
+	small1 := makeTestIPv4Packet(net.IPv4(10, 44, 0, 2), net.IPv4(10, 44, 0, 1), bytes.Repeat([]byte{'s'}, 50))
+	small2 := makeTestIPv4Packet(net.IPv4(10, 44, 0, 2), net.IPv4(10, 44, 0, 1), bytes.Repeat([]byte{'t'}, 50))
+	if err := shaper.EnqueueReal(small1); err != nil {
+		t.Fatalf("EnqueueReal small1: %v", err)
+	}
+	if err := shaper.EnqueueReal(small2); err != nil {
+		t.Fatalf("EnqueueReal small2: %v", err)
+	}
+	clk.WaitUntilTimerArmed(t, clk.Now())
+	clk.Advance(20 * time.Millisecond)
+	batchEv := <-sentCh
+	if batchEv.frameType != FrameTypeBatch {
+		t.Fatalf("после перехода в baseline малые пакеты должны объединяться в FrameTypeBatch, получено frameType=%d", batchEv.frameType)
+	}
+	items, err := UnpackBatchPlaintext(batchEv.plain, DefaultMaxOuterUDPSize)
+	if err != nil || len(items) != 2 || !bytes.Equal(items[0], small1) || !bytes.Equal(items[1], small2) {
+		t.Fatalf("некорректное содержимое FrameTypeBatch после снижения до baseline: len=%d err=%v", len(items), err)
+	}
+	if stFinal := shaper.Stats(); stFinal.SentBatchFrames < 1 || stFinal.CoalescedPackets < 2 {
+		t.Fatalf("статистика агрегации после снижения должна отражать batch: %+v", stFinal)
 	}
 }

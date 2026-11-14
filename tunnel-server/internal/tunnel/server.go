@@ -38,8 +38,10 @@ type ServerConfig struct {
 	VideoCallMaxDuration time.Duration
 	SessionIdleTimeout   time.Duration
 	HandshakeCacheTTL    time.Duration
+	BlindUDPIdleTimeout  time.Duration
 	Now                  func() time.Time
 	WriteUDP             func(wire []byte, dst *net.UDPAddr) error
+	LookupIP             func(host string) ([]net.IP, error)
 }
 
 type handshakeResponseCacheEntry struct {
@@ -56,7 +58,9 @@ type Server struct {
 	padding           PaddingConfig
 	maxOuterUDP       int
 	handshakeCacheTTL time.Duration
+	blindIdleTimeout  time.Duration
 	nowFunc           func() time.Time
+	lookupIP          func(host string) ([]net.IP, error)
 	sessions          *SessionManager
 	udpConn           *net.UDPConn
 	tcpListener       *net.TCPListener
@@ -122,7 +126,7 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 		cfg.Routes = []string{"0.0.0.0/0"}
 	}
 
-	if cfg.SessionIdleTimeout < 0 || cfg.HandshakeCacheTTL < 0 {
+	if cfg.SessionIdleTimeout < 0 || cfg.HandshakeCacheTTL < 0 || cfg.BlindUDPIdleTimeout < 0 {
 		return nil, fmt.Errorf("%w: отрицательные таймауты сервера недопустимы", ErrInvalidTimingConfig)
 	}
 	idleTimeout := cfg.SessionIdleTimeout
@@ -133,9 +137,17 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 	if cacheTTL == 0 {
 		cacheTTL = HandshakeReplayTTL
 	}
+	blindTimeout := cfg.BlindUDPIdleTimeout
+	if blindTimeout == 0 {
+		blindTimeout = BlindUDPIdleTimeout
+	}
 	nowFn := cfg.Now
 	if nowFn == nil {
 		nowFn = time.Now
+	}
+	lookupFn := cfg.LookupIP
+	if lookupFn == nil {
+		lookupFn = net.LookupIP
 	}
 
 	var sm *SessionManager
@@ -153,7 +165,9 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 		padding:           resolvedPadding,
 		maxOuterUDP:       maxOuterUDP,
 		handshakeCacheTTL: cacheTTL,
+		blindIdleTimeout:  blindTimeout,
 		nowFunc:           nowFn,
+		lookupIP:          lookupFn,
 		sessions:          sm,
 		tun:               tunDev,
 		handshakeCache:    make(map[[SaltSize]byte]handshakeResponseCacheEntry),

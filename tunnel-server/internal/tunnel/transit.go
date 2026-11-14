@@ -124,6 +124,43 @@ func (s *Server) TCPLocalAddr() net.Addr {
 	return s.tcpListener.Addr()
 }
 
+func (s *Server) blindUDPIdleTimeout() time.Duration {
+	if s != nil && s.blindIdleTimeout > 0 {
+		return s.blindIdleTimeout
+	}
+	return BlindUDPIdleTimeout
+}
+
+func canonicalTransitIP(ip net.IP) net.IP {
+	if ip == nil {
+		return nil
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4
+	}
+	return ip.To16()
+}
+
+func parseLiteralIP(host string) net.IP {
+	h := strings.TrimSpace(host)
+	if h == "" || strings.Contains(h, "%") {
+		return nil
+	}
+	return canonicalTransitIP(net.ParseIP(h))
+}
+
+func firstPreferredIP(ips []net.IP) net.IP {
+	for _, ip := range ips {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4
+		}
+	}
+	if len(ips) > 0 {
+		return ips[0]
+	}
+	return nil
+}
+
 func (s *Server) resolveTransitTarget(requestedTarget, mode string) (string, error) {
 	candidate := strings.TrimSpace(requestedTarget)
 	if candidate == "" {
@@ -138,6 +175,41 @@ func (s *Server) resolveTransitTarget(requestedTarget, mode string) (string, err
 		return "", fmt.Errorf("%w: %v", ErrTransitDenied, err)
 	}
 
+	lookupFn := net.LookupIP
+	if s != nil && s.lookupIP != nil {
+		lookupFn = s.lookupIP
+	}
+	var (
+		lookedUp  bool
+		cachedIPs []net.IP
+		lookupErr error
+	)
+	resolveOnce := func() ([]net.IP, error) {
+		if ip := parseLiteralIP(reqHost); ip != nil {
+			return []net.IP{ip}, nil
+		}
+		if strings.Contains(reqHost, "%") {
+			return nil, fmt.Errorf("некорректный хост %q", reqHost)
+		}
+		if !lookedUp {
+			lookedUp = true
+			rawIPs, rerr := lookupFn(reqHost)
+			if rerr != nil {
+				lookupErr = rerr
+			} else {
+				for _, ip := range rawIPs {
+					if c := canonicalTransitIP(ip); c != nil {
+						cachedIPs = append(cachedIPs, c)
+					}
+				}
+				if len(cachedIPs) == 0 {
+					lookupErr = fmt.Errorf("хост %q не разрешается в IP-адрес", reqHost)
+				}
+			}
+		}
+		return cachedIPs, lookupErr
+	}
+
 	if len(s.cfg.TransitAllow) == 0 {
 		pinned := strings.TrimSpace(s.cfg.TransitTarget)
 		if pinned == "" {
@@ -147,18 +219,16 @@ func (s *Server) resolveTransitTarget(requestedTarget, mode string) (string, err
 		if err != nil {
 			return "", fmt.Errorf("%w: некорректный -transit-target", ErrTransitDenied)
 		}
-		if reqPort == pinnedPort && sameHost(reqHost, pinnedHost) {
-			return pinned, nil
-		}
-		if mode == ModeAuto && reqPort == pinnedPort && isLoopbackHost(pinnedHost) {
+		if reqPort == pinnedPort && (sameHost(reqHost, pinnedHost) || (mode == ModeAuto && isLoopbackHost(pinnedHost))) {
 			return pinned, nil
 		}
 		return "", fmt.Errorf("%w: цель %q не совпадает с разрешённой %q", ErrTransitDenied, candidate, pinned)
 	}
 
 	for _, rule := range s.cfg.TransitAllow {
-		if matchTransitRule(rule, reqHost, reqPort) {
-			return net.JoinHostPort(reqHost, strconv.Itoa(reqPort)), nil
+		if resolvedIP, ok := matchTransitRuleIP(rule, reqHost, reqPort, resolveOnce); ok {
+			// Возвращаем конкретный проверенный IP, чтобы дальнейшее подключение не выполняло повторный DNS-запрос.
+			return net.JoinHostPort(resolvedIP.String(), strconv.Itoa(reqPort)), nil
 		}
 	}
 	return "", fmt.Errorf("%w: цель %q не входит в список allow", ErrTransitDenied, candidate)
@@ -197,49 +267,71 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func matchTransitRule(rule, host string, port int) bool {
+func matchTransitRuleIP(rule, host string, port int, resolveOnce func() ([]net.IP, error)) (net.IP, bool) {
 	rule = strings.TrimSpace(rule)
 	if rule == "" {
-		return false
-	}
-	if rule == "*" {
-		return true
+		return nil, false
 	}
 
 	ruleHost := rule
 	rulePort := 0
-	if h, p, err := net.SplitHostPort(rule); err == nil {
-		if p != "*" {
-			pn, perr := strconv.Atoi(p)
-			if perr != nil || pn < 1 || pn > 65535 {
-				return false
+	if rule != "*" {
+		if h, p, err := net.SplitHostPort(rule); err == nil {
+			if p != "*" {
+				pn, perr := strconv.Atoi(p)
+				if perr != nil || pn < 1 || pn > 65535 {
+					return nil, false
+				}
+				rulePort = pn
 			}
-			rulePort = pn
+			ruleHost = h
 		}
-		ruleHost = h
 	}
 	if rulePort != 0 && rulePort != port {
-		return false
+		return nil, false
 	}
 	if ruleHost == "*" {
-		return true
+		ips, err := resolveOnce()
+		if err != nil {
+			return nil, false
+		}
+		if chosen := firstPreferredIP(ips); chosen != nil {
+			return chosen, true
+		}
+		return nil, false
 	}
 	if _, ipNet, err := net.ParseCIDR(ruleHost); err == nil {
-		if ip := net.ParseIP(host); ip != nil {
-			return ipNet.Contains(ip)
+		ips, rerr := resolveOnce()
+		if rerr != nil {
+			return nil, false
 		}
-		ips, err := net.LookupIP(host)
-		if err != nil {
-			return false
-		}
+		var v6Match net.IP
 		for _, ip := range ips {
 			if ipNet.Contains(ip) {
-				return true
+				if ip.To4() != nil {
+					return ip, true
+				}
+				if v6Match == nil {
+					v6Match = ip
+				}
 			}
 		}
-		return false
+		if v6Match != nil {
+			return v6Match, true
+		}
+		return nil, false
 	}
-	return sameHost(ruleHost, host)
+	if !sameHost(ruleHost, host) {
+		return nil, false
+	}
+	ips, err := resolveOnce()
+	if err != nil {
+		return nil, false
+	}
+	if chosen := firstPreferredIP(ips); chosen != nil {
+		return chosen, true
+	}
+	return nil, false
 }
 
 func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPub, c2sKey, s2cKey []byte, headerVersion byte, sessionPad PaddingConfig, req HandshakeRequest, now time.Time, remoteAddr *net.UDPAddr) []byte {
@@ -574,8 +666,19 @@ func (s *Server) handleBlindUDP(pkt []byte, clientAddr *net.UDPAddr) {
 		s.logDrop(clientAddr, "blind udp target", err)
 		return
 	}
-	peer.lastActive.Store(time.Now().UnixNano())
-	_, _ = peer.targetConn.Write(pkt)
+	peer.lastActive.Store(s.now().UnixNano())
+	if _, err := peer.targetConn.Write(pkt); err != nil {
+		// Если сокет успел закрыться параллельно при истечении простоя, удаляем запись и открываем новую один раз.
+		s.blindMu.Lock()
+		if cur, ok := s.blindUDP[clientAddr.String()]; ok && cur == peer {
+			delete(s.blindUDP, clientAddr.String())
+		}
+		s.blindMu.Unlock()
+		if retryPeer, rerr := s.getOrCreateBlindUDPPeer(clientAddr); rerr == nil {
+			retryPeer.lastActive.Store(s.now().UnixNano())
+			_, _ = retryPeer.targetConn.Write(pkt)
+		}
+	}
 }
 
 func (s *Server) getOrCreateBlindUDPPeer(clientAddr *net.UDPAddr) (*blindUDPPeer, error) {
@@ -600,7 +703,7 @@ func (s *Server) getOrCreateBlindUDPPeer(clientAddr *net.UDPAddr) (*blindUDPPeer
 		clientAddr: cloneUDPAddr(clientAddr),
 		targetConn: targetConn,
 	}
-	peer.lastActive.Store(time.Now().UnixNano())
+	peer.lastActive.Store(s.now().UnixNano())
 
 	s.blindMu.Lock()
 	if existing, ok := s.blindUDP[key]; ok {
@@ -620,22 +723,40 @@ func (s *Server) getOrCreateBlindUDPPeer(clientAddr *net.UDPAddr) (*blindUDPPeer
 
 func (s *Server) blindUDPReturnLoop(key string, peer *blindUDPPeer) {
 	defer func() {
-		_ = peer.targetConn.Close()
 		s.blindMu.Lock()
 		if cur, ok := s.blindUDP[key]; ok && cur == peer {
 			delete(s.blindUDP, key)
 		}
 		s.blindMu.Unlock()
+		_ = peer.targetConn.Close()
 	}()
 
+	idleTimeout := s.blindUDPIdleTimeout()
+	waitTimeout := idleTimeout
 	buf := make([]byte, 65535)
 	for {
-		_ = peer.targetConn.SetReadDeadline(time.Now().Add(BlindUDPIdleTimeout))
+		_ = peer.targetConn.SetReadDeadline(time.Now().Add(waitTimeout))
 		n, err := peer.targetConn.Read(buf)
 		if err != nil {
+			if isTimeoutNetError(err) {
+				last := time.Unix(0, peer.lastActive.Load())
+				elapsed := s.now().Sub(last)
+				if elapsed < 0 {
+					elapsed = 0
+				}
+				if elapsed < idleTimeout {
+					rem := idleTimeout - elapsed
+					if rem < time.Millisecond {
+						rem = time.Millisecond
+					}
+					waitTimeout = rem
+					continue
+				}
+			}
 			return
 		}
-		peer.lastActive.Store(time.Now().UnixNano())
+		peer.lastActive.Store(s.now().UnixNano())
+		waitTimeout = idleTimeout
 		if s.udpConn != nil {
 			_, _ = s.udpConn.WriteToUDP(buf[:n], peer.clientAddr)
 		}

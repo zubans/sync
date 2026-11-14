@@ -283,7 +283,102 @@ class Argon4ProfileTest {
             clock.advanceBy(60_050L)
             val downgraded = shaper.stats()
             assertTrue("Ожидалось снижение профиля после maxDuration", downgraded.profileDowngraded)
+            assertEquals(Argon4Profile.PROFILE_BASELINE, downgraded.activeProfile)
+            assertTrue(downgraded.activeArchetype.startsWith("baseline-"))
             assertEquals(1, downgradeMsgs.size)
+        } finally {
+            shaper.close()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun videoCallExpirySwitchesPaddingCoalescingAndStatsToBaseline() = runBlocking {
+        val clock = FakeProfileClock()
+        val salt = Argon4Crypto.newSalt()
+        val psk = Argon4Crypto.derivePSK("vc-expiry-password")
+        val key = Argon4Crypto.deriveKey("vc-expiry-password", salt)
+        val seqGen = AtomicLong(1L)
+        val emitted = CopyOnWriteArrayList<Pair<Int, DecryptedPacket>>()
+        val downgradeMsgs = CopyOnWriteArrayList<String>()
+
+        val profile = Argon4Profile.buildSessionProfile(
+            cfg = ArgonProfileConfig(
+                name = Argon4Profile.PROFILE_VIDEO_CALL,
+                version = 1,
+                maxDurationMs = 2_000L,
+            ),
+            randIntFn = { 0 },
+        )
+
+        val scope = CoroutineScope(coroutineContext + SupervisorJob(coroutineContext[Job]))
+        val shaper = ArgonTrafficShaper(
+            profile = profile,
+            salt = salt,
+            psk = psk,
+            key = key,
+            maxOuterBytes = Argon4Crypto.DEFAULT_MAX_OUTER_UDP_SIZE,
+            keepaliveEnabled = false,
+            clock = clock,
+            randUnit = { 0.5 },
+            randIntFn = { 0 },
+            nextSeq = { seqGen.getAndIncrement() },
+            writeWire = { wire ->
+                emitted.add(wire.size to Argon4Crypto.openPacketWithOptions(wire, wire.size, psk, key))
+            },
+            onDowngrade = { downgradeMsgs.add(it) },
+        )
+        shaper.start(scope)
+        try {
+            assertEquals(Argon4Profile.PROFILE_VIDEO_CALL, shaper.stats().activeProfile)
+
+            // 1. До истечения срока пакет 350 Б попадает в MediumBins video-call (>= 620 Б).
+            val medBefore = ByteArray(350) { 0x45 }
+            shaper.enqueueReal(medBefore)
+            clock.advanceBy(30L)
+            assertEquals(1, emitted.size)
+            assertEquals(Argon4Crypto.FRAME_DATA, emitted[0].second.frameType)
+            assertTrue("До истечения срока ожидался внешний кадр >= 620 Б, было ${emitted[0].first}", emitted[0].first >= 620)
+
+            // 2. Истекает maxDurationMs -> профиль, padding, агрегация и отсутствие новых "fb" переходят на baseline.
+            clock.advanceBy(2_100L)
+            val downgraded = shaper.stats()
+            assertTrue("Ожидалось снижение профиля после maxDurationMs", downgraded.profileDowngraded)
+            assertEquals(Argon4Profile.PROFILE_BASELINE, downgraded.activeProfile)
+            assertTrue(downgraded.activeArchetype.startsWith("baseline-"))
+            assertEquals(Argon4Profile.PROFILE_BASELINE, shaper.effectiveProfile().name)
+            assertTrue(shaper.effectiveProfile().mediumBins.isEmpty())
+            assertEquals(1, downgradeMsgs.size)
+
+            val countAtExpiry = emitted.size
+            // Дополнительный простой после истечения срока не должен порождать новые кадры обратной связи "fb".
+            clock.advanceBy(1_500L)
+            assertEquals("После снижения до baseline фоновые кадры 'fb' не должны отправляться", countAtExpiry, emitted.size)
+
+            // После снижения пакет 350 Б не использует MediumBins (>= 620 Б).
+            val medAfter = ByteArray(350) { 0x46 }
+            shaper.enqueueReal(medAfter)
+            clock.advanceBy(25L)
+            val afterMed = emitted.subList(countAtExpiry, emitted.size)
+            assertEquals(1, afterMed.size)
+            assertEquals(Argon4Crypto.FRAME_DATA, afterMed[0].second.frameType)
+            assertTrue("После перехода в baseline ожидался внешний кадр < 620 Б, было ${afterMed[0].first}", afterMed[0].first < 620)
+
+            // Малые пакеты после истечения срока агрегируются в FRAME_BATCH.
+            val countBeforeBatch = emitted.size
+            val small1 = ByteArray(70) { 0x11 }
+            val small2 = ByteArray(70) { 0x22 }
+            shaper.enqueueReal(small1)
+            shaper.enqueueReal(small2)
+            clock.advanceBy(20L)
+            val afterBatch = emitted.subList(countBeforeBatch, emitted.size)
+            assertEquals(1, afterBatch.size)
+            assertEquals(Argon4Crypto.FRAME_BATCH, afterBatch[0].second.frameType)
+            val unpacked = Argon4Profile.unpackBatchPlaintext(afterBatch[0].second.plaintext, Argon4Crypto.DEFAULT_MAX_OUTER_UDP_SIZE)
+            assertEquals(2, unpacked.size)
+            assertArrayEquals(small1, unpacked[0])
+            assertArrayEquals(small2, unpacked[1])
+            assertTrue(shaper.stats().sentBatchFrames >= 1L)
         } finally {
             shaper.close()
             scope.cancel()

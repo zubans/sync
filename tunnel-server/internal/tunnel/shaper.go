@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"errors"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -25,17 +26,17 @@ type sendItem struct {
 
 // ShaperStats содержит агрегированные счётчики работы поведенческого шейпера (без per-packet логов).
 type ShaperStats struct {
-	ActiveProfile          string
-	ActiveArchetype        string
-	SentDataFrames         uint64
-	SentBatchFrames        uint64
-	CoalescedPackets       uint64
-	SentControlFrames      uint64
-	SentKeepalives         uint64
-	DroppedBackpressure    uint64
-	QueueDepth             int
-	QueuedBytes            int
-	ProfileDowngraded      bool
+	ActiveProfile       string
+	ActiveArchetype     string
+	SentDataFrames      uint64
+	SentBatchFrames     uint64
+	CoalescedPackets    uint64
+	SentControlFrames   uint64
+	SentKeepalives      uint64
+	DroppedBackpressure uint64
+	QueueDepth          int
+	QueuedBytes         int
+	ProfileDowngraded   bool
 }
 
 // ShaperOptions настраивает планировщик пакетов с ограниченной очередью, приоритетом данных и таймером простоя.
@@ -58,32 +59,33 @@ type ShaperOptions struct {
 
 // TrafficShaper управляет очередью отправки Argon4 v5 для заданного поведенческого профиля.
 type TrafficShaper struct {
-	opts      ShaperOptions
-	profile   SessionProfile
-	clock     Clock
-	tracker   *ActivityTracker
-	randUnit  func() float64
-	startedAt time.Time
-	salt      []byte
-	psk       []byte
-	key       []byte
-	maxOuter  int
+	opts            ShaperOptions
+	profile         SessionProfile
+	downgradeTarget SessionProfile
+	clock           Clock
+	tracker         *ActivityTracker
+	randUnit        func() float64
+	startedAt       time.Time
+	salt            []byte
+	psk             []byte
+	key             []byte
+	maxOuter        int
 
-	mu            sync.Mutex
-	closed        bool
-	started       bool
-	expired       bool
-	realQueue     []queuedPacket
-	queuedBytes   int
-	ctrlQueue     []string
-	lastRealIn    time.Time
-	lastRealOut   time.Time
-	lastAnyOut    time.Time
-	tokens        int
-	nextSlotAt    time.Time
-	nextKfAt      time.Time
-	nextFbAt      time.Time
-	nextKaAt      time.Time
+	mu          sync.Mutex
+	closed      bool
+	started     bool
+	expired     bool
+	realQueue   []queuedPacket
+	queuedBytes int
+	ctrlQueue   []string
+	lastRealIn  time.Time
+	lastRealOut time.Time
+	lastAnyOut  time.Time
+	tokens      int
+	nextSlotAt  time.Time
+	nextKfAt    time.Time
+	nextFbAt    time.Time
+	nextKaAt    time.Time
 
 	notifyCh chan struct{}
 	stopCh   chan struct{}
@@ -96,6 +98,27 @@ type TrafficShaper struct {
 	sentKeepalives      atomic.Uint64
 	droppedBackpressure atomic.Uint64
 	profileDowngraded   atomic.Bool
+}
+
+type unitRandReader struct {
+	fn func() float64
+}
+
+func (r unitRandReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	v := r.fn()
+	if v < 0 {
+		v = 0
+	} else if v >= 1 {
+		v = 0.999999
+	}
+	b := byte(v * 256.0)
+	for i := range p {
+		p[i] = b
+	}
+	return len(p), nil
 }
 
 // NewTrafficShaper создаёт поведенческий шейпер; вызов Start запускает фоновую горутину отправки.
@@ -129,6 +152,11 @@ func NewTrafficShaper(opts ShaperOptions) *TrafficShaper {
 	if maxOuter <= 0 {
 		maxOuter = MaxOuterBytesForPathMTU(prof.Padding.PathMTU)
 	}
+	var downgradeRng io.Reader = prof.randSrc
+	if downgradeRng == nil && opts.RandUnit != nil {
+		downgradeRng = unitRandReader{fn: randFn}
+	}
+	downgradeTarget := prof.DowngradeToBaseline(downgradeRng)
 
 	now := clk.Now()
 	initTokens := prof.BurstPackets
@@ -138,23 +166,24 @@ func NewTrafficShaper(opts ShaperOptions) *TrafficShaper {
 	}
 
 	return &TrafficShaper{
-		opts:      opts,
-		profile:   prof,
-		clock:     clk,
-		tracker:   tracker,
-		randUnit:  randFn,
-		startedAt: now,
-		salt:      append([]byte(nil), opts.Salt...),
-		psk:       append([]byte(nil), opts.PSK...),
-		key:       append([]byte(nil), opts.Key...),
-		maxOuter:  maxOuter,
-		tokens:    initTokens,
-		nextSlotAt: now,
-		nextKfAt:   nextKf,
-		lastAnyOut: now,
-		notifyCh:  make(chan struct{}, 1),
-		stopCh:    make(chan struct{}),
-		doneCh:    make(chan struct{}),
+		opts:            opts,
+		profile:         prof,
+		downgradeTarget: downgradeTarget,
+		clock:           clk,
+		tracker:         tracker,
+		randUnit:        randFn,
+		startedAt:       now,
+		salt:            append([]byte(nil), opts.Salt...),
+		psk:             append([]byte(nil), opts.PSK...),
+		key:             append([]byte(nil), opts.Key...),
+		maxOuter:        maxOuter,
+		tokens:          initTokens,
+		nextSlotAt:      now,
+		nextKfAt:        nextKf,
+		lastAnyOut:      now,
+		notifyCh:        make(chan struct{}, 1),
+		stopCh:          make(chan struct{}),
+		doneCh:          make(chan struct{}),
 	}
 }
 
@@ -219,6 +248,7 @@ func (s *TrafficShaper) EnqueueReal(pkt []byte) error {
 		s.mu.Unlock()
 		return net.ErrClosed
 	}
+	s.maybeExpireLocked(now)
 	if len(s.realQueue) >= s.profile.MaxQueuePackets || (len(s.realQueue) > 0 && s.queuedBytes+len(pkt) > s.profile.MaxQueueBytes) {
 		s.mu.Unlock()
 		s.droppedBackpressure.Add(1)
@@ -232,7 +262,7 @@ func (s *TrafficShaper) EnqueueReal(pkt []byte) error {
 	maxDelay := s.profile.MaxAddedDelay
 	deadline := now.Add(maxDelay)
 	coalesceAt := now
-	if s.profile.CoalesceEnabled && !s.expired && len(copied) <= s.profile.CoalesceThreshold && s.profile.CoalesceMaxWindow > 0 {
+	if s.profile.CoalesceEnabled && len(copied) <= s.profile.CoalesceThreshold && s.profile.CoalesceMaxWindow > 0 {
 		cw := RandomDurationBetween(s.profile.CoalesceMinWindow, s.profile.CoalesceMaxWindow, s.randUnit)
 		coalesceAt = now.Add(cw)
 		if coalesceAt.After(deadline) {
@@ -291,18 +321,33 @@ func (s *TrafficShaper) RecordInboundActivity() {
 	s.signalWake()
 }
 
+// EffectiveProfile возвращает текущий активный поведенческий профиль (с учётом снижения до baseline).
+func (s *TrafficShaper) EffectiveProfile() SessionProfile {
+	if s == nil {
+		return SessionProfile{}
+	}
+	s.mu.Lock()
+	s.maybeExpireLocked(s.clock.Now())
+	prof := s.profile
+	s.mu.Unlock()
+	return prof
+}
+
 // Stats возвращает текущую агрегированную статистику шейпера.
 func (s *TrafficShaper) Stats() ShaperStats {
 	if s == nil {
 		return ShaperStats{}
 	}
 	s.mu.Lock()
+	s.maybeExpireLocked(s.clock.Now())
+	activeProf := s.profile.Name
+	activeArch := s.profile.Archetype
 	depth := len(s.realQueue)
 	qBytes := s.queuedBytes
 	s.mu.Unlock()
 	return ShaperStats{
-		ActiveProfile:       s.profile.Name,
-		ActiveArchetype:     s.profile.Archetype,
+		ActiveProfile:       activeProf,
+		ActiveArchetype:     activeArch,
 		SentDataFrames:      s.sentDataFrames.Load(),
 		SentBatchFrames:     s.sentBatchFrames.Load(),
 		CoalescedPackets:    s.coalescedPackets.Load(),
@@ -330,12 +375,12 @@ func (s *TrafficShaper) runLoop() {
 	defer timer.Stop()
 
 	for {
-		item, wait, stop := s.nextStep(s.clock.Now())
+		item, prof, wait, stop := s.nextStep(s.clock.Now())
 		if stop {
 			return
 		}
 		if item != nil {
-			if err := s.emitItem(item); err != nil {
+			if err := s.emitItem(item, prof); err != nil {
 				if IsFatalKeepaliveError(err) {
 					if s.opts.OnFatalError != nil {
 						s.opts.OnFatalError(err)
@@ -359,27 +404,20 @@ func (s *TrafficShaper) runLoop() {
 	}
 }
 
-func (s *TrafficShaper) nextStep(now time.Time) (*sendItem, time.Duration, bool) {
+func (s *TrafficShaper) nextStep(now time.Time) (*sendItem, SessionProfile, time.Duration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.closed {
-		return nil, 0, true
+		return nil, SessionProfile{}, 0, true
 	}
 
-	if s.profile.MaxDuration > 0 && !s.expired && !now.Before(s.startedAt.Add(s.profile.MaxDuration)) {
-		s.expired = true
-		s.ctrlQueue = nil
-		s.nextFbAt = time.Time{}
-		s.nextKaAt = time.Time{}
-		s.profileDowngraded.Store(true)
-		log.Printf("[argon4-profile] время действия профиля %q истекло (%v); фоновый режим снижен до baseline",
-			s.profile.Name, s.profile.MaxDuration)
-	}
+	s.maybeExpireLocked(now)
+	prof := s.profile
 
 	if len(s.realQueue) > 0 {
 		item, wait := s.stepRealLocked(now)
-		return item, wait, false
+		return item, prof, wait, false
 	}
 
 	if len(s.ctrlQueue) > 0 {
@@ -391,10 +429,29 @@ func (s *TrafficShaper) nextStep(now time.Time) (*sendItem, time.Duration, bool)
 			frameType: FrameTypeKeepalive,
 			payload:   []byte(payload),
 			isPing:    isPing,
-		}, 0, false
+		}, prof, 0, false
 	}
 
-	return s.stepIdleLocked(now), s.computeIdleWaitLocked(now), false
+	return s.stepIdleLocked(now), prof, s.computeIdleWaitLocked(now), false
+}
+
+func (s *TrafficShaper) maybeExpireLocked(now time.Time) {
+	if s.profile.MaxDuration <= 0 || s.expired || now.Before(s.startedAt.Add(s.profile.MaxDuration)) {
+		return
+	}
+	prevName := s.profile.Name
+	maxDur := s.profile.MaxDuration
+	s.expired = true
+	s.profile = s.downgradeTarget
+	s.ctrlQueue = nil
+	s.nextFbAt = time.Time{}
+	s.nextKaAt = time.Time{}
+	s.tokens = 0
+	s.nextSlotAt = time.Time{}
+	s.nextKfAt = time.Time{}
+	s.profileDowngraded.Store(true)
+	log.Printf("[argon4-profile] время действия профиля %q истекло (%v); профиль снижен до %q (%s)",
+		prevName, maxDur, s.profile.Name, s.profile.Archetype)
 }
 
 func (s *TrafficShaper) stepRealLocked(now time.Time) (*sendItem, time.Duration) {
@@ -416,8 +473,7 @@ func (s *TrafficShaper) stepRealLocked(now time.Time) (*sendItem, time.Duration)
 	mustFlushNow := !now.Before(head.deadline) ||
 		len(s.realQueue) >= highWatermark ||
 		len(s.realQueue) >= s.profile.CoalesceMaxPackets ||
-		len(head.payload) > s.profile.CoalesceThreshold ||
-		s.expired
+		len(head.payload) > s.profile.CoalesceThreshold
 
 	if !mustFlushNow && s.profile.CoalesceEnabled && s.allCoalesceableLocked() && now.Before(head.coalesceAt) {
 		return nil, head.coalesceAt.Sub(now)
@@ -463,7 +519,7 @@ func (s *TrafficShaper) allCoalesceableLocked() bool {
 
 func (s *TrafficShaper) popRealLocked(now time.Time) *sendItem {
 	head := s.realQueue[0]
-	if s.profile.CoalesceEnabled && !s.expired && len(s.realQueue) >= 2 && len(head.payload) <= s.profile.CoalesceThreshold {
+	if s.profile.CoalesceEnabled && len(s.realQueue) >= 2 && len(head.payload) <= s.profile.CoalesceThreshold {
 		maxOuter := s.profile.TargetMaxOuter
 		if s.maxOuter > 0 && (maxOuter == 0 || s.maxOuter < maxOuter) {
 			maxOuter = s.maxOuter
@@ -573,6 +629,10 @@ func (s *TrafficShaper) computeIdleWaitLocked(now time.Time) time.Duration {
 		s.nextFbAt = time.Time{}
 	}
 
+	if s.profile.MaxDuration > 0 && !s.expired {
+		consider(s.startedAt.Add(s.profile.MaxDuration))
+	}
+
 	if s.opts.KeepaliveEnabled {
 		if s.nextKaAt.IsZero() {
 			s.scheduleKeepaliveLocked(now)
@@ -649,7 +709,7 @@ func (s *TrafficShaper) scheduleKeepaliveLocked(now time.Time) {
 	s.nextKaAt = now.Add(RandomDurationBetween(minI, maxI, s.randUnit))
 }
 
-func (s *TrafficShaper) emitItem(item *sendItem) error {
+func (s *TrafficShaper) emitItem(item *sendItem, prof SessionProfile) error {
 	if item == nil {
 		return nil
 	}
@@ -660,8 +720,8 @@ func (s *TrafficShaper) emitItem(item *sendItem) error {
 	seq := s.opts.NextSeq()
 	wire, err := SealPacketWithOptions(item.frameType, s.salt, s.psk, s.key, seq, item.payload, SealOptions{
 		Version:       ver,
-		Padding:       s.profile.Padding,
-		SamplePad:     s.profile.SamplePaddingLen,
+		Padding:       prof.Padding,
+		SamplePad:     prof.SamplePaddingLen,
 		MaxOuterBytes: s.maxOuter,
 	})
 	if err != nil {

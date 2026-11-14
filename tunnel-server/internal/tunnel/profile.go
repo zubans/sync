@@ -501,6 +501,55 @@ func EffectiveProfileTunMTU(requestedMTU, pathMTU int, version byte, prof Sessio
 	return base
 }
 
+// DowngradeToBaseline формирует эффективный профиль baseline при истечении срока действия video-call.
+func (p SessionProfile) DowngradeToBaseline(rng io.Reader) SessionProfile {
+	if rng == nil {
+		rng = p.randSrc
+	}
+	if rng == nil {
+		rng = rand.Reader
+	}
+	basePad := PaddingConfig{
+		Profile: p.Padding.Profile,
+		PathMTU: p.Padding.PathMTU,
+	}
+	if basePad.Profile == "" || basePad.Profile == PaddingProfileCustom {
+		basePad.Profile = PaddingProfileBalanced
+	}
+	basePad = ResolvePaddingConfig(basePad, true)
+
+	timing := DefaultTimingConfig()
+	if p.KeepaliveMinIdle >= 10*time.Second && p.KeepaliveMaxIdle > p.KeepaliveMinIdle {
+		timing.KeepaliveMinIdle = p.KeepaliveMinIdle
+		timing.KeepaliveMaxIdle = p.KeepaliveMaxIdle
+	}
+
+	down := sampleBaselineArchetype("", basePad, timing, rng)
+	down.Version = BehaviorProfileVersion
+	if p.Version > down.Version {
+		down.Version = p.Version
+	}
+	if p.MaxAddedDelay > 0 && p.MaxAddedDelay < down.MaxAddedDelay {
+		down.MaxAddedDelay = p.MaxAddedDelay
+		if down.CoalesceMaxWindow > down.MaxAddedDelay {
+			down.CoalesceMaxWindow = down.MaxAddedDelay
+		}
+		if down.CoalesceMinWindow > down.CoalesceMaxWindow {
+			down.CoalesceMinWindow = down.CoalesceMaxWindow
+		}
+	}
+	if p.MaxQueuePackets > 0 {
+		down.MaxQueuePackets = p.MaxQueuePackets
+	}
+	if p.MaxQueueBytes > 0 {
+		down.MaxQueueBytes = p.MaxQueueBytes
+	}
+	down.LowPowerMode = p.LowPowerMode
+	down.MaxDuration = 0
+	down.randSrc = rng
+	return down
+}
+
 // SamplePaddingLen выбирает переменную длину padding из мультимодальных корзин профиля в рамках path MTU.
 func (p SessionProfile) SamplePaddingLen(payloadLen, maxOuterBytes int) (int, error) {
 	if payloadLen < 0 {

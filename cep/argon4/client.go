@@ -391,6 +391,9 @@ func (c *Client) WritePacket(plaintext []byte) error {
 
 // Profile возвращает активный поведенческий профиль клиентской сессии.
 func (c *Client) Profile() SessionProfile {
+	if c.shaper != nil {
+		return c.shaper.EffectiveProfile()
+	}
 	return c.profile
 }
 

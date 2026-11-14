@@ -547,6 +547,7 @@ class ArgonVpnService : VpnService() {
             }
         }
 
+        var activeShaper: ArgonTrafficShaper? = null
         val shaper: ArgonTrafficShaper? = if (profile.isActive()) {
             ArgonTrafficShaper(
                 profile = profile,
@@ -562,7 +563,12 @@ class ArgonVpnService : VpnService() {
                 nextSeq = { seqCounter.getAndIncrement() },
                 writeWire = { wire -> sendWirePacket(wire) },
                 onDowngrade = { msg ->
-                    _status.value = _status.value.copy(warningMessage = msg)
+                    val eff = activeShaper?.effectiveProfile()
+                    _status.value = _status.value.copy(
+                        behaviorProfile = eff?.name ?: Argon4Profile.PROFILE_BASELINE,
+                        behaviorArchetype = eff?.archetype ?: _status.value.behaviorArchetype,
+                        warningMessage = msg,
+                    )
                 },
                 onFatalError = { err ->
                     _status.value = _status.value.copy(lastError = "Ошибка шейпера профиля: ${err.message}")
@@ -570,7 +576,10 @@ class ArgonVpnService : VpnService() {
                     runCatching { pfd.close() }
                     scope.cancel()
                 },
-            ).also { it.start(scope) }
+            ).also {
+                activeShaper = it
+                it.start(scope)
+            }
         } else {
             null
         }

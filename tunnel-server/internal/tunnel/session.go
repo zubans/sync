@@ -162,13 +162,18 @@ func (s *PeerSession) sealOptions(defaultMaxOuter int) SealOptions {
 	if maxOuter <= 0 {
 		maxOuter = defaultMaxOuter
 	}
+	prof := s.Profile
+	if s.Shaper != nil {
+		prof = s.Shaper.EffectiveProfile()
+	}
 	opts := SealOptions{
 		Version:       ver,
 		Padding:       s.Padding,
 		MaxOuterBytes: maxOuter,
 	}
-	if ver == ProtocolVersionV5 && s.Profile.IsActive() {
-		opts.SamplePad = s.Profile.SamplePaddingLen
+	if ver == ProtocolVersionV5 && prof.IsActive() {
+		opts.Padding = prof.Padding
+		opts.SamplePad = prof.SamplePaddingLen
 	}
 	return opts
 }
