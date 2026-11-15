@@ -10,6 +10,7 @@ RUN install-php-extensions \
         opcache \
         pdo_pgsql \
         pdo_sqlite \
+        sockets \
         zip \
     && apt-get update \
     && apt-get install -y --no-install-recommends unzip curl ca-certificates \
