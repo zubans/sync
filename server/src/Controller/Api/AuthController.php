@@ -70,6 +70,9 @@ final class AuthController extends AbstractController
         if ($user === null || !$this->hasher->isPasswordValid($user, $input->password)) {
             return $this->json(['error' => 'Неверный email или пароль.'], Response::HTTP_UNAUTHORIZED);
         }
+        if (!$user->isEnabled()) {
+            return $this->json(['error' => 'Учётная запись отключена или системный доступ отозван.'], Response::HTTP_FORBIDDEN);
+        }
         $limit->reset();
 
         if ($this->hasher->needsRehash($user)) {

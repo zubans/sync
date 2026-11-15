@@ -22,6 +22,7 @@ use Symfony\Component\Security\Http\Attribute\CurrentUser;
  * Хранилище паролей. Сервер хранит только шифротекст и параметры получения ключа.
  */
 #[Route('/api/vault')]
+#[\App\Security\RequiresFeature(\App\Service\FeatureManager::VAULT)]
 final class VaultController extends AbstractController
 {
     public function __construct(

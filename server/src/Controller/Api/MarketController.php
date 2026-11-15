@@ -28,6 +28,7 @@ use Symfony\Component\Security\Http\Attribute\CurrentUser;
  * инструментов моделью (`app:market:analyze` в контейнере `news`). Котировки планшет берёт из ISS сам.
  */
 #[Route('/api/market')]
+#[\App\Security\RequiresFeature(\App\Service\FeatureManager::MARKET)]
 final class MarketController extends AbstractController
 {
     /** Точек на графике экрана инструмента — около года торговых дней. */

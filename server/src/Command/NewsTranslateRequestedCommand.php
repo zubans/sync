@@ -2,6 +2,7 @@
 
 namespace App\Command;
 
+use App\Service\FeatureManager;
 use App\Service\NewsTranslator;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -43,8 +44,21 @@ final class NewsTranslateRequestedCommand extends Command
         return true;
     }
 
+    private ?FeatureManager $features = null;
+
+    #[\Symfony\Contracts\Service\Attribute\Required]
+    public function setFeatures(FeatureManager $features): void
+    {
+        $this->features = $features;
+    }
+
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        if ($this->features !== null && !$this->features->isEnabled(FeatureManager::AI_NEWS_TRANSLATE)) {
+            $output->writeln('<comment>ИИ-перевод новостей отключён в админке — пропуск.</comment>');
+
+            return Command::SUCCESS;
+        }
         if (!$this->lock()) {
             return Command::SUCCESS;
         }

@@ -2,12 +2,15 @@
 
 namespace App\Controller\Admin;
 
+use App\Security\RequiresFeature;
 use App\Service\ContactPhotoStorage;
+use App\Service\FeatureManager;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\Routing\Attribute\Route;
 
 /** Фото контактов для админки (доступ — по access_control для /admin, только ROLE_ADMIN). */
+#[RequiresFeature(FeatureManager::CONTACTS)]
 final class ContactPhotoController extends AbstractController
 {
     #[Route('/admin/contact-photo/{sha256}', name: 'admin_contact_photo', requirements: ['sha256' => '[0-9a-f]{64}'], methods: ['GET'])]

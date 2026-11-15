@@ -4,6 +4,8 @@ namespace App\Controller\Admin;
 
 use App\Entity\Contact;
 use App\Entity\Family;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use Doctrine\ORM\QueryBuilder;
 use EasyCorp\Bundle\EasyAdminBundle\Collection\FieldCollection;
 use EasyCorp\Bundle\EasyAdminBundle\Collection\FilterCollection;
@@ -28,6 +30,7 @@ use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
  *
  * @extends AbstractCrudController<Contact>
  */
+#[RequiresFeature(FeatureManager::CONTACTS)]
 final class FamilyContactCrudController extends AbstractCrudController
 {
     use ManagesContacts;

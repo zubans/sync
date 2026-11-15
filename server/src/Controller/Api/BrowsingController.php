@@ -19,6 +19,7 @@ use Symfony\Component\Security\Http\Attribute\CurrentUser;
  * История браузеров с устройств пользователя: клиент выгружает её раз в час, в админке — только просмотр.
  */
 #[Route('/api')]
+#[\App\Security\RequiresFeature(\App\Service\FeatureManager::BROWSING)]
 final class BrowsingController extends AbstractController
 {
     public function __construct(

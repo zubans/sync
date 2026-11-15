@@ -1,0 +1,204 @@
+{% extends '@EasyAdmin/page/content.html.twig' %}
+
+{% block content_title 'Узел и режим работы (Клиент / VPN-сервер)' %}
+
+{% block main %}
+    <div class="row g-3 mb-4">
+        <div class="col-lg-7">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <strong>Роль и сетевые параметры устройства</strong>
+                    <span class="badge {{ settings.serverMode ? 'bg-success' : 'bg-info text-dark' }}">
+                        {{ settings.serverMode ? 'Режим: VPN-сервер' : 'Режим: Клиент' }}
+                    </span>
+                </div>
+                <div class="card-body">
+                    <form method="post" action="{{ path('admin_vpn_node_settings') }}">
+                        <input type="hidden" name="_token" value="{{ csrf_token(csrfSettings) }}">
+
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold" for="node-mode">Кем является это устройство</label>
+                            <select id="node-mode" name="mode" class="form-select">
+                                {% for value, label in modes %}
+                                    <option value="{{ value }}" {{ settings.mode == value ? 'selected' }}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">
+                                Пользователи VPN/системы, серверные службы и проброс портов доступны только в режиме «VPN-сервер».
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-md-6">
+                                <label class="form-label" for="node-name">Имя узла</label>
+                                <input id="node-name" name="node_name" class="form-control" value="{{ settings.nodeName }}" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="public-host">Внешний IP / домен</label>
+                                <input id="public-host" name="public_host" class="form-control" value="{{ settings.publicHost }}" placeholder="vpn.example.com или IP">
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-md-4">
+                                <label class="form-label" for="wan-iface">WAN-интерфейс</label>
+                                <input id="wan-iface" name="wan_interface" class="form-control" value="{{ settings.wanInterface }}" required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label" for="vpn-subnet">Подсеть VPN (CIDR)</label>
+                                <input id="vpn-subnet" name="vpn_subnet_cidr" class="form-control" value="{{ settings.vpnSubnetCidr }}" required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label" for="dns-servers">DNS (через запятую)</label>
+                                <input id="dns-servers" name="dns_servers" class="form-control" value="{{ settings.dnsServers|join(', ') }}">
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="active-chain">Активная цепочка клиента</label>
+                            <select id="active-chain" name="active_client_chain_id" class="form-select">
+                                <option value="">Не выбрана</option>
+                                {% for c in chains %}
+                                    <option value="{{ c.id }}" {{ settings.activeClientChainId == c.id ? 'selected' }}>
+                                        {{ c.name }} ({{ c.hopsSummary }})
+                                    </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="form-check mb-2">
+                            <input id="block-ipv6" type="checkbox" class="form-check-input" name="block_ipv6" value="1" {{ settings.blockIpv6 ? 'checked' }}>
+                            <label class="form-check-label" for="block-ipv6">Блокировать IPv6 на клиенте (предотвращение утечек)</label>
+                        </div>
+                        <div class="form-check mb-3">
+                            <input id="auto-apply" type="checkbox" class="form-check-input" name="auto_apply_runtime" value="1" {{ settings.autoApplyRuntime ? 'checked' }}>
+                            <label class="form-check-label" for="auto-apply">Автоматически синхронизировать конфиги при изменениях</label>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary">Сохранить настройки узла</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-5">
+            <div class="card h-100 border-primary">
+                <div class="card-header bg-primary text-white">
+                    <strong>Мастер: сделать этот сервер VPN-сервером</strong>
+                </div>
+                <div class="card-body">
+                    <form method="post" action="{{ path('admin_vpn_node_provision') }}">
+                        <input type="hidden" name="_token" value="{{ csrf_token(csrfProvision) }}">
+                        <p class="text-muted small">
+                            Переключает узел в режим «Сервер», поднимает выбранные протоколы со свежими ключами и сразу генерирует конфиги демонов и клиентские подключения CEP.
+                        </p>
+
+                        <div class="row g-2 mb-2">
+                            <div class="col-md-6">
+                                <label class="form-label" for="prov-host">Внешний хост/IP</label>
+                                <input id="prov-host" name="public_host" class="form-control form-control-sm" value="{{ settings.publicHost }}" placeholder="198.51.100.10">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="prov-iface">WAN-интерфейс</label>
+                                <input id="prov-iface" name="wan_interface" class="form-control form-control-sm" value="{{ settings.wanInterface }}">
+                            </div>
+                        </div>
+
+                        <div class="mb-2">
+                            <label class="form-label" for="prov-subnet">Подсеть VPN</label>
+                            <input id="prov-subnet" name="vpn_subnet_cidr" class="form-control form-control-sm" value="{{ settings.vpnSubnetCidr }}">
+                        </div>
+
+                        <div class="mb-2">
+                            <div class="form-label">Какие протоколы поднять на сервере</div>
+                            <div class="border rounded p-2" style="max-height: 200px; overflow-y: auto;">
+                                {% for label, code in protocols %}
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="protocols[]" value="{{ code }}" id="prov-{{ code }}" {{ code in ['argon4', 'vless'] ? 'checked' }}>
+                                        <label class="form-check-label small" for="prov-{{ code }}">{{ label }}</label>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+
+                        <div class="mb-2">
+                            <label class="form-label" for="prov-user">Начальный пользователь VPN</label>
+                            <input id="prov-user" name="default_username" class="form-control form-control-sm" value="admin-vpn" placeholder="admin-vpn (или пусто)">
+                        </div>
+                        <div class="form-check mb-3">
+                            <input id="prov-sys" type="checkbox" class="form-check-input" name="grant_system_access" value="1">
+                            <label class="form-check-label small" for="prov-sys">Выдать ему системный вход в панель sync</label>
+                        </div>
+
+                        <button type="submit" class="btn btn-success w-100">
+                            <i class="fa fa-server"></i> Развернуть VPN-сервер на этом узле
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if not settings.serverMode %}
+        <div class="alert alert-info mb-4">
+            Сейчас устройство работает в режиме <strong>Клиент</strong>. Создание пользователей системы, серверных служб и правил проброса портов станет доступно после переключения режима на «VPN-сервер» или запуска мастера справа.
+        </div>
+    {% endif %}
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <strong>Сгенерированная конфигурация и файлы runtime (<code>{{ runtimeDir }}</code>)</strong>
+            <div class="d-flex gap-2">
+                <a class="btn btn-sm btn-outline-secondary" href="{{ path('admin_vpn_node_export_profiles') }}">profiles.json</a>
+                <a class="btn btn-sm btn-outline-secondary" href="{{ path('admin_vpn_node_export_desired_state') }}">desired-state.json</a>
+                <a class="btn btn-sm btn-outline-secondary" href="{{ path('admin_vpn_node_export_port_forward') }}">port-forward.sh</a>
+                <form method="post" action="{{ path('admin_vpn_node_sync') }}" class="d-inline">
+                    <input type="hidden" name="_token" value="{{ csrf_token(csrfSync) }}">
+                    <button type="submit" class="btn btn-sm btn-primary">Синхронизировать и применить</button>
+                </form>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <div class="text-muted small">Статус последнего применения</div>
+                    <div><strong>{{ settings.lastRuntimeStatus }}</strong>
+                        {% if settings.lastRuntimeAppliedAt %}
+                            ({{ settings.lastRuntimeAppliedAt|date('Y-m-d H:i:s') }})
+                        {% endif %}
+                    </div>
+                    {% if settings.lastRuntimeMessage %}
+                        <div class="small text-muted">{{ settings.lastRuntimeMessage }}</div>
+                    {% endif %}
+                </div>
+                <div class="col-md-8">
+                    <div class="text-muted small mb-1">Сводка узла</div>
+                    <div class="d-flex flex-wrap gap-3 small">
+                        <span>Подключений: <strong>{{ counts.connections }}</strong></span>
+                        <span>Цепочек: <strong>{{ counts.chains }}</strong></span>
+                        <span>Серверных служб: <strong>{{ counts.services }}</strong></span>
+                        <span>Правил проброса: <strong>{{ counts.forwards }}</strong></span>
+                        <span>Пользователей VPN: <strong>{{ counts.users }}</strong></span>
+                    </div>
+                </div>
+            </div>
+
+            {% if runtimeFiles is not empty %}
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0">
+                        <thead>
+                            <tr><th>Файл конфигурации</th><th>Размер (Б)</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for f in runtimeFiles %}
+                                <tr><td><code>{{ f.name }}</code></td><td>{{ f.size }}</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="text-muted mb-0">Файлы ещё не выгружены — нажмите «Синхронизировать и применить».</p>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

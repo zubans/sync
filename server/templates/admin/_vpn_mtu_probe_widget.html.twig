@@ -1,0 +1,98 @@
+<script>
+(() => {
+    const form = document.querySelector('form[name="VpnConnection"]');
+    const mtuInput = form ? form.querySelector('input[name="VpnConnection[argonPathMtu]"]') : null;
+    if (!form || !mtuInput) {
+        return;
+    }
+
+    const previewUrl = {{ path('admin_vpn_connection_probe_mtu_preview')|json_encode(constant('JSON_UNESCAPED_SLASHES'))|raw }};
+    const csrfToken = {{ csrf_token('probe_mtu_preview')|json_encode(constant('JSON_UNESCAPED_SLASHES'))|raw }};
+    const connectionId = {{ (ea.entity is defined and ea.entity and ea.entity.primaryKeyValue ? ea.entity.primaryKeyValue : null)|json_encode|raw }};
+
+    const bar = document.createElement('div');
+    bar.className = 'mt-2 d-flex flex-wrap align-items-center gap-2';
+    bar.id = 'cep-mtu-probe-bar';
+
+    const probeBtn = document.createElement('button');
+    probeBtn.type = 'button';
+    probeBtn.id = 'cep-mtu-probe-btn';
+    probeBtn.className = 'btn btn-sm btn-outline-primary';
+    probeBtn.textContent = 'Подобрать MTU';
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.id = 'cep-mtu-reset-btn';
+    resetBtn.className = 'btn btn-sm btn-outline-secondary';
+    resetBtn.textContent = 'Авто (сбросить)';
+
+    const status = document.createElement('span');
+    status.id = 'cep-mtu-probe-status';
+    status.className = 'small text-muted';
+
+    bar.appendChild(probeBtn);
+    bar.appendChild(resetBtn);
+    bar.appendChild(status);
+
+    const fieldWidget = mtuInput.closest('.form-widget') || mtuInput.parentElement;
+    fieldWidget.appendChild(bar);
+
+    const readVal = (name) => {
+        const el = form.querySelector(`[name="VpnConnection[${name}]"]`);
+        if (!el) return null;
+        if (el.type === 'checkbox') return Boolean(el.checked);
+        return el.value;
+    };
+
+    resetBtn.addEventListener('click', () => {
+        mtuInput.value = '';
+        status.className = 'small text-secondary';
+        status.textContent = 'Выбран автоматический подбор оптимального MTU при подключении.';
+    });
+
+    probeBtn.addEventListener('click', async () => {
+        probeBtn.disabled = true;
+        status.className = 'small text-muted';
+        status.textContent = 'Зондирование канала (DF / TCP MSS / Argon4 PLPMTUD)...';
+
+        try {
+            const resp = await fetch(previewUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': csrfToken,
+                },
+                body: JSON.stringify({
+                    _token: csrfToken,
+                    connectionId,
+                    name: readVal('name'),
+                    proto: readVal('proto'),
+                    server: readVal('server'),
+                    uri: readVal('uri'),
+                    config: readVal('config'),
+                    useArgon: readVal('useArgon'),
+                    password: readVal('password'),
+                    argonPassword: readVal('argonPassword'),
+                    argonProtocolVersion: readVal('argonProtocolVersion'),
+                    argonPaddingProfile: readVal('argonPaddingProfile'),
+                }),
+            });
+            const data = await resp.json();
+            if (data && data.ok && data.optimal_path_mtu) {
+                mtuInput.value = String(data.optimal_path_mtu);
+                status.className = 'small text-success fw-medium';
+                status.textContent = data.message || `Оптимальный MTU: ${data.optimal_path_mtu} Б`;
+            } else {
+                status.className = 'small text-danger';
+                status.textContent = (data && (data.error || data.message)) || 'Не удалось подобрать MTU.';
+            }
+        } catch (err) {
+            status.className = 'small text-danger';
+            status.textContent = 'Ошибка сетевого запроса при зондировании MTU.';
+        } finally {
+            probeBtn.disabled = false;
+        }
+    });
+})();
+</script>

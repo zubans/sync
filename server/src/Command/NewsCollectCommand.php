@@ -2,6 +2,7 @@
 
 namespace App\Command;
 
+use App\Service\FeatureManager;
 use App\Service\NewsCollector;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -24,8 +25,21 @@ final class NewsCollectCommand extends Command
         parent::__construct();
     }
 
+    private ?FeatureManager $features = null;
+
+    #[\Symfony\Contracts\Service\Attribute\Required]
+    public function setFeatures(FeatureManager $features): void
+    {
+        $this->features = $features;
+    }
+
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        if ($this->features !== null && !$this->features->isEnabled(FeatureManager::NEWS)) {
+            $output->writeln('<comment>Блок «Новости» отключён в админке — сбор пропущен.</comment>');
+
+            return Command::SUCCESS;
+        }
         $io = new SymfonyStyle($input, $output);
         if (!$this->lock()) {
             $io->warning('Сбор уже идёт');

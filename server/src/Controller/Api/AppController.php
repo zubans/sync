@@ -27,6 +27,7 @@ use Symfony\Component\Security\Http\Attribute\CurrentUser;
  * Резервные копии приложений: список установленных, загрузка APK частями, скачивание для восстановления.
  */
 #[Route('/api')]
+#[\App\Security\RequiresFeature(\App\Service\FeatureManager::APPS)]
 final class AppController extends AbstractController
 {
     private const SHA256 = '[0-9a-f]{64}';

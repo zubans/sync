@@ -4,6 +4,8 @@ namespace App\Controller\Admin;
 
 use App\Entity\Contact;
 use App\Entity\User;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\QueryBuilder;
 use EasyCorp\Bundle\EasyAdminBundle\Attribute\AdminRoute;
@@ -31,6 +33,7 @@ use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
  *
  * @extends AbstractCrudController<Contact>
  */
+#[RequiresFeature(FeatureManager::CONTACTS)]
 #[AdminRoute(path: '/trash', name: 'trash')]
 final class TrashCrudController extends AbstractCrudController
 {

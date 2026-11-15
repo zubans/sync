@@ -48,7 +48,7 @@ tunnel-server/    Серверный демон для Ubuntu (Go, UDP listener 
 ### Установка на Ubuntu (systemd)
 
 ```bash
-make install-ubuntu-tunnel
+make vpn-argon4-ubuntu
 ```
 
 Либо вручную:
@@ -60,12 +60,12 @@ sudo systemctl restart argon-tunnel
 sudo journalctl -u argon-tunnel -f
 ```
 
-### Запуск в Docker Compose (вместе с Contact Sync)
+### Запуск в Docker Compose (профиль `vpn`)
 
-В `compose.yaml` добавлен сервис `tunnel`. В `.env` задаются `ARGON_MASTER_PASSWORD` и `ARGON_UDP_PORT` (по умолчанию `51820`):
+В `compose.yaml` добавлен сервис `tunnel` (профиль `vpn`). В `.env` задаются `ARGON_MASTER_PASSWORD` и `ARGON_UDP_PORT` (по умолчанию `51820`):
 
 ```bash
-make up
+make vpn-argon4-up   # или make vpn-up (поднимает tunnel + ocserv)
 ```
 
 ---
@@ -82,11 +82,11 @@ make up
   - По умолчанию в зашифрованный канал включён **Contact Sync** (`com.example.contactsync`).
   - В списке установленных приложений можно отметить **КБ**, **CEP** или любые другие приложения (либо добавить имя пакета вручную), а также переключить режим на маршрутизацию всех приложений устройства.
 
-### Сборка и установка APK клиента
+### Сборка и установка устаревшего отдельного APK `:tunnel` (legacy)
 
 ```bash
-make tunnel-apk
-make install-tunnel-apk
+make vpn-legacy-argon-apk
+make vpn-legacy-argon-inst
 ```
 
 ---
@@ -105,7 +105,7 @@ make install-tunnel-apk
 - `-allow-v4` / `ARGON_ALLOW_V4` (по умолчанию `true` на сервере для переходного периода с legacy `0x04`-клиентами; установка `false` переводит сервер в строгий режим v5). На активной v5-сессии откат на `v4` отклоняется всегда.
 - `-padding-profile` / `ARGON_PADDING_PROFILE` (`balanced` | `compact` | `wide` | `custom`, по умолчанию `balanced`).
 - `-first-packet-profile` / `ARGON_FIRST_PACKET_PROFILE` (отдельный профиль padding для первого кадра `HandshakeReq`, по умолчанию `wide`).
-- `-path-mtu` / `ARGON_PATH_MTU` (внешний MTU трассы `576..9000`, по умолчанию `1500`; эффективный внутренний TUN MTU снижается автоматически с учётом IP/UDP-заголовка и 50-байтного overhead v5).
+- `-path-mtu` / `ARGON_PATH_MTU` (внешний MTU трассы `576..9000`, либо `0` — автоматический подбор оптимального Path MTU при старте; эффективный внутренний TUN MTU снижается автоматически с учётом IP/UDP-заголовка, overhead v5 и бюджета промежуточных узлов).
 
 ### Тайминги handshake и адаптивный idle keepalive
 
@@ -146,3 +146,17 @@ make install-tunnel-apk
   - `argon-tunnel-client`: `-behavior-profile` (`ARGON_BEHAVIOR_PROFILE`), `-low-power` (`ARGON_LOW_POWER=0|1`), `-video-call-max-duration` (`ARGON_VIDEO_CALL_MAX_DURATION=2h`);
   - CEP (`Models.swift`, `cep-cli`, `android/cep-engine`, `CepModels.kt`): `argonBehaviorProfile`, `argonLowPowerMode`, `argonVideoCallMaxDurationSec`;
   - Android Kotlin `TunnelSettings` / UI: `behaviorProfile`, `lowPowerMode`, `videoCallMaxMinutes`.
+
+### Автоподстройка MTU в промежуточных транзитах и подбор MTU для каждого узла
+
+1. **Автоматический стартовый подбор (при `pathMTU = 0` / пустом `argonPathMTU`)**:
+   - Перед поднятием TUN/цепочки клиенты (`cep-argon4`, `cep-cli`, `android/cep-engine`, `cep-engine` macOS) и серверные/транзитные сессии запускают `DiscoverPathMTU`: проверяют интерфейсный MTU маршрута, DF-потолок сокета (`IP_MTU_DISCOVER`/`IP_MTU` на Linux, `IP_DONTFRAG`/`SIOCGIFMTU` на Darwin) и зондируют Argon4-канал до фактического максимума без фрагментации.
+   - Найденный `PathMTU` / `InnerMTU` автоматически передаётся по цепочке вниз как верхний бюджет для вложенных транзитов, `sing-box`, `OpenConnect` (`CEP_FORCE_MTU`) и `OpenVPN` (`--mssfix` / MTU).
+2. **Живая адаптация на лету (in-band PLPMTUD + DF/`EMSGSIZE`)**:
+   - В `tunnel-server/`, `cep/argon4/`, `cep-argon4` и `android/cep-engine` (включая TUN и L4 UDP-транзиты `TransitProxy` / `connectTransitUDP`) работает периодический и событийный PLPMTUD поверх зашифрованных кадров `"pmtu:"`, `"pmtu-ack:"` и `"pmtu-limit:"`.
+   - При получении `EMSGSIZE` от ядра пакет не теряет сессию, а инициирует мгновенное сжатие внешнего потолка, уведомляет пир по in-band `"pmtu-limit:"` и возвращает в TUN ICMP Fragmentation Needed (Type 3 Code 4), чтобы ОС/вложенный клиент немедленно уменьшил сегменты.
+3. **Подбор MTU для каждого узла («Подобрать MTU») на всех платформах**:
+   - **Веб-админка (`server/`)**: кнопка «Подобрать MTU» в списке/карточке и форме создания/редактирования каждого подключения (`MtuProbeService` с реальным UDP DF с обязательным подтверждением ответа пира, TCP `TCP_MAXSEG`, `cep-cli probe-mtu` с передачей `Target` следующего узла цепочки и учётом предшествующих шагов), плюс «Авто (сбросить)».
+   - **Linux CLI (`cep-cli`)**: команда `cep-cli probe-mtu` (`-id`, `-chain`, `-target`, `-apply`, `-json`, `-proto/-server/-link`, `-req-json`) и пункт `4. Подобрать MTU для узла` в интерактивном мастере `cep-cli wizard`. Для аутентифицированного `transit` обязательно определяется `Target` следующего узла в цепочке без отката к нерелевантному `TCP MSS`.
+   - **macOS (`ContactSyncCEP`)**: `MTUProbe` (`Darwin` `IP_DONTFRAG`/`TCP_MAXSEG`/`SIOCGIFMTU` с подтверждением ответа UDP-сокета, а также `cep-cli` с `nextTarget`) и кнопки «Подобрать MTU» / «Авто» в редакторе каждого узла (`ProfileEditor`).
+   - **Android (`CepScreen` / `cep-engine`)**: экспортируемая `ProbeProfileMTU` через `cepcore.aar`, подставляющая `Target` следующего шага цепочки для аутентифицированного `transit`, с бинарным поиском до 1 байта без подстановки `1500` на таймауте, плюс кнопки «Подобрать MTU» и «Сбросить (авто)» в `ProfileEditor`.

@@ -1,0 +1,201 @@
+{% extends '@EasyAdmin/page/content.html.twig' %}
+
+{% block content_title %}Модули и функции ИИ{% endblock %}
+
+{% block main %}
+<div class="container-fluid px-0">
+    <div class="alert alert-info d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-2 mb-4">
+        <div>
+            <strong>Единое управление блоками сервера.</strong>
+            Отключённые блоки скрываются из меню админки, отвечают кодом <code>503</code> по API/админке и пропускаются консольными задачами.
+            Базовые функции (пользователи, авторизация, проверка связности <code>/generate_204</code>, версии Android-приложения) активны всегда.
+        </div>
+        <a href="{{ path('admin_ai_providers_index') }}" class="btn btn-sm btn-outline-primary text-nowrap">
+            Провайдеры ИИ и CLI-агенты →
+        </a>
+    </div>
+
+    <form method="post" action="{{ path('admin_features_save') }}">
+        <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+
+        <div class="row g-4">
+            {# БЛОК 1: ДАННЫЕ УСТРОЙСТВА #}
+            <div class="col-12 col-xl-4">
+                <div class="card h-100 shadow-sm">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span class="fw-bold">1. Данные устройства</span>
+                        <div class="form-check form-switch m-0">
+                            <input class="form-check-input" type="checkbox" role="switch" id="f_device_data" name="device_data" value="1" {% if settings.deviceDataEnabled %}checked{% endif %}>
+                            <label class="form-check-label fw-semibold" for="f_device_data">Включён</label>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted small mb-3">
+                            Главный переключатель синхронизации телефона. При выключении отключаются все разделы персональных данных ниже.
+                        </p>
+
+                        {% set deviceItems = [
+                            ['contacts', 'Контакты, семьи и дубликаты', settings.contactsEnabled, 'POST/GET /api/contacts/*, адресная книга и корзина'],
+                            ['vault', 'Менеджер паролей', settings.vaultEnabled, '/api/vault и хранилища паролей'],
+                            ['apps', 'Приложения и APK-бэкапы', settings.appsEnabled, '/api/apps/* и учёт установленных APK'],
+                            ['calendar', 'Календарь и семейный доступ', settings.calendarEnabled, '/api/calendars/* и события'],
+                            ['browsing', 'История браузеров', settings.browsingEnabled, '/api/browsing и журнал посещений']
+                        ] %}
+
+                        {% for item in deviceItems %}
+                            {% set key = item[0] %}
+                            {% set title = item[1] %}
+                            {% set checked = item[2] %}
+                            {% set hint = item[3] %}
+                            <div class="border rounded p-2 mb-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <label class="form-check-label fw-medium" for="f_{{ key }}">{{ title }}</label>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <span class="badge {{ effective[key] ? 'bg-success' : 'bg-secondary' }}">
+                                            {{ effective[key] ? 'активен' : 'выкл' }}
+                                        </span>
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="f_{{ key }}" name="{{ key }}" value="1" {% if checked %}checked{% endif %}>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="text-muted" style="font-size: 0.78rem;">{{ hint }}</div>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+
+            {# БЛОК 2: НОВОСТИ, МОСБИРЖА И ФУНКЦИИ ИИ #}
+            <div class="col-12 col-xl-4">
+                <div class="card h-100 shadow-sm">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span class="fw-bold">2. Новости, рынок акций и ИИ</span>
+                        <span class="badge {{ effective['ai_news'] or effective['ai_market'] ? 'bg-primary' : 'bg-secondary' }}">Гранулярный ИИ</span>
+                    </div>
+                    <div class="card-body">
+                        {# Новости + ИИ новостей #}
+                        <div class="border rounded p-3 mb-3 bg-light-subtle">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="fw-bold">Блок «Новости»</span>
+                                <div class="form-check form-switch m-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="f_news" name="news" value="1" {% if settings.newsEnabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="f_news">Блок</label>
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center ps-2 mb-2 border-top pt-2">
+                                <label class="form-check-label fw-semibold" for="f_ai_news">Обработка новостей с помощью ИИ (группа)</label>
+                                <div class="form-check form-switch m-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="f_ai_news" name="ai_news" value="1" {% if settings.aiNewsEnabled %}checked{% endif %}>
+                                </div>
+                            </div>
+
+                            {% set aiNewsItems = [
+                                ['ai_news_translate', 'ИИ: перевод заголовков и статей', settings.aiNewsTranslateEnabled, 'NewsTranslator / app:news:translate'],
+                                ['ai_news_storylines', 'ИИ: сюжетные линии и эмбеддинги', settings.aiNewsStorylinesEnabled, 'NewsStorylineService + NewsEmbedder / app:news:analyze'],
+                                ['ai_news_digest', 'ИИ: часовые и суточные сводки', settings.aiNewsDigestEnabled, 'NewsDigestService / app:news:digest']
+                            ] %}
+                            {% for item in aiNewsItems %}
+                                <div class="d-flex justify-content-between align-items-start ps-3 py-1">
+                                    <div>
+                                        <label class="form-check-label small fw-medium" for="f_{{ item[0] }}">{{ item[1] }}</label>
+                                        <div class="text-muted" style="font-size: 0.74rem;">{{ item[3] }}</div>
+                                    </div>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <span class="badge {{ effective[item[0]] ? 'bg-success' : 'bg-secondary' }}">{{ effective[item[0]] ? 'вкл' : 'выкл' }}</span>
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="f_{{ item[0] }}" name="{{ item[0] }}" value="1" {% if item[2] %}checked{% endif %}>
+                                        </div>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+
+                        {# Рынок акций + ИИ Мосбиржи #}
+                        <div class="border rounded p-3 mb-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="fw-bold">Блок «Рынок акций (Мосбиржа)»</span>
+                                <div class="form-check form-switch m-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="f_market" name="market" value="1" {% if settings.marketEnabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="f_market">Блок</label>
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center ps-2 mb-2 border-top pt-2">
+                                <label class="form-check-label fw-semibold" for="f_ai_market">Обработка рынка акций с ИИ (группа)</label>
+                                <div class="form-check form-switch m-0">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="f_ai_market" name="ai_market" value="1" {% if settings.aiMarketEnabled %}checked{% endif %}>
+                                </div>
+                            </div>
+
+                            {% set aiMarketItems = [
+                                ['ai_market_news_impact', 'ИИ: оценка влияния новостей на рынок', settings.aiMarketNewsImpactEnabled, 'NewsMarketService / app:news:market'],
+                                ['ai_market_analysis', 'ИИ: рекомендации и анализ покупок', settings.aiMarketAnalysisEnabled, 'MarketAnalysisService / app:market:analyze']
+                            ] %}
+                            {% for item in aiMarketItems %}
+                                <div class="d-flex justify-content-between align-items-start ps-3 py-1">
+                                    <div>
+                                        <label class="form-check-label small fw-medium" for="f_{{ item[0] }}">{{ item[1] }}</label>
+                                        <div class="text-muted" style="font-size: 0.74rem;">{{ item[3] }}</div>
+                                    </div>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <span class="badge {{ effective[item[0]] ? 'bg-success' : 'bg-secondary' }}">{{ effective[item[0]] ? 'вкл' : 'выкл' }}</span>
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="f_{{ item[0] }}" name="{{ item[0] }}" value="1" {% if item[2] %}checked{% endif %}>
+                                        </div>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+
+                        <div class="alert alert-secondary py-2 px-3 mb-0 small">
+                            <strong>Внешние ИИ-функции (вне sync-сервера):</strong>
+                            расшифровка звонков и встреч (<code>SaveRecordingActivity.kt</code>) загружает аудио напрямую во внешний сервер Knowledge Base (KB) и отключается на стороне KB или в настройках Android-приложения.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {# БЛОК 3: VPN И DOCKER COMPOSE #}
+            <div class="col-12 col-xl-4">
+                <div class="card h-100 shadow-sm">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span class="fw-bold">3. VPN и шифрование</span>
+                        <div class="form-check form-switch m-0">
+                            <input class="form-check-input" type="checkbox" role="switch" id="f_vpn" name="vpn" value="1" {% if settings.vpnEnabled %}checked{% endif %}>
+                            <label class="form-check-label fw-semibold" for="f_vpn">Включён</label>
+                        </div>
+                    </div>
+                    <div class="card-body d-flex flex-column justify-content-between">
+                        <div>
+                            <p class="text-muted small">
+                                Управляет разделами CEP / Argon4 Tunnel / ocserv / Цепочки узлов / Серверные службы / Проброс портов / Пользователи VPN.
+                            </p>
+                            <ul class="small ps-3 mb-3">
+                                <li>Состояние блока: <span class="badge {{ effective['vpn'] ? 'bg-success' : 'bg-secondary' }}">{{ effective['vpn'] ? 'активен' : 'выключен' }}</span></li>
+                                <li>При отключении <code>NodeRuntimeExporter</code> записывает пустое активное клиентское подключение и останавливает экспорт серверного режима.</li>
+                            </ul>
+
+                            <div class="border rounded p-3 mb-3">
+                                <div class="fw-semibold small mb-1">Профили контейнеров Docker Compose</div>
+                                <p class="text-muted small mb-2">
+                                    В <code>compose.yaml</code> сервисы разделены по профилям (<code>news</code>, <code>vpn</code>, <code>backup</code>). Команда запуска для текущих включённых модулей:
+                                </p>
+                                <pre class="bg-dark text-light p-2 rounded small mb-0"><code>{{ composeCommand }}</code></pre>
+                            </div>
+                        </div>
+
+                        <div class="d-grid gap-2 mt-3">
+                            <button type="submit" class="btn btn-primary btn-lg">
+                                Сохранить настройки модулей и ИИ
+                            </button>
+                            <a href="{{ path('admin_ai_providers_index') }}" class="btn btn-outline-secondary">
+                                Перейти к провайдерам ИИ и CLI-агентам
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </form>
+</div>
+{% endblock %}

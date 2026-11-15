@@ -2,6 +2,8 @@
 
 namespace App\Command;
 
+use App\Repository\AiAgentAccountRepository;
+use App\Repository\AiProviderRepository;
 use App\Service\AgyAccounts;
 use App\Service\NewsTranslator;
 use Doctrine\DBAL\Connection;
@@ -12,10 +14,14 @@ use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 
 /**
- * Состояние работы с agy одним экраном (`make agy-status`): аккаунты и что у них отдыхает, модели шагов,
- * очередь необработанного и последняя сводка. Журнал контейнеров к нему добавляет `make`.
+ * Состояние работы с agy и подключёнными ИИ-провайдерами одним экраном (`make ai-status` / `make agy-status`):
+ * аккаунты и что у них отдыхает, модели шагов, очередь необработанного и последняя сводка.
  */
-#[AsCommand(name: 'app:agy:status', description: 'Аккаунты agy, их лимиты, модели и очередь новостей')]
+#[AsCommand(
+    name: 'app:agy:status',
+    description: 'Провайдеры ИИ, аккаунты CLI-агентов (agy/claude/codex/gemini/kimi), их лимиты и очередь новостей',
+    aliases: ['app:ai:status'],
+)]
 final class AgyStatusCommand extends Command
 {
     public function __construct(
@@ -28,6 +34,8 @@ final class AgyStatusCommand extends Command
         private readonly string $dayModel = '',
         #[Autowire('%env(NEWS_AGY_FALLBACK_MODELS)%')]
         private readonly string $fallbackModels = '',
+        private readonly ?AiProviderRepository $aiProviders = null,
+        private readonly ?AiAgentAccountRepository $aiAccounts = null,
     ) {
         parent::__construct();
     }
@@ -88,6 +96,60 @@ final class AgyStatusCommand extends Command
         } else {
             $output->writeln('  последняя: '.($digest['last'] !== null ? substr((string) $digest['last'], 0, 16).' UTC' : 'ещё не было'));
             $output->writeln('  ошибка последней попытки: '.($digest['error'] !== null && $digest['error'] !== '' ? mb_substr((string) $digest['error'], 0, 200) : 'нет'));
+        }
+
+        if ($this->aiProviders !== null && $this->aiAccounts !== null) {
+            try {
+                $providers = $this->aiProviders->findAllOrdered();
+                $dbAccounts = $this->aiAccounts->findAllOrdered();
+                if ($providers !== [] || $dbAccounts !== []) {
+                    $output->writeln('');
+                    $output->writeln('<info>Подключённые провайдеры ИИ (БД)</info>');
+                    foreach ($providers as $provider) {
+                        $roles = [];
+                        if ($provider->isUseForSummarization()) {
+                            $roles[] = 'текст';
+                        }
+                        if ($provider->isUseForEmbeddings()) {
+                            $roles[] = 'эмбеддинги';
+                        }
+                        $output->writeln(sprintf(
+                            '  #%d [%s] %s (%s) — %s, приоритет %d, модель: %s',
+                            $provider->getId(),
+                            $provider->isEnabled() ? 'вкл' : 'выкл',
+                            $provider->getName(),
+                            $provider->getType(),
+                            implode('+', $roles) ?: 'без роли',
+                            $provider->getPriority(),
+                            $provider->getDefaultModel() ?? 'по умолчанию',
+                        ));
+                    }
+
+                    if ($dbAccounts !== []) {
+                        $output->writeln('');
+                        $output->writeln('<info>Аккаунты CLI-агентов (БД)</info>');
+                        foreach ($dbAccounts as $acc) {
+                            $emailPart = $acc->getAccountEmail() !== null ? ' ('.$acc->getAccountEmail().')' : '';
+                            $coolingPart = $acc->isCoolingNow() && $acc->getCoolingUntil() !== null
+                                ? ', отдыхает до '.$acc->getCoolingUntil()->format('d.m H:i').' UTC'
+                                : '';
+                            $output->writeln(sprintf(
+                                '  #%d [%s] %s:%s «%s» — %s%s%s',
+                                $acc->getId(),
+                                $acc->isEnabled() ? 'вкл' : 'выкл',
+                                $acc->getAgentType(),
+                                $acc->getSlot(),
+                                $acc->getLabel(),
+                                $acc->getStatus(),
+                                $emailPart,
+                                $coolingPart,
+                            ));
+                        }
+                    }
+                }
+            } catch (\Throwable) {
+                // База ещё без таблиц ai_provider / ai_agent_account — пропускаем блок БД.
+            }
         }
 
         return Command::SUCCESS;

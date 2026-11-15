@@ -3,6 +3,32 @@
 {% block content_title 'Обзор' %}
 
 {% block main %}
+    <div class="alert {{ nodeSettings.serverMode ? 'alert-success' : 'alert-info' }} d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <strong>Узел «{{ nodeSettings.nodeName }}»</strong> · Режим:
+            <span class="badge {{ nodeSettings.serverMode ? 'bg-success' : 'bg-info text-dark' }}">
+                {{ nodeSettings.serverMode ? 'VPN-сервер' : 'Клиент' }}
+            </span>
+            {% if nodeSettings.publicHost %}
+                · Хост: <code>{{ nodeSettings.publicHost }}</code>
+            {% endif %}
+        </div>
+        <a class="btn btn-sm btn-primary" href="{{ path('admin_vpn_node_index') }}">Настроить узел / режим</a>
+    </div>
+
+    <div class="row g-3 mb-4">
+        {% for stat in vpnStats %}
+            <div class="col-sm-6 col-lg-4">
+                <a class="card text-decoration-none h-100 border-primary-subtle" href="{{ path(stat[2]) }}">
+                    <div class="card-body">
+                        <div class="text-muted">{{ stat[0] }}</div>
+                        <div class="fs-2 fw-semibold">{{ stat[1] }}</div>
+                    </div>
+                </a>
+            </div>
+        {% endfor %}
+    </div>
+
     <div class="row g-3">
         {% for stat in stats %}
             <div class="col-sm-6 col-lg-4">

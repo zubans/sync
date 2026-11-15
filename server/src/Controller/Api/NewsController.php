@@ -26,6 +26,7 @@ use Symfony\Component\Routing\Attribute\Route;
  * Лента листается курсором: `nextCursor` из ответа передаётся в `before` следующего запроса.
  */
 #[Route('/api/news')]
+#[\App\Security\RequiresFeature(\App\Service\FeatureManager::NEWS)]
 final class NewsController extends AbstractController
 {
     private const DEFAULT_LIMIT = 50;

@@ -2,6 +2,7 @@
 
 namespace App\Command;
 
+use App\Service\FeatureManager;
 use App\Service\NewsMarketService;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -23,8 +24,21 @@ final class NewsMarketCommand extends Command
         parent::__construct();
     }
 
+    private ?FeatureManager $features = null;
+
+    #[\Symfony\Contracts\Service\Attribute\Required]
+    public function setFeatures(FeatureManager $features): void
+    {
+        $this->features = $features;
+    }
+
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        if ($this->features !== null && !$this->features->isEnabled(FeatureManager::AI_MARKET_NEWS_IMPACT)) {
+            $output->writeln('<comment>ИИ оценки влияния новостей на Мосбиржу отключён в админке — пропуск.</comment>');
+
+            return Command::SUCCESS;
+        }
         if (!$this->lock()) {
             $output->writeln('Разбор последствий уже идёт');
 
