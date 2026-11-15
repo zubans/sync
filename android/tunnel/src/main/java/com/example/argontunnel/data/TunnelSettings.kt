@@ -3,6 +3,10 @@ package com.example.argontunnel.data
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import com.example.argontunnel.BuildConfig
+import com.example.argontunnel.crypto.Argon4Profile
+import com.example.argontunnel.crypto.Argon4Timing
+import com.example.argontunnel.crypto.ArgonProfileConfig
+import com.example.argontunnel.crypto.ArgonTimingConfig
 import java.net.NetworkInterface
 import java.util.Collections
 import java.util.UUID
@@ -80,6 +84,102 @@ class TunnelSettings(private val context: Context) {
         }.getOrDefault(RoutingMode.SELECTED_APPS)
         set(value) = prefs.edit().putString(KEY_ROUTING_MODE, value.name).apply()
 
+    /** Версия протокола Argon4 (`4` или `5`, по умолчанию `5` с аутентифицированным padding). */
+    var protocolVersion: Int
+        get() = prefs.getInt(KEY_PROTOCOL_VERSION, 5)
+        set(value) = prefs.edit().putInt(KEY_PROTOCOL_VERSION, if (value == 4) 4 else 5).apply()
+
+    /** Профиль распределения переменной длины padding (`balanced`, `compact`, `wide`). */
+    var paddingProfile: String
+        get() = prefs.getString(KEY_PADDING_PROFILE, "balanced")?.ifBlank { "balanced" } ?: "balanced"
+        set(value) = prefs.edit().putString(KEY_PADDING_PROFILE, value.trim().lowercase().ifEmpty { "balanced" }).apply()
+
+    /** Отдельный профиль padding для первого handshake-пакета (пусто = равен paddingProfile). */
+    var firstPacketProfile: String
+        get() = prefs.getString(KEY_FIRST_PACKET_PROFILE, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_FIRST_PACKET_PROFILE, value.trim().lowercase()).apply()
+
+    /** Ограничение внешнего path MTU для предотвращения фрагментации UDP-кадров v5. */
+    var pathMtu: Int
+        get() = prefs.getInt(KEY_PATH_MTU, 1500)
+        set(value) = prefs.edit().putInt(KEY_PATH_MTU, value.coerceIn(576, 9000)).apply()
+
+    /** Максимальное число попыток UDP-рукопожатия Argon4 с рандомизированным backoff. */
+    var handshakeMaxAttempts: Int
+        get() = prefs.getInt(KEY_HANDSHAKE_MAX_ATTEMPTS, ArgonTimingConfig.DEFAULT_HANDSHAKE_MAX_ATTEMPTS).coerceIn(1, 20)
+        set(value) = prefs.edit().putInt(KEY_HANDSHAKE_MAX_ATTEMPTS, value.coerceIn(1, 20)).apply()
+
+    /** Начальный таймаут попытки handshake Argon4 (мс). */
+    var handshakeInitialTimeoutMs: Long
+        get() = prefs.getLong(KEY_HANDSHAKE_INITIAL_TIMEOUT_MS, ArgonTimingConfig.DEFAULT_HANDSHAKE_INITIAL_TIMEOUT_MS)
+            .coerceIn(20L, 30_000L)
+        set(value) = prefs.edit().putLong(KEY_HANDSHAKE_INITIAL_TIMEOUT_MS, value.coerceIn(20L, 30_000L)).apply()
+
+    /** Потолок таймаута одной попытки handshake Argon4 (мс). */
+    var handshakeMaxTimeoutMs: Long
+        get() {
+            val initial = handshakeInitialTimeoutMs
+            return prefs.getLong(KEY_HANDSHAKE_MAX_TIMEOUT_MS, ArgonTimingConfig.DEFAULT_HANDSHAKE_MAX_TIMEOUT_MS)
+                .coerceIn(initial, 60_000L)
+        }
+        set(value) = prefs.edit().putLong(KEY_HANDSHAKE_MAX_TIMEOUT_MS, value.coerceIn(20L, 60_000L)).apply()
+
+    /** Минимальный простой перед отправкой keepalive Argon4 (мс). */
+    var keepaliveMinIdleMs: Long
+        get() = prefs.getLong(KEY_KEEPALIVE_MIN_IDLE_MS, ArgonTimingConfig.DEFAULT_KEEPALIVE_MIN_IDLE_MS)
+            .coerceIn(20L, 290_000L)
+        set(value) = prefs.edit().putLong(KEY_KEEPALIVE_MIN_IDLE_MS, value.coerceIn(20L, 290_000L)).apply()
+
+    /** Максимальный простой перед отправкой keepalive Argon4 (мс). */
+    var keepaliveMaxIdleMs: Long
+        get() {
+            val minIdle = keepaliveMinIdleMs
+            return prefs.getLong(KEY_KEEPALIVE_MAX_IDLE_MS, ArgonTimingConfig.DEFAULT_KEEPALIVE_MAX_IDLE_MS)
+                .coerceIn(minIdle + 1L, 300_000L)
+        }
+        set(value) = prefs.edit().putLong(KEY_KEEPALIVE_MAX_IDLE_MS, value.coerceIn(21L, 300_000L)).apply()
+
+    /** Возвращает нормализованную конфигурацию таймингов handshake и keepalive. */
+    fun timingConfig(): ArgonTimingConfig = Argon4Timing.normalizeConfig(
+        ArgonTimingConfig(
+            handshakeMaxAttempts = handshakeMaxAttempts,
+            handshakeInitialTimeoutMs = handshakeInitialTimeoutMs,
+            handshakeMaxTimeoutMs = handshakeMaxTimeoutMs,
+            keepaliveMinIdleMs = keepaliveMinIdleMs,
+            keepaliveMaxIdleMs = keepaliveMaxIdleMs,
+        ),
+    )
+
+    /** Поведенческий профиль трафика Argon4 (`""` = выкл., `"baseline"`, `"video-call"`). */
+    var behaviorProfile: String
+        get() = prefs.getString(KEY_BEHAVIOR_PROFILE, Argon4Profile.PROFILE_NONE).orEmpty()
+        set(value) {
+            val normalized = runCatching { Argon4Profile.normalizeBehaviorProfileName(value) }
+                .getOrDefault(Argon4Profile.PROFILE_NONE)
+            prefs.edit().putString(KEY_BEHAVIOR_PROFILE, normalized).apply()
+        }
+
+    /** Энергосберегающий режим для профиля `video-call` (меньше фоновых кадров и трафика). */
+    var lowPowerMode: Boolean
+        get() = prefs.getBoolean(KEY_LOW_POWER_MODE, false)
+        set(value) = prefs.edit().putBoolean(KEY_LOW_POWER_MODE, value).apply()
+
+    /** Максимальная длительность активной маскировки `video-call` в минутах (10..480, по умолчанию 120). */
+    var videoCallMaxMinutes: Int
+        get() = prefs.getInt(KEY_VIDEO_CALL_MAX_MINUTES, 120).coerceIn(10, 480)
+        set(value) = prefs.edit().putInt(KEY_VIDEO_CALL_MAX_MINUTES, value.coerceIn(10, 480)).apply()
+
+    /** Собирает политику поведенческого профиля из локальных настроек приложения. */
+    fun profileConfig(extraLowPower: Boolean = false): ArgonProfileConfig {
+        val norm = Argon4Profile.normalizeBehaviorProfileName(behaviorProfile)
+        return ArgonProfileConfig(
+            name = norm,
+            version = if (norm.isEmpty()) 0 else Argon4Profile.BEHAVIOR_PROFILE_VERSION,
+            maxDurationMs = if (norm == Argon4Profile.PROFILE_VIDEO_CALL) videoCallMaxMinutes * 60_000L else 0L,
+            lowPowerMode = lowPowerMode || extraLowPower,
+        )
+    }
+
     /**
      * Выбранные для маршрутизации пакеты приложений.
      * По умолчанию всегда включён Contact Sync (`com.example.contactsync`).
@@ -154,6 +254,18 @@ class TunnelSettings(private val context: Context) {
         const val KEY_TUN_NAME = "tun_name"
         const val KEY_ROUTING_MODE = "routing_mode"
         const val KEY_SELECTED_PACKAGES = "selected_packages"
+        const val KEY_PROTOCOL_VERSION = "protocol_version"
+        const val KEY_PADDING_PROFILE = "padding_profile"
+        const val KEY_FIRST_PACKET_PROFILE = "first_packet_profile"
+        const val KEY_PATH_MTU = "path_mtu"
+        const val KEY_HANDSHAKE_MAX_ATTEMPTS = "handshake_max_attempts"
+        const val KEY_HANDSHAKE_INITIAL_TIMEOUT_MS = "handshake_initial_timeout_ms"
+        const val KEY_HANDSHAKE_MAX_TIMEOUT_MS = "handshake_max_timeout_ms"
+        const val KEY_KEEPALIVE_MIN_IDLE_MS = "keepalive_min_idle_ms"
+        const val KEY_KEEPALIVE_MAX_IDLE_MS = "keepalive_max_idle_ms"
+        const val KEY_BEHAVIOR_PROFILE = "behavior_profile"
+        const val KEY_LOW_POWER_MODE = "low_power_mode"
+        const val KEY_VIDEO_CALL_MAX_MINUTES = "video_call_max_minutes"
 
         @Volatile
         private var inMemoryMasterPassword: String = ""

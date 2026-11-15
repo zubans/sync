@@ -42,6 +42,17 @@ final class AgyNewsSummarizer implements NewsSummarizer
 
     public function complete(string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string
     {
+        return $this->completeWithAllowedHomes(null, $prompt, $model, $effort, $schema);
+    }
+
+    /**
+     * Запрос только через указанные домашние папки аккаунтов [allowedHomes] (null — все аккаунты с диска).
+     *
+     * @param list<string>|null         $allowedHomes
+     * @param array<string, mixed>|null $schema
+     */
+    public function completeWithAllowedHomes(?array $allowedHomes, string $prompt, ?string $model, ?string $effort = null, ?array $schema = null): string
+    {
         $models = [$model !== '' ? $model : null];
         foreach ($this->fallbackModels as $fallback) {
             if (!\in_array($fallback, $models, true)) {
@@ -49,7 +60,16 @@ final class AgyNewsSummarizer implements NewsSummarizer
             }
         }
         $last = null;
-        foreach ($this->accounts->available(time()) as $home) {
+        $available = $this->accounts->available(time());
+        if ($allowedHomes !== null) {
+            $allowed = array_flip(array_map(static fn (string $h) => rtrim($h, '/'), $allowedHomes));
+            $available = array_values(array_filter(
+                $available,
+                static fn (string $home) => isset($allowed[rtrim($home, '/')]),
+            ));
+        }
+
+        foreach ($available as $home) {
             foreach ($models as $m) {
                 if (!$this->accounts->isModelFree($home, $m, time())) {
                     continue;
@@ -76,8 +96,10 @@ final class AgyNewsSummarizer implements NewsSummarizer
             }
         }
 
+        $totalCount = $allowedHomes !== null ? \count($allowedHomes) : \count($this->accounts->all());
+
         throw new \RuntimeException(sprintf('agy: лимит исчерпан у всех аккаунтов (%d) и моделей (%s), ближайшее освобождение — %s UTC%s',
-            \count($this->accounts->all()), implode(', ', array_map(static fn (?string $m) => $m ?? 'по умолчанию', $models)),
+            $totalCount, implode(', ', array_map(static fn (?string $m) => $m ?? 'по умолчанию', $models)),
             gmdate('d.m H:i', $this->accounts->nextFreeFor($models)), $last !== null ? '. Последняя ошибка: '.$last->getMessage() : ''), 0, $last);
     }
 

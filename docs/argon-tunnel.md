@@ -19,18 +19,18 @@ tunnel-server/    Серверный демон для Ubuntu (Go, UDP listener 
 мастер-пароль + соль (16 байт) ──Argon2id (19 МиБ, 2 прохода, 1 поток)──▶ 256-битный ключ сессии
 ```
 
-Структура пакета по проводу (UDP датаграмма):
+Структура пакета по проводу (UDP-датаграмма, по умолчанию протокол `0x05`, обратная совместимость с `0x04`):
 
 | Смещение | Размер | Поле | Описание |
 |---|---|---|---|
-| `0` | 1 байт | `Version` | Версия протокола надстройки: `0x04` (Argon 4) |
-| `1` | 1 байт | `FrameType` | `0x01` HandshakeReq, `0x02` HandshakeResp, `0x03` Data (IPv4 пакет), `0x04` Keepalive / Material |
-| `2..18` | 16 байт | `Salt` | Случайная 16-байтная соль Argon2id клиента |
-| `18..30` | 12 байт | `Nonce` | 96-битный IV для AES-256-GCM |
-| `30..N-16` | переменный | `Ciphertext` | Зашифрованный материал (сырой IPv4-пакет или JSON рукопожатия) |
+| `0..16` | 16 байт | `Salt` | Случайная 16-байтная соль Argon2id клиента |
+| `16..30` | 14 байт | `MaskedMeta` | `(Version[1] \|\| FrameType[1] \|\| HeaderCheck[4] \|\| Seq[8]) XOR HMAC-SHA256(PSK, "argon4-hdr:" \|\| Salt)[0..14]`, где `HeaderCheck = HMAC-SHA256(PSK, "argon4-chk:" \|\| Salt \|\| Version \|\| FrameType \|\| Seq)[0..4]`, а `Nonce = HeaderCheck[4] \|\| Seq[8]` (96-бит IV для AES-256-GCM) |
+| `30..N-16` | переменный | `Ciphertext` | В `v5` (`0x05`): зашифрованный конверт `PayloadLen[2, BE] \|\| PadLen[2, BE] \|\| Payload \|\| ZeroPad[PadLen]`. В `v4` (`0x04`): сырой payload без конверта padding |
 | `N-16..N` | 16 байт | `Tag` | 128-битный тег аутентификации GCM |
 
-- **Дополнительные аутентифицируемые данные (AAD)**: `"argon4-tun:" || Version || FrameType || Salt`. Заголовок пакета защищён от подмены: изменение типа кадра, версии или соли приводит к ошибке проверки GCM-тега.
+- **Дополнительные аутентифицируемые данные (AAD)**: `"argon4-tun:" || Version || FrameType || Salt || Seq`. Заголовок и номер последовательности защищены от подмены: изменение любого поля или перестановка приводит к ошибке проверки заголовка / GCM-тега.
+- **Переменный аутентифицированный padding (v5)**: в конверте внутри AEAD добавляется случайный zero-padding по профилям (`balanced`: 8–96 байт / 16–192 для payload <= 160; `compact`: 4–32 / 8–64 для <= 120; `wide`: 16–192 / 32–320 для <= 256; `custom`). Для UDP размер внешнего кадра ограничен бюджетом `pathMTU - 28` (по умолчанию `1472` байта при MTU `1500`).
+- **Анти-откат (anti-downgrade) и идемпотентность handshake**: клиент фиксирует ожидаемую версию `0x05` и отклоняет пакеты `0x04` на активной v5-сессии (при этом может быть явно разрешён режим совместимости `allowV4` до завершения согласования). Повтор потерянного UDP-рукопожатия переотправляет байт-в-байт тот же зашифрованный кадр `HandshakeReq` до первого ответа, а серверный handshake-cache переиспользует выданную сессию без изменения IP.
 - **Кэширование ключа по соли на сервере**: при первом пакете с новой 16-байтной солью сервер вычисляет ключ через Argon2id и после успешной проверки GCM-тега кэширует его для сессии клиента, поэтому последующие пакеты дешифруются за микросекунды без повторного расчёта Argon2id.
 
 ---
@@ -48,7 +48,7 @@ tunnel-server/    Серверный демон для Ubuntu (Go, UDP listener 
 ### Установка на Ubuntu (systemd)
 
 ```bash
-make install-ubuntu-tunnel
+make vpn-argon4-ubuntu
 ```
 
 Либо вручную:
@@ -60,12 +60,12 @@ sudo systemctl restart argon-tunnel
 sudo journalctl -u argon-tunnel -f
 ```
 
-### Запуск в Docker Compose (вместе с Contact Sync)
+### Запуск в Docker Compose (профиль `vpn`)
 
-В `compose.yaml` добавлен сервис `tunnel`. В `.env` задаются `ARGON_MASTER_PASSWORD` и `ARGON_UDP_PORT` (по умолчанию `51820`):
+В `compose.yaml` добавлен сервис `tunnel` (профиль `vpn`). В `.env` задаются `ARGON_MASTER_PASSWORD` и `ARGON_UDP_PORT` (по умолчанию `51820`):
 
 ```bash
-make up
+make vpn-argon4-up   # или make vpn-up (поднимает tunnel + ocserv)
 ```
 
 ---
@@ -82,9 +82,81 @@ make up
   - По умолчанию в зашифрованный канал включён **Contact Sync** (`com.example.contactsync`).
   - В списке установленных приложений можно отметить **КБ**, **CEP** или любые другие приложения (либо добавить имя пакета вручную), а также переключить режим на маршрутизацию всех приложений устройства.
 
-### Сборка и установка APK клиента
+### Сборка и установка устаревшего отдельного APK `:tunnel` (legacy)
 
 ```bash
-make tunnel-apk
-make install-tunnel-apk
+make vpn-legacy-argon-apk
+make vpn-legacy-argon-inst
 ```
+
+---
+
+## 4. Режим L4-транзита (`-mode transit` и `-transit-blind`)
+
+Сервер `argon-tunnel-server` умеет работать не только как IPv4 TUN-шлюз (`-mode tunnel`, по умолчанию), но и как L4-транзитный узел (`-mode transit` / `ARGON_MODE=transit`) без создания TUN-интерфейса и выделения виртуальной подсети:
+
+1. **Аутентифицированный TCP/UDP транзит**: клиент подключается к тому же порту (UDP или TCP с 2-байтным префиксом длины кадра), проходит X25519-рукопожатие и указывает целевой `host:port` и транспорт (`udp` / `tcp`), а также пересылает keepalive/`"fin"` для корректного полузакрытия TCP (`CloseWrite`). Цели ограничиваются `-transit-target` (`ARGON_TRANSIT_TARGET`) или списком `-transit-allow` (`ARGON_TRANSIT_ALLOW`): для CIDR/доменных правил `-transit-allow` домен разрешается однократно на запрос, а подключение выполняется непосредственно по проверенному IP без повторного DNS-lookup.
+2. **Слепой passthrough (`-transit-blind` / `ARGON_TRANSIT_BLIND=1`)**: сервер не расшифровывает пакеты (мастер-пароль не обязателен) и прозрачно пересылает UDP/TCP-поток на фиксированный `-transit-target` (для UDP-соответствий таймаут `2m` учитывает активность обоих направлений, не закрывая сокет при одностороннем исходящем потоке клиента). В CEP такой узел задаётся с типом `transit` и пустым паролем перед следующим узлом `Argon4` или узлом с `useArgon`.
+3. **Согласование `auto`**: клиентская надстройка `useArgon` отправляет запрос с `mode="auto"`, автоматически выбирая L4-транзит перед сервером с `-mode transit` или TUN-туннель перед `-mode tunnel`.
+
+### Параметры протокола v5 и padding (`argon-tunnel-server` / клиенты)
+
+- `-protocol-version` / `ARGON_PROTOCOL_VERSION` (по умолчанию `5`, допустимо `4` или `5`).
+- `-allow-v4` / `ARGON_ALLOW_V4` (по умолчанию `true` на сервере для переходного периода с legacy `0x04`-клиентами; установка `false` переводит сервер в строгий режим v5). На активной v5-сессии откат на `v4` отклоняется всегда.
+- `-padding-profile` / `ARGON_PADDING_PROFILE` (`balanced` | `compact` | `wide` | `custom`, по умолчанию `balanced`).
+- `-first-packet-profile` / `ARGON_FIRST_PACKET_PROFILE` (отдельный профиль padding для первого кадра `HandshakeReq`, по умолчанию `wide`).
+- `-path-mtu` / `ARGON_PATH_MTU` (внешний MTU трассы `576..9000`, либо `0` — автоматический подбор оптимального Path MTU при старте; эффективный внутренний TUN MTU снижается автоматически с учётом IP/UDP-заголовка, overhead v5 и бюджета промежуточных узлов).
+
+### Тайминги handshake и адаптивный idle keepalive
+
+Чтобы устранить фиксированные периодические сигнатуры (`3×3s` handshake и константный цикл `25s`/`30s` keepalive), во всех клиентах и сервере применяется нормализуемая конфигурация таймингов:
+
+- **Handshake (exponential backoff + jitter)**:
+  - по умолчанию до `5` попыток с начальным таймаутом `1.2s`, коэффициентом `1.7`, потолком `4.5s`, общим бюджетом `15s`, jitter `±30%` и паузой между попытками `120ms..800ms`;
+  - каждая повторная попытка отправляет байт-в-байт тот же зашифрованный `HandshakeReq` для идемпотентности через серверный handshake-cache; при фатальной ошибке протокола (например, anti-downgrade `v5 -> v4`) повторы прекращаются сразу.
+- **Idle keepalive со сбросом по активности**:
+  - keepalive (`"ping"`/`"pong"` поверх v5 padded-конверта с anti-replay) отправляется только после фактического простоя исходящего канала;
+  - любая полезная исходящая передача (`ActivityTracker.Touch`) сдвигает таймер на новый случайный интервал из диапазона `[16s..28s]` (строго `maxIdle > minIdle` и `maxIdle * 2 <= sessionIdleTimeout`, что удерживает NAT-таблицы >30s и сессию на сервере с `SessionIdleTimeout = 10m`);
+  - при отмене контекста, остановке прокси или фатальной ошибке сокета горутины/корутины и таймеры закрываются без утечек.
+- **Настройка (CLI / env / профили CEP и Kotlin)**:
+  - сервер: `-session-idle-timeout` / `ARGON_SESSION_IDLE_TIMEOUT` (по умолчанию `10m`);
+  - `argon-tunnel-client`: `-handshake-max-attempts` (`ARGON_HANDSHAKE_MAX_ATTEMPTS`), `-handshake-initial-timeout` (`ARGON_HANDSHAKE_INITIAL_TIMEOUT`), `-handshake-max-timeout` (`ARGON_HANDSHAKE_MAX_TIMEOUT`), `-handshake-max-elapsed` (`ARGON_HANDSHAKE_MAX_ELAPSED`), `-keepalive-min-idle` (`ARGON_KEEPALIVE_MIN_IDLE`), `-keepalive-max-idle` (`ARGON_KEEPALIVE_MAX_IDLE`), `-session-idle-timeout` (`ARGON_SESSION_IDLE_TIMEOUT`);
+  - профили CEP (`cep/Sources/CEPCore/Models.swift`, `cep-cli`, `android/cep-engine`): `argonHandshakeMaxAttempts`, `argonHandshakeInitialTimeoutMs`, `argonHandshakeMaxTimeoutMs`, `argonKeepaliveMinIdleSec`, `argonKeepaliveMaxIdleSec`; Kotlin `TunnelSettings`: `handshakeMaxAttempts`, `handshakeInitialTimeoutMs`, `handshakeMaxTimeoutMs`, `keepaliveMinIdleMs`, `keepaliveMaxIdleMs`.
+
+### Поведенческие профили трафика v5 (`profile-v1`, SYNC-656)
+
+По умолчанию поведенческий шейпинг **выключен** (`""` / `off`): включается только явным выбором (`baseline` или `video-call`) и поддерживается только на Argon4 `v5` (попытка включить на `v4`, указать неизвестное имя/версию или использовать `video-call` поверх TCP-транзита немедленно отклоняется без молчаливого отката).
+
+- **Профили**:
+  - `off` (по умолчанию): стандартный per-packet padding v5 + адаптивный idle keepalive без отложенной очереди.
+  - `baseline`: лёгкое сглаживание длин и временное объединение серии мелких пакетов (`FrameTypeBatch = 0x05`, `<= 8 мс` добавленной задержки, окно `1..4 мс`), уменьшающее число мелких кадров на проводе (~`-5%..-15%` пакетов при коротких всплесках) практически без фонового расхода.
+  - `video-call`: сессионная модель, калиброванная по живому дампу Яндекс Телемоста (три архетипа сеанса: `telemost-av-active`, `telemost-hd-dynamic`, `telemost-low-cam`):
+    - ограничение внешнего кадра (`1184..1228` Б, рекомендованный TUN MTU `1120..1150` Б, по умолчанию `1140`),
+    - многомодальные корзины размеров (кластер мелких аудио/RTCP `92..196` Б, проба/RTX `278..342` Б, медиа-корзины `620..1210` Б),
+    - пачечный burst/keyframe pacing с жёсткой границей добавленной задержки (`MaxAddedDelay = 15..18 мс`, жёсткий потолок `30 мс`),
+    - объединение мелких пакетов в `FrameTypeBatch (0x05)` с сохранением строго монотонного `seq` перед зашифровкой,
+    - низкоприоритетная обратная связь простоя (`"fb"` / `"ping"`), всегда уступающая реальным пакетам, и полное автоматическое снижение до `baseline` через `MaxDuration` (по умолчанию `2h`: переключаются эффективный профиль в `Stats()`, параметры padding без `MediumBins`, агрегация `FrameTypeBatch` и отменяются `"fb"`-кадры).
+- **Ограничение памяти и backpressure**: очередь шейпера ограничена `128` пакетами и `256 KiB` (`ErrQueueFull` / `QueueFullException` при переполнении с отбросом сверхлимита и сбросом pacing выше `highWatermark`, без неограниченного роста памяти).
+- **Энергосбережение и честные ограничения**:
+  - Флаг `low-power` / `argonLowPowerMode` (на Android также включается автоматически в режиме Battery Saver или предупреждает на тарифицируемой сети) отключает фоновые `"fb"`-кадры и переводит keepalive в редкий режим `[4s..10s]`.
+  - В редких/малонагруженных потоках (`idle` / `browsing` / `video_vod`) `video-call` существенно увеличивает служебный трафик и расход батареи (по замерам в симуляции до `+327%..+564%` байт при малом пользовательском трафике, `+23.9%` при массовой загрузке), а добавленная задержка сглаживания составляет `p50 ~1..4 мс`, `p95 ~4..8 мс`.
+  - Поведенческий профиль **не скрывает** IP-адрес сервера и сам факт использования активного транспортного протокола.
+- **Настройка**:
+  - `argon-tunnel-server`: `-behavior-profile` (`ARGON_BEHAVIOR_PROFILE`), `-allow-video-call` (`ARGON_ALLOW_VIDEO_CALL=1`), `-video-call-max-duration` (`ARGON_VIDEO_CALL_MAX_DURATION=2h`);
+  - `argon-tunnel-client`: `-behavior-profile` (`ARGON_BEHAVIOR_PROFILE`), `-low-power` (`ARGON_LOW_POWER=0|1`), `-video-call-max-duration` (`ARGON_VIDEO_CALL_MAX_DURATION=2h`);
+  - CEP (`Models.swift`, `cep-cli`, `android/cep-engine`, `CepModels.kt`): `argonBehaviorProfile`, `argonLowPowerMode`, `argonVideoCallMaxDurationSec`;
+  - Android Kotlin `TunnelSettings` / UI: `behaviorProfile`, `lowPowerMode`, `videoCallMaxMinutes`.
+
+### Автоподстройка MTU в промежуточных транзитах и подбор MTU для каждого узла
+
+1. **Автоматический стартовый подбор (при `pathMTU = 0` / пустом `argonPathMTU`)**:
+   - Перед поднятием TUN/цепочки клиенты (`cep-argon4`, `cep-cli`, `android/cep-engine`, `cep-engine` macOS) и серверные/транзитные сессии запускают `DiscoverPathMTU`: проверяют интерфейсный MTU маршрута, DF-потолок сокета (`IP_MTU_DISCOVER`/`IP_MTU` на Linux, `IP_DONTFRAG`/`SIOCGIFMTU` на Darwin) и зондируют Argon4-канал до фактического максимума без фрагментации.
+   - Найденный `PathMTU` / `InnerMTU` автоматически передаётся по цепочке вниз как верхний бюджет для вложенных транзитов, `sing-box`, `OpenConnect` (`CEP_FORCE_MTU`) и `OpenVPN` (`--mssfix` / MTU).
+2. **Живая адаптация на лету (in-band PLPMTUD + DF/`EMSGSIZE`)**:
+   - В `tunnel-server/`, `cep/argon4/`, `cep-argon4` и `android/cep-engine` (включая TUN и L4 UDP-транзиты `TransitProxy` / `connectTransitUDP`) работает периодический и событийный PLPMTUD поверх зашифрованных кадров `"pmtu:"`, `"pmtu-ack:"` и `"pmtu-limit:"`.
+   - При получении `EMSGSIZE` от ядра пакет не теряет сессию, а инициирует мгновенное сжатие внешнего потолка, уведомляет пир по in-band `"pmtu-limit:"` и возвращает в TUN ICMP Fragmentation Needed (Type 3 Code 4), чтобы ОС/вложенный клиент немедленно уменьшил сегменты.
+3. **Подбор MTU для каждого узла («Подобрать MTU») на всех платформах**:
+   - **Веб-админка (`server/`)**: кнопка «Подобрать MTU» в списке/карточке и форме создания/редактирования каждого подключения (`MtuProbeService` с реальным UDP DF с обязательным подтверждением ответа пира, TCP `TCP_MAXSEG`, `cep-cli probe-mtu` с передачей `Target` следующего узла цепочки и учётом предшествующих шагов), плюс «Авто (сбросить)».
+   - **Linux CLI (`cep-cli`)**: команда `cep-cli probe-mtu` (`-id`, `-chain`, `-target`, `-apply`, `-json`, `-proto/-server/-link`, `-req-json`) и пункт `4. Подобрать MTU для узла` в интерактивном мастере `cep-cli wizard`. Для аутентифицированного `transit` обязательно определяется `Target` следующего узла в цепочке без отката к нерелевантному `TCP MSS`.
+   - **macOS (`ContactSyncCEP`)**: `MTUProbe` (`Darwin` `IP_DONTFRAG`/`TCP_MAXSEG`/`SIOCGIFMTU` с подтверждением ответа UDP-сокета, а также `cep-cli` с `nextTarget`) и кнопки «Подобрать MTU» / «Авто» в редакторе каждого узла (`ProfileEditor`).
+   - **Android (`CepScreen` / `cep-engine`)**: экспортируемая `ProbeProfileMTU` через `cepcore.aar`, подставляющая `Target` следующего шага цепочки для аутентифицированного `transit`, с бинарным поиском до 1 байта без подстановки `1500` на таймауте, плюс кнопки «Подобрать MTU» и «Сбросить (авто)» в `ProfileEditor`.

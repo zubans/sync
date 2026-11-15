@@ -3,6 +3,8 @@
 namespace App\Controller\Admin;
 
 use App\Entity\NewsItem;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
@@ -20,6 +22,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\UrlField;
  *
  * @extends AbstractCrudController<NewsItem>
  */
+#[RequiresFeature(FeatureManager::NEWS)]
 final class NewsItemCrudController extends AbstractCrudController
 {
     public static function getEntityFqcn(): string

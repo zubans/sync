@@ -3,6 +3,8 @@
 namespace App\Controller\Admin;
 
 use App\Entity\Device;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
@@ -17,6 +19,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
  *
  * @extends AbstractCrudController<Device>
  */
+#[RequiresFeature(FeatureManager::DEVICE_DATA)]
 final class DeviceCrudController extends AbstractCrudController
 {
     public static function getEntityFqcn(): string

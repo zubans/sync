@@ -4,7 +4,9 @@ namespace App\Controller\Admin;
 
 use App\Entity\Contact;
 use App\Entity\User;
+use App\Security\RequiresFeature;
 use App\Service\ContactMover;
+use App\Service\FeatureManager;
 use Doctrine\ORM\QueryBuilder;
 use EasyCorp\Bundle\EasyAdminBundle\Attribute\AdminRoute;
 use EasyCorp\Bundle\EasyAdminBundle\Collection\FieldCollection;
@@ -31,6 +33,7 @@ use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
  *
  * @extends AbstractCrudController<Contact>
  */
+#[RequiresFeature(FeatureManager::CONTACTS)]
 final class ContactCrudController extends AbstractCrudController
 {
     use ManagesContacts;

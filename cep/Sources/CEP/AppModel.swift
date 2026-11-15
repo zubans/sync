@@ -271,6 +271,14 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func probeMTU(for profileID: UUID) async -> MTUProbeResult {
+        guard let profile = profile(profileID) else {
+            return MTUProbeResult(ok: false, error: "Профиль не найден")
+        }
+        let chain = chains.first(where: { $0.hops.contains(profileID) })
+        return await MTUProbe.probe(profile: profile, chain: chain, profiles: profiles)
+    }
+
     private func enginePath() -> String? {
         let candidates = [
             Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/cep-engine"),

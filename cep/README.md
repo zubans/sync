@@ -3,15 +3,19 @@
 Приложение собирает цепочку из нескольких VPN-узлов: Mac → узел 1 → узел 2 → … → интернет.
 Сервер каждого следующего узла доступен только через туннель предыдущего, весь остальной трафик уходит в последний узел.
 
-Протоколы: Argon4, VLESS, Hysteria 2, Hysteria (v1), AmneziaWG, OpenVPN, OpenConnect (AnyConnect/ocserv, GlobalProtect, Pulse, Fortinet и др.), SSTP. Argon4 также работает как шифрующая надстройка над любым другим профилем.
+Протоколы: Argon4, Транзитный шлюз (`transit`), VLESS, Hysteria 2, Hysteria (v1), AmneziaWG, OpenVPN, OpenConnect (AnyConnect/ocserv, GlobalProtect, Pulse, Fortinet и др.), SSTP. Argon4 также работает как шифрующая надстройка (`useArgon`) над любым другим профилем.
 
 ## Сборка и запуск
+
+Из каталога `cep/`:
 
 ```bash
 ./scripts/install-deps.sh      # brew-пакеты + сборка amneziawg-go/awg
 ./scripts/build-app.sh         # Swift + Go Argon4-помощник → build/CEP.app
 open build/CEP.app
 ```
+
+Из корня репозитория эти же шаги обёрнуты в блок VPN `Makefile`: `make vpn-cep-mac-deps`, `make vpn-cep-mac-build`, `make vpn-cep-mac-dmg`, `make vpn-cep-mac-test`.
 
 Нужны macOS 14+, Swift 5.10+ и Go 1.25+ (`install-deps.sh` устанавливает Go, если его нет). Тесты: `swift test` и `cd argon4 && go test -race ./...`.
 
@@ -44,10 +48,13 @@ open build/CEP.app
 3. «Подключить» — macOS спросит пароль администратора: движку нужен root для туннелей и маршрутов.
 4. В разделе «Подключение» видно состояние каждого узла и журналы. «Отключить» — там же или в строке меню.
 
-Настройка Argon4:
-- **Отдельный узел.** Создайте профиль `Argon4`, укажите `host[:port]` (по умолчанию UDP `51820`), мастер-пароль и при необходимости `Client ID`/`Client Secret`. Пустой `Client ID` заменяется на UUID профиля.
-- **Надстройка.** В профиле другого протокола включите «Шифровать подключение через Argon4» и заполните параметры Argon4. Движок сначала поднимет Argon4, а затем направит через него подключение к серверу основного профиля.
-- Профили `argon4` совместимы по полям с Android-версией CEP. Пароли сохраняются в `profiles.json` с правами `0600`.
+Настройка Argon4 и транзитных шлюзов:
+- **Отдельный узел (`Argon4`).** Создайте профиль `Argon4`, укажите `host[:port]` (по умолчанию UDP `51820`), мастер-пароль и при необходимости `Client ID`/`Client Secret`. Пустой `Client ID` заменяется на UUID профиля.
+- **Транзитный шлюз (`transit`).** Ставится в цепочке перед другим узлом (не может быть последним). С мастер-паролем поднимает локальный L4-прокси (`cep-argon4` в режиме `transit`) для TCP/UDP следующего узла; без мастер-пароля работает как слепой passthrough-ретранслятор и требует `Argon4` или включённого `useArgon` на следующем узле.
+- **Надстройка (`useArgon`).** В профиле другого протокола включите «Шифровать подключение через Argon4» и задайте мастер-пароль (`argonPassword`, без отдельного адреса Argon4-сервера). Клиент подключается к порту `51820` самого узла (или через предшествующий слепой `transit`) с согласованием `mode="auto"` (`tunnel` или L4 `transit`).
+- **Argon4 v5 и padding.** По умолчанию используется версия `0x05` (`argonProtocolVersion: 5`) с аутентифицированным zero-padding внутри AEAD (`argonPaddingProfile`: `balanced` / `compact` / `wide` / `custom`, профиль первого кадра `argonFirstPacketProfile`, ограничение внешнего MTU `argonPathMTU: 1500` и настройка совместимости `argonAllowV4`). В `cep-argon4` те же параметры задаются через JSON-конфиг (`protocol_version`, `padding_profile`, `first_packet_profile`, `path_mtu`).
+- **Поведенческие профили (`profile-v1`).** По умолчанию выключены (`argonBehaviorProfile`: `nil` / `""`). Доступны `baseline` (лёгкое сглаживание и батчинг `FrameTypeBatch` до `<= 8 мс`) и `video-call` (только `v5` и UDP; имитация структуры/всплесков видеозвонка с ограничением TUN MTU `~1140`, добавленной задержкой `<= 18 мс`, авто-снижением через `argonVideoCallMaxDurationSec` = `7200` и режимом экономии батареи `argonLowPowerMode`). Режим `video-call` заметно повышает расход трафика/заряда и не скрывает IP сервера и сам факт активного протокола.
+- Профили `argon4`, `transit` и `useArgon` совместимы между macOS, Linux CLI (`cep-cli`) и Android (`android/cep-engine`). Пароли сохраняются в `profiles.json` с правами `0600`.
 
 ## Устройство
 
@@ -84,7 +91,7 @@ open build/CEP.app
 - **Где видно.** Применённые сети показываются под узлом в разделе «Подключение» и в `engine.log`. Проверить конкретный адрес: `route -n get 192.168.1.119` — интерфейс должен быть интерфейсом узла.
 
 Как поднимаются отдельные протоколы:
-- **Argon4:** встроенный `cep-argon4` выполняет handshake с тремя попытками, получает IPv4/MTU от сервера и обменивается сырыми IP-пакетами через собственный `utun`. Конфиг с секретами передаётся файлом `0600` в `/var/run/cep` и удаляется сразу после чтения. Сети из handshake добавляются через интерфейс узла.
+- **Argon4:** встроенный `cep-argon4` выполняет v5-handshake с рандомизированным exponential backoff и padded `HandshakeReq`, получает IPv4/MTU от сервера, отправляет адаптивный idle keepalive `[16s..28s]` при простое и обменивается сырыми IP-пакетами через собственный `utun`. Конфиг с секретами передаётся файлом `0600` в `/var/run/cep` и удаляется сразу после чтения. Сети из handshake добавляются через интерфейс узла.
 - **Прокси (VLESS, Hysteria):** узлом цепочки становится TUN sing-box с адресом `172.19.<N>.1/30`. VLESS обслуживает xray: он поддерживает Reality, Vision, xhttp, ws, grpc и httpupgrade и отдаёт SOCKS на `127.0.0.1:2080N`, а sing-box заворачивает этот SOCKS в TUN. Hysteria 2 и Hysteria v1 sing-box обслуживает напрямую.
 - **AmneziaWG:** `amneziawg-go` и `awg setconf`. Ключи wg-quick (`Address`, `DNS`, `MTU` и т.п.) движок применяет сам. Узел считается поднятым после первого рукопожатия.
 - **SSTP:** `sstpc` с параметрами pppd.
@@ -105,7 +112,7 @@ open build/CEP.app
 
 `cep-cli` поднимает цепочку из совместимого с macOS `profiles.json`: каждый следующий сервер доступен через TUN предыдущего узла, после последнего добавляются маршруты `0.0.0.0/1` и `128.0.0.0/1`.
 
-Поддерживаются Argon4 (включая `useArgon`-надстройку), VLESS, Hysteria 2, Hysteria v1, OpenConnect и OpenVPN. AmneziaWG в Linux CLI пока не поддерживается. SSTP пока отклоняется не из-за ограничения протокола, а потому что обвязка `sstpc` + `pppd` и управление её маршрутами перенесены только в macOS-движок, но ещё не в Linux CLI.
+Поддерживаются Argon4 (включая `useArgon`-надстройку), Транзитный шлюз (`transit`), VLESS, Hysteria 2, Hysteria v1, OpenConnect и OpenVPN. AmneziaWG в Linux CLI пока не поддерживается. SSTP пока отклоняется не из-за ограничения протокола, а потому что обвязка `sstpc` + `pppd` и управление её маршрутами перенесены только в macOS-движок, но ещё не в Linux CLI.
 
 ### Сборка
 

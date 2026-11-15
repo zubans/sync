@@ -8,6 +8,7 @@ public enum VPNProtocol: String, Codable, CaseIterable, Identifiable, Sendable {
     case openvpn
     case openconnect
     case argon4
+    case transit
     case sstp
 
     public var id: String { rawValue }
@@ -21,6 +22,7 @@ public enum VPNProtocol: String, Codable, CaseIterable, Identifiable, Sendable {
         case .openvpn: "OpenVPN"
         case .openconnect: "OpenConnect"
         case .argon4: "Argon4"
+        case .transit: "Транзитный шлюз"
         case .sstp: "SSTP"
         }
     }
@@ -40,7 +42,7 @@ public enum VPNProtocol: String, Codable, CaseIterable, Identifiable, Sendable {
         case .amneziawg: [.amneziawgGo, .awg]
         case .openvpn: [.openvpn]
         case .openconnect: [.openconnect]
-        case .argon4: [.cepArgon4]
+        case .argon4, .transit: [.cepArgon4]
         case .sstp: [.sstpc]
         }
     }
@@ -85,12 +87,34 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
     public var ignoreCertErrors = false
     /// Сети, которые идут через этот узел, а не дальше по цепочке и не в локальную сеть: «192.168.1.119, 10.0.0.0/8».
     public var routes = ""
-    /// Оборачивать подключение к серверу узла в туннель Argon4.
+    /// Оборачивать подключение к серверу узла в туннель/транзит Argon4 (порт 51820 или предыдущий транзитный шлюз).
     public var useArgon: Bool = false
-    /// Адрес сервера Argon4 («host:51820»).
-    public var argonServer: String = ""
     /// Мастер-пароль Argon2id.
     public var argonPassword: String = ""
+    /// Явная версия протокола Argon4 (по умолчанию nil -> v5).
+    public var argonProtocolVersion: Int? = nil
+    /// Профиль padding Argon4 ("balanced", "compact", "wide").
+    public var argonPaddingProfile: String? = nil
+    /// Отдельный профиль padding первого handshake-пакета Argon4.
+    public var argonFirstPacketProfile: String? = nil
+    /// Внешний path MTU для расчёта бюджета padding Argon4.
+    public var argonPathMTU: Int? = nil
+    /// Максимум попыток UDP-рукопожатия Argon4.
+    public var argonHandshakeMaxAttempts: Int? = nil
+    /// Начальный таймаут попытки handshake Argon4 (мс).
+    public var argonHandshakeInitialTimeoutMs: Int? = nil
+    /// Потолок таймаута одной попытки handshake Argon4 (мс).
+    public var argonHandshakeMaxTimeoutMs: Int? = nil
+    /// Минимальный простой перед отправкой keepalive Argon4 (с).
+    public var argonKeepaliveMinIdleSec: Int? = nil
+    /// Максимальный простой перед отправкой keepalive Argon4 (с).
+    public var argonKeepaliveMaxIdleSec: Int? = nil
+    /// Поведенческий профиль трафика Argon4 (nil/"" — выкл., "baseline", "video-call").
+    public var argonBehaviorProfile: String? = nil
+    /// Режим пониженного энергопотребления для профилей Argon4.
+    public var argonLowPowerMode: Bool = false
+    /// Лимит длительности профиля video-call в секундах (по умолчанию 7200).
+    public var argonVideoCallMaxDurationSec: Int? = nil
 
     public init(name: String, proto: VPNProtocol) {
         self.name = name
@@ -115,8 +139,19 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
         ignoreCertErrors = try c.decodeIfPresent(Bool.self, forKey: .ignoreCertErrors) ?? false
         routes = try c.decodeIfPresent(String.self, forKey: .routes) ?? ""
         useArgon = try c.decodeIfPresent(Bool.self, forKey: .useArgon) ?? false
-        argonServer = try c.decodeIfPresent(String.self, forKey: .argonServer) ?? ""
         argonPassword = try c.decodeIfPresent(String.self, forKey: .argonPassword) ?? ""
+        argonProtocolVersion = try c.decodeIfPresent(Int.self, forKey: .argonProtocolVersion)
+        argonPaddingProfile = try c.decodeIfPresent(String.self, forKey: .argonPaddingProfile)
+        argonFirstPacketProfile = try c.decodeIfPresent(String.self, forKey: .argonFirstPacketProfile)
+        argonPathMTU = try c.decodeIfPresent(Int.self, forKey: .argonPathMTU)
+        argonHandshakeMaxAttempts = try c.decodeIfPresent(Int.self, forKey: .argonHandshakeMaxAttempts)
+        argonHandshakeInitialTimeoutMs = try c.decodeIfPresent(Int.self, forKey: .argonHandshakeInitialTimeoutMs)
+        argonHandshakeMaxTimeoutMs = try c.decodeIfPresent(Int.self, forKey: .argonHandshakeMaxTimeoutMs)
+        argonKeepaliveMinIdleSec = try c.decodeIfPresent(Int.self, forKey: .argonKeepaliveMinIdleSec)
+        argonKeepaliveMaxIdleSec = try c.decodeIfPresent(Int.self, forKey: .argonKeepaliveMaxIdleSec)
+        argonBehaviorProfile = try c.decodeIfPresent(String.self, forKey: .argonBehaviorProfile)
+        argonLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .argonLowPowerMode) ?? false
+        argonVideoCallMaxDurationSec = try c.decodeIfPresent(Int.self, forKey: .argonVideoCallMaxDurationSec)
     }
 }
 
@@ -163,7 +198,7 @@ public enum ChainValidation {
         if plan.hops.isEmpty {
             result.append("В цепочке нет ни одного узла")
         }
-        for hop in plan.hops {
+        for (index, hop) in plan.hops.enumerated() {
             do {
                 _ = try Endpoint.of(hop)
                 _ = try RouteList.parse(hop.routes)
@@ -171,13 +206,40 @@ public enum ChainValidation {
                     throw ConfigError("Argon4: не задан мастер-пароль")
                 }
                 if hop.useArgon {
-                    if hop.proto == .argon4 {
-                        throw ConfigError("Argon4-надстройка не нужна внутри профиля Argon4")
+                    if hop.proto == .argon4 || hop.proto == .transit {
+                        throw ConfigError("Argon4-надстройка не нужна внутри профиля \(hop.proto.title)")
                     }
                     if hop.argonPassword.isEmpty {
                         throw ConfigError("Argon4-надстройка: не задан мастер-пароль")
                     }
-                    _ = try Endpoint.argon4(hop.argonServer)
+                }
+                if let behavior = hop.argonBehaviorProfile?.trimmingCharacters(in: .whitespacesAndNewlines), !behavior.isEmpty {
+                    guard behavior == "baseline" || behavior == "video-call" else {
+                        throw ConfigError("Неизвестный поведенческий профиль Argon4 «\(behavior)»")
+                    }
+                    if hop.argonProtocolVersion == 4 {
+                        throw ConfigError("Поведенческие профили Argon4 требуют версию v5 (недоступны в v4)")
+                    }
+                }
+                if hop.proto == .transit {
+                    if index == plan.hops.count - 1 {
+                        throw ConfigError("Транзитный шлюз «\(hop.name)» не может быть последним узлом цепочки")
+                    }
+                    if hop.password.isEmpty {
+                        if let behavior = hop.argonBehaviorProfile?.trimmingCharacters(in: .whitespacesAndNewlines), !behavior.isEmpty {
+                            throw ConfigError("Слепой транзитный шлюз не поддерживает поведенческие профили Argon4")
+                        }
+                        let next = plan.hops[index + 1]
+                        if next.proto != .argon4 && !next.useArgon && next.proto != .transit {
+                            throw ConfigError("Для транзитного шлюза без пароля следующий узел должен использовать Argon4")
+                        }
+                    } else if hop.argonBehaviorProfile == "video-call" {
+                        let next = plan.hops[index + 1]
+                        let nextProto = next.useArgon ? "udp" : ArgonTransportProto.of(next)
+                        if nextProto != "udp" {
+                            throw ConfigError("Профиль «video-call» в транзитном шлюзе поддерживается только для UDP-целей")
+                        }
+                    }
                 }
             } catch {
                 result.append("«\(hop.name)»: \(error.localizedDescription)")

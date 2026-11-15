@@ -27,6 +27,10 @@ func (directTestDialer) ListenPacket(ctx context.Context, _ M.Socksaddr) (net.Pa
 }
 
 func startArgonTestServer(t *testing.T, password string, dropResponses int) string {
+	return startArgonTestServerWithMode(t, password, dropResponses, "tunnel", "")
+}
+
+func startArgonTestServerWithMode(t *testing.T, password string, dropResponses int, mode, transitAllow string) string {
 	t.Helper()
 	serverRoot, err := filepath.Abs("../../tunnel-server")
 	if err != nil {
@@ -41,13 +45,18 @@ func startArgonTestServer(t *testing.T, password string, dropResponses int) stri
 	}
 
 	addrFile := filepath.Join(tempDir, "server.addr")
-	command := exec.Command(serverBinary,
+	args := []string{
 		"-listen", "127.0.0.1:0",
 		"-password", password,
 		"-addr-file", addrFile,
 		"-drop-responses", strconv.Itoa(dropResponses),
 		"-echo-data",
-	)
+		"-mode", mode,
+	}
+	if transitAllow != "" {
+		args = append(args, "-transit-allow", transitAllow)
+	}
+	command := exec.Command(serverBinary, args...)
 	var serverLog bytes.Buffer
 	command.Stdout = &serverLog
 	command.Stderr = &serverLog

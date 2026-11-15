@@ -18,6 +18,7 @@ use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\CurrentUser;
 
 #[Route('/api')]
+#[\App\Security\RequiresFeature(\App\Service\FeatureManager::CONTACTS)]
 final class ContactController extends AbstractController
 {
     /** Выгрузка личных контактов устройства и списка Google-аккаунтов. */

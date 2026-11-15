@@ -3,6 +3,8 @@
 namespace App\Controller\Admin;
 
 use App\Entity\BrowsingVisit;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
@@ -18,6 +20,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\UrlField;
  *
  * @extends AbstractCrudController<BrowsingVisit>
  */
+#[RequiresFeature(FeatureManager::BROWSING)]
 final class BrowsingVisitCrudController extends AbstractCrudController
 {
     public static function getEntityFqcn(): string

@@ -2,6 +2,7 @@
 
 namespace App\Command;
 
+use App\Service\FeatureManager;
 use App\Service\NewsArticleFetcher;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -29,8 +30,21 @@ final class NewsArticlesCommand extends Command
         $this->addOption('limit', null, InputOption::VALUE_REQUIRED, 'Сколько статей скачать за проход', '30');
     }
 
+    private ?FeatureManager $features = null;
+
+    #[\Symfony\Contracts\Service\Attribute\Required]
+    public function setFeatures(FeatureManager $features): void
+    {
+        $this->features = $features;
+    }
+
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        if ($this->features !== null && !$this->features->isEnabled(FeatureManager::NEWS)) {
+            $output->writeln('<comment>Блок «Новости» отключён в админке — загрузка статей пропущена.</comment>');
+
+            return Command::SUCCESS;
+        }
         if (!$this->lock()) {
             $output->writeln('Статьи уже скачиваются');
 

@@ -2,6 +2,7 @@
 
 namespace App\Command;
 
+use App\Service\FeatureManager;
 use App\Service\NewsStorylineService;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -31,8 +32,21 @@ final class NewsAnalyzeCommand extends Command
             ->addOption('reassign', null, InputOption::VALUE_NONE, 'Стереть сюжеты и собрать заново по готовым векторам (сменился порог)');
     }
 
+    private ?FeatureManager $features = null;
+
+    #[\Symfony\Contracts\Service\Attribute\Required]
+    public function setFeatures(FeatureManager $features): void
+    {
+        $this->features = $features;
+    }
+
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        if ($this->features !== null && !$this->features->isEnabled(FeatureManager::AI_NEWS_STORYLINES)) {
+            $output->writeln('<comment>ИИ сюжетных линий и эмбеддингов отключён в админке — пропуск.</comment>');
+
+            return Command::SUCCESS;
+        }
         if (!$this->lock()) {
             $output->writeln('Анализ уже идёт');
 

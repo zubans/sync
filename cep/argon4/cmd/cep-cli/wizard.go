@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type wizard struct {
@@ -197,8 +199,8 @@ func runWizard(store *Store, input io.Reader, output io.Writer) (bool, error) {
 			}
 			continue
 		}
-		w.printf("\n1. Создать новую цепочку\n2. Добавить узел в цепочку\n3. Проверить цепочку\n0. Сохранить и выйти\n")
-		choice, err := w.choice("Выбор: ", 3)
+		w.printf("\n1. Создать новую цепочку\n2. Добавить узел в цепочку\n3. Проверить цепочку\n4. Подобрать MTU для узла\n0. Сохранить и выйти\n")
+		choice, err := w.choice("Выбор: ", 4)
 		if err != nil {
 			return changed, err
 		}
@@ -231,6 +233,12 @@ func runWizard(store *Store, input io.Reader, output io.Writer) (bool, error) {
 				continue
 			}
 			checkPlan(plan, w.output)
+		case 4:
+			updated, err := w.probeMTUInteractive(store)
+			if err != nil {
+				return changed, err
+			}
+			changed = changed || updated
 		}
 	}
 }
@@ -241,6 +249,45 @@ func runAddNode(store *Store, input io.Reader, output io.Writer) (bool, error) {
 		return false, fmt.Errorf("сначала создайте цепочку командой wizard")
 	}
 	return w.addNode(store)
+}
+
+func (w *wizard) probeMTUInteractive(store *Store) (bool, error) {
+	if len(store.Profiles) == 0 {
+		w.printf("\nУзлов пока нет.\n")
+		return false, nil
+	}
+	w.printf("\nУзлы:\n")
+	for i, p := range store.Profiles {
+		mtuText := "авто"
+		if p.ArgonPathMTU > 0 {
+			mtuText = strconv.Itoa(p.ArgonPathMTU)
+		}
+		w.printf("  %d. %s (%s, MTU: %s)\n", i+1, p.Name, p.Proto, mtuText)
+	}
+	choice, err := w.choice("Номер узла (0 — назад): ", len(store.Profiles))
+	if err != nil || choice == 0 {
+		return false, err
+	}
+	idx := choice - 1
+	p := store.Profiles[idx]
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	w.printf("Подбор оптимального MTU для %q (%s)...\n", p.Name, p.Proto)
+	effPreceding := precedingMTUInChain(store, "", p.ID)
+	effTarget := nextTargetInChain(store, "", p.ID)
+	res := probeNodeMTUForProfile(ctx, p, effPreceding, effTarget)
+	if !res.OK {
+		w.printf("Не удалось подобрать MTU: %s\n", res.Error)
+		return false, nil
+	}
+	w.printf("%s\n", res.Message)
+	apply, err := w.confirm(fmt.Sprintf("Записать оптимальный внешний MTU=%d для %q?", res.OptimalPathMTU, p.Name), true)
+	if err != nil || !apply {
+		return false, err
+	}
+	store.Profiles[idx].ArgonPathMTU = res.OptimalPathMTU
+	w.printf("MTU=%d применён.\n", res.OptimalPathMTU)
+	return true, nil
 }
 
 func runSelectChain(store *Store, input io.Reader, output io.Writer) (string, error) {
@@ -329,12 +376,12 @@ func (w *wizard) chooseChain(store *Store) (*Chain, error) {
 }
 
 func (w *wizard) promptProfile(position int) (*Profile, error) {
-	w.printf("\nТип узла %d:\n1. Argon4\n2. VLESS\n3. Hysteria 2\n4. Hysteria v1\n5. OpenConnect\n6. OpenVPN\n0. Назад\n", position)
-	choice, err := w.choice("Выбор: ", 6)
+	w.printf("\nТип узла %d:\n1. Argon4\n2. VLESS\n3. Hysteria 2\n4. Hysteria v1\n5. OpenConnect\n6. OpenVPN\n7. Транзитный шлюз\n0. Назад\n", position)
+	choice, err := w.choice("Выбор: ", 7)
 	if err != nil || choice == 0 {
 		return nil, err
 	}
-	protocols := []string{"", "argon4", "vless", "hysteria2", "hysteria", "openconnect", "openvpn"}
+	protocols := []string{"", "argon4", "vless", "hysteria2", "hysteria", "openconnect", "openvpn", "transit"}
 	profile := &Profile{Proto: protocols[choice]}
 	profile.ID, err = newUUID()
 	if err != nil {
@@ -350,6 +397,10 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 		if err := w.fillArgon(profile); err != nil {
 			return nil, err
 		}
+	case "transit":
+		if err := w.fillTransit(profile); err != nil {
+			return nil, err
+		}
 	case "vless", "hysteria2", "hysteria":
 		if err := w.fillProxyLink(profile); err != nil {
 			return nil, err
@@ -363,7 +414,7 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 			return nil, err
 		}
 	}
-	if profile.Proto != "argon4" {
+	if profile.Proto != "argon4" && profile.Proto != "transit" {
 		for {
 			profile.Routes, err = w.ask("Сети через этот узел, через запятую (необязательно): ")
 			if err != nil {
@@ -381,17 +432,6 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 		}
 		if overlay {
 			profile.UseArgon = true
-			for {
-				profile.ArgonServer, err = w.ask("Argon4-сервер host[:port]: ")
-				if err != nil {
-					return nil, err
-				}
-				if _, err := parseArgonEndpoint(profile.ArgonServer); err != nil {
-					w.printf("Ошибка: %v\n", err)
-					continue
-				}
-				break
-			}
 			for profile.ArgonPassword == "" {
 				profile.ArgonPassword, err = w.secret("Argon4 мастер-пароль (обязательно): ")
 				if err != nil {
@@ -400,11 +440,41 @@ func (w *wizard) promptProfile(position int) (*Profile, error) {
 			}
 		}
 	}
-	plan := &Plan{ChainName: "Проверка узла", Hops: []Profile{*profile}, DNS: []string{"1.1.1.1"}}
+	hops := []Profile{*profile}
+	if profile.Proto == "transit" {
+		hops = append(hops, Profile{ID: "probe", Name: "probe", Proto: "argon4", Server: "127.0.0.1:51820", Password: "probe"})
+	}
+	plan := &Plan{ChainName: "Проверка узла", Hops: hops, DNS: []string{"1.1.1.1"}}
 	if err := validatePlan(plan); err != nil {
 		return nil, fmt.Errorf("узел не сохранён: %w", err)
 	}
 	return profile, nil
+}
+
+func (w *wizard) fillTransit(profile *Profile) error {
+	for {
+		server, err := w.askDefault("Сервер host[:port] (порт по умолчанию 51820): ", "")
+		if err != nil {
+			return err
+		}
+		if _, err := parseArgonEndpoint(server); err != nil {
+			w.printf("Ошибка: %v\n", err)
+			continue
+		}
+		profile.Server = server
+		break
+	}
+	var err error
+	profile.Password, err = w.secret("Мастер-пароль (пусто — слепой транзит): ")
+	if err != nil || strings.TrimSpace(profile.Password) == "" {
+		return err
+	}
+	profile.ClientID, err = w.askDefault("Client ID (пусто — UUID профиля): ", profile.ID)
+	if err != nil {
+		return err
+	}
+	profile.ClientSecret, err = w.secret("Client Secret (необязательно): ")
+	return err
 }
 
 func (w *wizard) fillArgon(profile *Profile) error {

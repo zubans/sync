@@ -126,4 +126,45 @@ class ContactRepository extends ServiceEntityRepository
 
         return (int) $qb->getQuery()->getSingleScalarResult() > 0;
     }
+
+    /** @return list<Contact> контакты пользователя в корзине (от недавно удалённых к старым) */
+    public function findTrashedPersonal(User $user): array
+    {
+        return $this->createQueryBuilder('c')
+            ->where('c.user = :user')
+            ->andWhere('c.deletedAt IS NOT NULL')
+            ->orderBy('c.deletedAt', 'DESC')
+            ->addOrderBy('c.id', 'DESC')
+            ->setParameter('user', $user)
+            ->getQuery()
+            ->getResult();
+    }
+
+    /**
+     * Количество активных и находящихся в корзине личных контактов по ID пользователей.
+     *
+     * @return array<int, array{active: int, trash: int}>
+     */
+    public function countPersonalByUser(): array
+    {
+        $rows = $this->createQueryBuilder('c')
+            ->select(
+                'IDENTITY(c.user) AS userId',
+                'SUM(CASE WHEN c.deletedAt IS NULL THEN 1 ELSE 0 END) AS activeCount',
+                'SUM(CASE WHEN c.deletedAt IS NOT NULL THEN 1 ELSE 0 END) AS trashCount',
+            )
+            ->groupBy('c.user')
+            ->getQuery()
+            ->getArrayResult();
+
+        $counts = [];
+        foreach ($rows as $row) {
+            $counts[(int) $row['userId']] = [
+                'active' => (int) $row['activeCount'],
+                'trash' => (int) $row['trashCount'],
+            ];
+        }
+
+        return $counts;
+    }
 }

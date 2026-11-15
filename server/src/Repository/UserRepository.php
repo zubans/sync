@@ -15,4 +15,10 @@ class UserRepository extends ServiceEntityRepository
     {
         parent::__construct($registry, User::class);
     }
+
+    /** @return list<User> */
+    public function findAllOrdered(): array
+    {
+        return $this->findBy([], ['email' => 'ASC', 'id' => 'ASC']);
+    }
 }

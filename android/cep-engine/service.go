@@ -79,9 +79,18 @@ func Start(planJSON, workDir string, p Platform) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	autoProbeTransitInitialMTU(plan, ips, logf)
 	config, err := buildConfig(plan, ips)
 	if err != nil {
 		return nil, err
+	}
+	effectiveTunMTU := tunMTU
+	if inb, ok := config["inbounds"].([]any); ok && len(inb) > 0 {
+		if m, ok := inb[0].(map[string]any); ok {
+			if v, ok := m["mtu"].(int); ok && v > 0 {
+				effectiveTunMTU = v
+			}
+		}
 	}
 	pretty, _ := json.MarshalIndent(redact(config), "", "  ")
 	logf("конфиг sing-box:\n" + string(pretty))
@@ -100,7 +109,7 @@ func Start(planJSON, workDir string, p Platform) (*Service, error) {
 	pl := &platform{p: p, settings: TunSettings{
 		Address:   strings.Split(tunAddress, "/")[0],
 		Prefix:    30,
-		MTU:       tunMTU,
+		MTU:       effectiveTunMTU,
 		DNS:       dns,
 		BlockIPv6: plan.BlockIPv6,
 	}}
@@ -157,7 +166,7 @@ func redact(v any) any {
 		out := map[string]any{}
 		for k, val := range t {
 			switch k {
-			case "password", "uuid", "client_key", "client_secret", "key", "auth_str", "public_key", "short_id":
+			case "password", "argonPassword", "uuid", "client_key", "client_secret", "key", "auth_str", "public_key", "short_id":
 				out[k] = "***"
 			default:
 				out[k] = redact(val)

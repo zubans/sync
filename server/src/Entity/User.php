@@ -38,6 +38,9 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
     #[Assert\Length(min: 8, max: 4096)]
     private ?string $plainPassword = null;
 
+    #[ORM\Column(options: ['default' => true])]
+    private bool $enabled = true;
+
     #[ORM\ManyToOne(inversedBy: 'members')]
     #[ORM\JoinColumn(onDelete: 'SET NULL')]
     private ?Family $family = null;
@@ -79,7 +82,23 @@ class User implements UserInterface, PasswordAuthenticatedUserInterface
 
     public function getRoles(): array
     {
+        if (!$this->enabled) {
+            return [];
+        }
+
         return array_values(array_unique([...$this->roles, 'ROLE_USER']));
+    }
+
+    public function isEnabled(): bool
+    {
+        return $this->enabled;
+    }
+
+    public function setEnabled(bool $enabled): static
+    {
+        $this->enabled = $enabled;
+
+        return $this;
     }
 
     /** @param list<string> $roles */

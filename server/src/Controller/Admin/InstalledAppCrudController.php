@@ -3,8 +3,10 @@
 namespace App\Controller\Admin;
 
 use App\Entity\InstalledApp;
+use App\Security\RequiresFeature;
 use App\Service\ApkStorage;
 use App\Service\AppInventoryService;
+use App\Service\FeatureManager;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
@@ -20,6 +22,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
  *
  * @extends AbstractCrudController<InstalledApp>
  */
+#[RequiresFeature(FeatureManager::APPS)]
 final class InstalledAppCrudController extends AbstractCrudController
 {
     public function __construct(

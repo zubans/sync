@@ -8,7 +8,9 @@ use App\Entity\User;
 use App\Repository\ContactRepository;
 use App\Repository\FamilyRepository;
 use App\Repository\UserRepository;
+use App\Security\RequiresFeature;
 use App\Service\ContactMover;
+use App\Service\FeatureManager;
 use EasyCorp\Bundle\EasyAdminBundle\Attribute\AdminRoute;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -22,6 +24,7 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * и ставится на новые устройства членов семьи.
  */
 #[IsGranted(User::ROLE_ADMIN)]
+#[RequiresFeature(FeatureManager::CONTACTS)]
 #[AdminRoute('/contact-move', name: 'contact_move')]
 final class ContactMoveController extends AbstractController
 {

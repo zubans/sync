@@ -1,0 +1,363 @@
+{% extends '@EasyAdmin/page/content.html.twig' %}
+
+{% block content_title %}Провайдеры ИИ и аккаунты CLI-агентов{% endblock %}
+
+{% block main %}
+<div class="container-fluid px-0">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+        <div>
+            <p class="text-muted mb-0 small">
+                Единый шлюз ИИ для новостей и Мосбиржи: консольные агенты по подписке
+                (<code>Antigravity CLI / agy</code>, <code>Claude CLI</code>, <code>Codex CLI</code>, <code>Gemini CLI</code>, <code>Kimi CLI</code>)
+                и HTTP API (<code>Ollama</code>, <code>OpenAI</code>, <code>Anthropic</code>, <code>Gemini</code>, <code>OpenAI-совместимый</code>).
+            </p>
+        </div>
+        <div class="d-flex gap-2">
+            <form method="post" action="{{ path('admin_ai_providers_sync') }}">
+                <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                <button type="submit" class="btn btn-sm btn-outline-primary">
+                    Импортировать из .env и var/agy
+                </button>
+            </form>
+            <a href="{{ path('admin_features_index') }}" class="btn btn-sm btn-outline-secondary">
+                Модули и функции ИИ →
+            </a>
+        </div>
+    </div>
+
+    {% if providers is empty %}
+        <div class="alert alert-warning mb-4">
+            В базе ещё не заведено ни одного провайдера ИИ — сейчас используется базовая конфигурация из <code>.env</code>
+            (<code>NEWS_AGY_HOME={{ envInfo.agyHome }}</code>, <code>NEWS_EMBEDDINGS_PROVIDER={{ envInfo.embeddingsProvider }}</code>).
+            Нажмите «Импортировать из .env и var/agy» или добавьте провайдера/агента ниже.
+        </div>
+    {% endif %}
+
+    {# СЕКЦИЯ 1: АККАУНТЫ КОНСОЛЬНЫХ CLI-АГЕНТОВ (УПРАВЛЯЮТСЯ ЧЕРЕЗ КОНСОЛЬ app:ai:agent-*) #}
+    <div class="card shadow-sm mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span class="fw-bold">Консольные CLI-агенты и отдельные аккаунты (agy, claude, codex, gemini-cli, kimi)</span>
+            <span class="badge bg-dark">Через консоль app:ai:agent-*</span>
+        </div>
+        <div class="card-body">
+            <div class="row g-4">
+                <div class="col-12 col-lg-8">
+                    {% if accounts is empty %}
+                        <p class="text-muted mb-0">Отдельных слотов CLI-агентов в БД пока нет. Добавьте аккаунт в форме справа или через терминал: <code>make ai-add TYPE=agy</code>.</p>
+                    {% else %}
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Агент / слот</th>
+                                        <th>Статус / квота</th>
+                                        <th>Вход и HOME</th>
+                                        <th class="text-end">Действия</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for row in accounts %}
+                                        {% set acc = row.entity %}
+                                        <tr>
+                                            <td>{{ acc.id }}</td>
+                                            <td>
+                                                <div class="fw-semibold">{{ acc.label }}</div>
+                                                <div class="small text-muted">
+                                                    <code>{{ row.meta.shortSlug }}</code> / <code>{{ acc.slot }}</code> · приоритет {{ acc.priority }}
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div class="d-flex flex-wrap gap-1 mb-1">
+                                                    <span class="badge {{ acc.enabled ? 'bg-success' : 'bg-secondary' }}">
+                                                        {{ acc.enabled ? 'вкл' : 'выкл' }}
+                                                    </span>
+                                                    {% set statusBadge = acc.status == 'ready' ? 'bg-success' : (acc.status == 'cooling' ? 'bg-warning text-dark' : (acc.status == 'no_login' ? 'bg-secondary' : 'bg-danger')) %}
+                                                    <span class="badge {{ statusBadge }}">{{ acc.status }}</span>
+                                                </div>
+                                                {% if acc.accountEmail %}
+                                                    <div class="small">{{ acc.accountEmail }}</div>
+                                                {% endif %}
+                                                {% if acc.isCoolingNow and acc.coolingUntil %}
+                                                    <div class="small text-warning-emphasis">Отдыхает до {{ acc.coolingUntil|date('d.m H:i') }} UTC</div>
+                                                {% endif %}
+                                                {% if acc.lastError %}
+                                                    <div class="small text-danger" style="max-width: 240px; white-space: normal;">{{ acc.lastError }}</div>
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                <div class="small">
+                                                    Токен/сессия:
+                                                    <strong class="{{ row.hasAuth ? 'text-success' : 'text-danger' }}">{{ row.hasAuth ? 'есть' : 'нет входа' }}</strong>
+                                                    {% if row.hasToken %}<span class="badge bg-info text-dark">setup-token</span>{% endif %}
+                                                </div>
+                                                <div class="text-muted" style="font-size: 0.75rem;">{{ acc.homeDir }}</div>
+                                                <div class="mt-1"><code style="font-size: 0.72rem;">{{ row.loginCommand }}</code></div>
+                                            </td>
+                                            <td class="text-end text-nowrap">
+                                                <div class="d-inline-flex flex-wrap gap-1 justify-content-end">
+                                                    <form method="post" action="{{ path('admin_ai_providers_agent_toggle', {id: acc.id}) }}">
+                                                        <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                                        <button type="submit" class="btn btn-sm {{ acc.enabled ? 'btn-outline-secondary' : 'btn-outline-success' }}">
+                                                            {{ acc.enabled ? 'Выключить' : 'Включить' }}
+                                                        </button>
+                                                    </form>
+                                                    <form method="post" action="{{ path('admin_ai_providers_agent_check', {id: acc.id}) }}">
+                                                        <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                                        <button type="submit" class="btn btn-sm btn-outline-primary">Проверить</button>
+                                                    </form>
+                                                    {% if acc.isCoolingNow or acc.status == 'cooling' %}
+                                                        <form method="post" action="{{ path('admin_ai_providers_agent_release', {id: acc.id}) }}">
+                                                            <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                                            <button type="submit" class="btn btn-sm btn-outline-warning">Сбросить паузу</button>
+                                                        </form>
+                                                    {% endif %}
+                                                    <form method="post" action="{{ path('admin_ai_providers_agent_delete', {id: acc.id}) }}" onsubmit="return confirm('Удалить слот {{ acc.slot }} и его локальную папку входа?');">
+                                                        <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                                        <button type="submit" class="btn btn-sm btn-outline-danger">Удалить</button>
+                                                    </form>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    {% endif %}
+                </div>
+
+                {# Форма добавления CLI-агента через консоль app:ai:agent-add #}
+                <div class="col-12 col-lg-4">
+                    <div class="border rounded p-3 bg-light-subtle">
+                        <h6 class="fw-bold mb-2">Добавить аккаунт CLI-агента</h6>
+                        <p class="text-muted small mb-3">
+                            Вызывает консольную команду <code>php bin/console app:ai:agent-add</code> (изолированный HOME-каталог и, при наличии, зашифрованный setup-token / API-ключ).
+                        </p>
+                        <form method="post" action="{{ path('admin_ai_providers_agent_add') }}">
+                            <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                            <div class="mb-2">
+                                <label class="form-label small fw-semibold" for="agent_type">Тип агента</label>
+                                <select class="form-select form-select-sm" id="agent_type" name="agent_type" required>
+                                    {% for type, label in cliChoices %}
+                                        <option value="{{ type }}">{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-6">
+                                    <label class="form-label small fw-semibold" for="agent_slot">Слот</label>
+                                    <input class="form-control form-control-sm" id="agent_slot" name="slot" placeholder="авто (main / account2)">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label small fw-semibold" for="agent_priority">Приоритет</label>
+                                    <input class="form-control form-control-sm" type="number" id="agent_priority" name="priority" value="100" min="1" max="9999">
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small fw-semibold" for="agent_label">Название / заметка</label>
+                                <input class="form-control form-control-sm" id="agent_label" name="label" placeholder="Рабочая подписка Google #2">
+                            </div>
+                            <div class="mb-2">
+                                <label class="form-label small fw-semibold" for="agent_token">Setup-token или API-ключ (опционально)</label>
+                                <input class="form-control form-control-sm" type="password" id="agent_token" name="token" placeholder="для OAuth agy — оставьте пустым и войдите через make ai-login">
+                            </div>
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" id="agent_enabled" name="enabled" value="1" checked>
+                                <label class="form-check-label small" for="agent_enabled">Сразу включить аккаунт</label>
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm w-100">
+                                Добавить через консоль (app:ai:agent-add)
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {# СЕКЦИЯ 2: ПОДКЛЮЧЁННЫЕ ПРОВАЙДЕРЫ ИИ (HTTP + CLI) #}
+    <div class="row g-4">
+        <div class="col-12 col-lg-8">
+            <div class="card shadow-sm">
+                <div class="card-header fw-bold">Подключённые провайдеры ИИ (приоритет по возрастанию)</div>
+                <div class="card-body">
+                    {% if providers is empty %}
+                        <p class="text-muted mb-0">Провайдеры ИИ в базе отсутствуют.</p>
+                    {% else %}
+                        {% for row in providers %}
+                            {% set p = row.entity %}
+                            <div class="border rounded p-3 mb-3">
+                                <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-2">
+                                    <div>
+                                        <span class="badge {{ p.enabled ? 'bg-success' : 'bg-secondary' }} me-1">{{ p.enabled ? 'включён' : 'выключен' }}</span>
+                                        <strong>{{ p.name }}</strong>
+                                        <code class="ms-1 small">{{ p.type }}</code>
+                                        {% if p.isLocal %}<span class="badge bg-info text-dark ms-1">локальный</span>{% endif %}
+                                        {% if p.useForSummarization %}<span class="badge bg-primary ms-1">текст/сводки</span>{% endif %}
+                                        {% if p.useForEmbeddings %}<span class="badge bg-dark ms-1">эмбеддинги</span>{% endif %}
+                                        <div class="text-muted small mt-1">
+                                            Приоритет: <strong>{{ p.priority }}</strong>
+                                            {% if p.baseUrl %} · URL: <code>{{ p.baseUrl }}</code>{% endif %}
+                                            {% if row.maskedKey %} · Ключ: <code>{{ row.maskedKey }}</code>{% endif %}
+                                            {% if p.defaultModel %} · Модель: <code>{{ p.defaultModel }}</code>{% endif %}
+                                        </div>
+                                        {% if p.lastCheckedAt %}
+                                            <div class="small mt-1 {{ p.lastCheckOk ? 'text-success' : 'text-danger' }}">
+                                                Проверка {{ p.lastCheckedAt|date('d.m H:i') }} UTC:
+                                                {{ p.lastCheckOk ? 'успешно' : (p.lastError ?: 'ошибка') }}
+                                            </div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="d-flex flex-wrap gap-1">
+                                        <form method="post" action="{{ path('admin_ai_providers_provider_toggle', {id: p.id}) }}">
+                                            <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                            <button type="submit" class="btn btn-sm {{ p.enabled ? 'btn-outline-secondary' : 'btn-outline-success' }}">
+                                                {{ p.enabled ? 'Выключить' : 'Включить' }}
+                                            </button>
+                                        </form>
+                                        <form method="post" action="{{ path('admin_ai_providers_provider_test', {id: p.id}) }}">
+                                            <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                            <button type="submit" class="btn btn-sm btn-outline-primary">Проверить</button>
+                                        </form>
+                                        <form method="post" action="{{ path('admin_ai_providers_provider_fetch_models', {id: p.id}) }}">
+                                            <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                            <button type="submit" class="btn btn-sm btn-outline-info">Обновить модели</button>
+                                        </form>
+                                        <form method="post" action="{{ path('admin_ai_providers_provider_delete', {id: p.id}) }}" onsubmit="return confirm('Удалить провайдера «{{ p.name }}» и все его слоты CLI-агентов?');">
+                                            <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger">Удалить</button>
+                                        </form>
+                                    </div>
+                                </div>
+
+                                <details>
+                                    <summary class="small text-primary" style="cursor: pointer;">Редактировать параметры, приоритет и модели</summary>
+                                    <form method="post" action="{{ path('admin_ai_providers_provider_update', {id: p.id}) }}" class="mt-2 pt-2 border-top">
+                                        <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                                        <div class="row g-2">
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Название</label>
+                                                <input class="form-control form-control-sm" name="name" value="{{ p.name }}" required>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small">Приоритет</label>
+                                                <input class="form-control form-control-sm" type="number" name="priority" value="{{ p.priority }}" min="1" max="9999">
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small">Таймаут (сек)</label>
+                                                <input class="form-control form-control-sm" type="number" name="timeout_seconds" value="{{ p.timeoutSeconds }}" min="10" max="3600">
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Base URL</label>
+                                                <input class="form-control form-control-sm" name="base_url" value="{{ p.baseUrl ?? '' }}">
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Новый API-ключ (пусто — оставить прежний)</label>
+                                                <input class="form-control form-control-sm" type="password" name="api_key" placeholder="{{ row.maskedKey ?? 'не задан' }}">
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Модель по умолчанию</label>
+                                                <input class="form-control form-control-sm" name="default_model" value="{{ p.defaultModel ?? '' }}">
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label small">Доступные модели (через запятую)</label>
+                                                <input class="form-control form-control-sm" name="available_models" value="{{ p.availableModels|join(', ') }}">
+                                            </div>
+                                        </div>
+                                        <div class="d-flex flex-wrap gap-3 mt-2">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" name="enabled" value="1" id="p_en_{{ p.id }}" {% if p.enabled %}checked{% endif %}>
+                                                <label class="form-check-label small" for="p_en_{{ p.id }}">Включён</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" name="is_local" value="1" id="p_loc_{{ p.id }}" {% if p.isLocal %}checked{% endif %}>
+                                                <label class="form-check-label small" for="p_loc_{{ p.id }}">Локальный</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" name="use_for_summarization" value="1" id="p_sum_{{ p.id }}" {% if p.useForSummarization %}checked{% endif %}>
+                                                <label class="form-check-label small" for="p_sum_{{ p.id }}">Для текста / сводок / Мосбиржи</label>
+                                            </div>
+                                            {% if row.meta.supportsEmbeddings %}
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" name="use_for_embeddings" value="1" id="p_emb_{{ p.id }}" {% if p.useForEmbeddings %}checked{% endif %}>
+                                                    <label class="form-check-label small" for="p_emb_{{ p.id }}">Для эмбеддингов (сюжеты)</label>
+                                                </div>
+                                            {% endif %}
+                                        </div>
+                                        <button type="submit" class="btn btn-sm btn-primary mt-2">Сохранить изменения</button>
+                                    </form>
+                                </details>
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        {# Форма добавления нового провайдера ИИ #}
+        <div class="col-12 col-lg-4">
+            <div class="card shadow-sm">
+                <div class="card-header fw-bold">Подключить провайдера ИИ</div>
+                <div class="card-body">
+                    <form method="post" action="{{ path('admin_ai_providers_provider_create') }}">
+                        <input type="hidden" name="_token" value="{{ csrf_token(csrfTokenId) }}">
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold" for="p_type">Тип провайдера</label>
+                            <select class="form-select form-select-sm" id="p_type" name="type" required>
+                                {% for type, label in providerChoices %}
+                                    <option value="{{ type }}">{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold" for="p_name">Название</label>
+                            <input class="form-control form-control-sm" id="p_name" name="name" placeholder="Например: OpenAI основной или Ollama локальный">
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold" for="p_url">Base URL (для HTTP API / Ollama)</label>
+                            <input class="form-control form-control-sm" id="p_url" name="base_url" placeholder="https://api.openai.com/v1 или http://192.168.1.133:11434">
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold" for="p_key">API-ключ (шифруется SecretBox)</label>
+                            <input class="form-control form-control-sm" type="password" id="p_key" name="api_key" placeholder="sk-... / AIza...">
+                        </div>
+                        <div class="row g-2 mb-2">
+                            <div class="col-7">
+                                <label class="form-label small fw-semibold" for="p_model">Модель по умолчанию</label>
+                                <input class="form-control form-control-sm" id="p_model" name="default_model" placeholder="gpt-4.1-mini / gpt-oss:20b">
+                            </div>
+                            <div class="col-5">
+                                <label class="form-label small fw-semibold" for="p_prio">Приоритет</label>
+                                <input class="form-control form-control-sm" type="number" id="p_prio" name="priority" value="100" min="1" max="9999">
+                            </div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold" for="p_models">Список моделей (через запятую)</label>
+                            <input class="form-control form-control-sm" id="p_models" name="available_models" placeholder="необязательно — можно загрузить кнопкой позже">
+                        </div>
+                        <div class="d-flex flex-column gap-1 mb-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="p_enabled" name="enabled" value="1" checked>
+                                <label class="form-check-label small" for="p_enabled">Включить сразу</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="p_sum" name="use_for_summarization" value="1" checked>
+                                <label class="form-check-label small" for="p_sum">Использовать для текста, сводок и анализа акций</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="p_emb" name="use_for_embeddings" value="1">
+                                <label class="form-check-label small" for="p_emb">Использовать для эмбеддингов (сюжеты новостей)</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="p_local" name="is_local" value="1">
+                                <label class="form-check-label small" for="p_local">Локальный (без выхода во внешний интернет)</label>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-sm w-100">Добавить провайдера ИИ</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -18,34 +18,61 @@ const (
 	SessionIdleTimeout = 10 * time.Minute
 	// Максимальное число одновременных вычислений Argon2id на сервере (защита от CPU/RAM DoS).
 	MaxConcurrentArgon2 = 4
+
+	// Режимы работы сервера/рукопожатия Argon4.
+	ModeTunnel  = "tunnel"
+	ModeTransit = "transit"
+	ModeAuto    = "auto"
+
+	// Транспортные протоколы L4-транзита.
+	ProtoUDP = "udp"
+	ProtoTCP = "tcp"
 )
 
 var (
 	ErrHandshakeReplay = errors.New("повторное использование соли рукопожатия")
 	ErrClockSkew       = errors.New("недопустимое время рукопожатия (рассинхронизация часов или повтор)")
 	ErrIPPoolExhausted = errors.New("пул IP-адресов туннеля исчерпан")
+	ErrTransitDenied   = errors.New("запрошенный транзитный режим или цель запрещены сервером")
 )
 
 // HandshakeRequest передаётся зашифрованным внутри кадра FrameTypeHandshakeReq.
 type HandshakeRequest struct {
-	ClientID   string   `json:"clientId"`
-	ClientAuth string   `json:"clientAuth,omitempty"`
-	ClientPub  string   `json:"clientPub"`
-	Requested  string   `json:"requestedIp,omitempty"`
-	Apps       []string `json:"apps,omitempty"`
-	Timestamp  int64    `json:"timestamp"`
+	ClientID        string   `json:"clientId"`
+	ClientAuth      string   `json:"clientAuth,omitempty"`
+	ClientPub       string   `json:"clientPub"`
+	Requested       string   `json:"requestedIp,omitempty"`
+	Apps            []string `json:"apps,omitempty"`
+	Timestamp       int64    `json:"timestamp"`
+	Mode            string   `json:"mode,omitempty"`
+	Target          string   `json:"target,omitempty"`
+	Proto           string   `json:"proto,omitempty"`
+	ProtocolVersion int      `json:"protocolVersion,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	PaddingProfile  string   `json:"paddingProfile,omitempty"`
+	BehaviorProfile string   `json:"behaviorProfile,omitempty"`
+	ProfileVersion  int      `json:"profileVersion,omitempty"`
+	AutoMTU         bool     `json:"autoMtu,omitempty"`
 }
 
 // HandshakeResponse возвращается сервером зашифрованным внутри кадра FrameTypeHandshakeResp.
 type HandshakeResponse struct {
-	AssignedIP string   `json:"assignedIp"`
-	ServerIP   string   `json:"serverIp"`
-	SubnetCidr int      `json:"subnetCidr"`
-	MTU        int      `json:"mtu"`
-	DNS        []string `json:"dns,omitempty"`
-	Routes     []string `json:"routes,omitempty"`
-	ServerTime int64    `json:"serverTime"`
-	ServerPub  string   `json:"serverPub"`
+	AssignedIP       string   `json:"assignedIp,omitempty"`
+	ServerIP         string   `json:"serverIp,omitempty"`
+	SubnetCidr       int      `json:"subnetCidr,omitempty"`
+	MTU              int      `json:"mtu,omitempty"`
+	EffectivePathMTU int      `json:"effectivePathMtu,omitempty"`
+	DNS              []string `json:"dns,omitempty"`
+	Routes           []string `json:"routes,omitempty"`
+	ServerTime       int64    `json:"serverTime"`
+	ServerPub        string   `json:"serverPub"`
+	Mode             string   `json:"mode,omitempty"`
+	Target           string   `json:"target,omitempty"`
+	ProtocolVersion  int      `json:"protocolVersion,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	PaddingProfile   string   `json:"paddingProfile,omitempty"`
+	BehaviorProfile  string   `json:"behaviorProfile,omitempty"`
+	ProfileVersion   int      `json:"profileVersion,omitempty"`
 }
 
 // ReplayWindow реализует 64-пакетное скользящее окно защиты от повтора (anti-replay) по принципу RFC 6479 / WireGuard.
@@ -104,18 +131,127 @@ func (w *ReplayWindow) Accept(seq uint64) bool {
 // PeerSession хранит состояние аутентифицированного клиента, раздельные сессионные ключи направлений (PFS) и окно повторов.
 // При reconnect объект не изменяется: SessionManager подменяет его новым, поэтому читатели видят согласованные соль и ключи.
 type PeerSession struct {
-	ClientID   string
-	ClientAuth []byte
-	AssignedIP net.IP
-	Salt       [SaltSize]byte
-	C2SKey     []byte
-	S2CKey     []byte
+	ClientID        string
+	ClientAuth      []byte
+	AssignedIP      net.IP
+	Salt            [SaltSize]byte
+	C2SKey          []byte
+	S2CKey          []byte
+	ProtocolVersion byte
+	Padding         PaddingConfig
+	Profile         SessionProfile
+	MaxOuterBytes   int
+	Mode            string
+	Target          string
+	Proto           string
+	TargetConn      *net.UDPConn
+	Shaper          *TrafficShaper
 
-	stateMu    sync.RWMutex
-	remoteAddr *net.UDPAddr
-	lastSeen   time.Time
-	replay     ReplayWindow
-	s2cSeq     atomic.Uint64
+	stateMu         sync.RWMutex
+	remoteAddr      *net.UDPAddr
+	lastSeen        time.Time
+	replay          ReplayWindow
+	s2cSeq          atomic.Uint64
+	runtimeMaxOuter atomic.Int64
+	closeOnce       sync.Once
+}
+
+// EffectiveMaxOuter возвращает действующий внешний лимит UDP-кадра сессии с учётом динамической автоподстройки MTU.
+func (s *PeerSession) EffectiveMaxOuter(defaultMaxOuter int) int {
+	if s == nil {
+		return defaultMaxOuter
+	}
+	base := s.MaxOuterBytes
+	if base <= 0 {
+		base = defaultMaxOuter
+	}
+	if dyn := int(s.runtimeMaxOuter.Load()); dyn > 0 && (base <= 0 || dyn < base) {
+		return dyn
+	}
+	return base
+}
+
+// SetRuntimeMaxOuter ограничивает внешний лимит UDP-кадра сессии сверху до maxOuter (без снижения ниже MinPathMTU-28).
+func (s *PeerSession) SetRuntimeMaxOuter(maxOuter int) int {
+	if s == nil || maxOuter <= 0 {
+		return 0
+	}
+	floor := MinPathMTU - IPv4UDPOverhead
+	if maxOuter < floor {
+		maxOuter = floor
+	}
+	for {
+		cur := int(s.runtimeMaxOuter.Load())
+		if cur > 0 && cur <= maxOuter {
+			return cur
+		}
+		if s.runtimeMaxOuter.CompareAndSwap(int64(cur), int64(maxOuter)) {
+			if s.Shaper != nil {
+				s.Shaper.SetMaxOuterBytes(s.EffectiveMaxOuter(maxOuter))
+			}
+			return maxOuter
+		}
+	}
+}
+
+// DownshiftMaxOuter снижает рабочий внешний лимит UDP-кадра при ошибке EMSGSIZE/переполнении пути.
+func (s *PeerSession) DownshiftMaxOuter(failedWireLen, kernelPathMTU int) int {
+	if s == nil {
+		return 0
+	}
+	cur := s.EffectiveMaxOuter(DefaultMaxOuterUDPSize)
+	candidate := cur - pmtuFallbackStep
+	if failedWireLen > 0 && failedWireLen-pmtuFallbackStep < candidate {
+		candidate = failedWireLen - pmtuFallbackStep
+	}
+	if kernelPathMTU >= MinPathMTU {
+		kOuter := kernelPathMTU - IPv4UDPOverhead
+		if kOuter < candidate || candidate <= 0 {
+			candidate = kOuter
+		}
+	}
+	floor := MinPathMTU - IPv4UDPOverhead
+	if candidate < floor {
+		candidate = floor
+	}
+	return s.SetRuntimeMaxOuter(candidate)
+}
+
+func (s *PeerSession) sealOptions(defaultMaxOuter int) SealOptions {
+	ver := s.ProtocolVersion
+	if ver == 0 {
+		ver = ProtocolVersionV5
+	}
+	maxOuter := s.EffectiveMaxOuter(defaultMaxOuter)
+	prof := s.Profile
+	if s.Shaper != nil {
+		prof = s.Shaper.EffectiveProfile()
+	}
+	opts := SealOptions{
+		Version:       ver,
+		Padding:       s.Padding,
+		MaxOuterBytes: maxOuter,
+	}
+	if ver == ProtocolVersionV5 && prof.IsActive() {
+		opts.Padding = prof.Padding
+		opts.SamplePad = prof.SamplePaddingLen
+	}
+	return opts
+}
+
+// Close освобождает связанные с сессией сетевые ресурсы и останавливает шейпер.
+func (s *PeerSession) Close() {
+	if s == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		if s.Shaper != nil {
+			s.Shaper.Close()
+		}
+		if s.TargetConn != nil {
+			_ = s.TargetConn.Close()
+		}
+	})
 }
 
 // RemoteAddr возвращает копию текущего адреса для безопасного roaming без гонок с TouchSession.
@@ -141,16 +277,25 @@ func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
 	return &clone
 }
 
-func newPeerSession(clientID string, clientAuth []byte, assignedIP net.IP, salt [SaltSize]byte, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, now time.Time) *PeerSession {
+func newPeerSession(clientID string, clientAuth []byte, assignedIP net.IP, salt [SaltSize]byte, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, now time.Time, version byte, padding PaddingConfig, maxOuter int) *PeerSession {
+	if version == 0 {
+		version = ProtocolVersionV5
+	}
+	if maxOuter <= 0 {
+		maxOuter = DefaultMaxOuterUDPSize
+	}
 	return &PeerSession{
-		ClientID:   clientID,
-		ClientAuth: append([]byte(nil), clientAuth...),
-		AssignedIP: append(net.IP(nil), assignedIP...),
-		Salt:       salt,
-		C2SKey:     append([]byte(nil), c2sKey...),
-		S2CKey:     append([]byte(nil), s2cKey...),
-		remoteAddr: cloneUDPAddr(remoteAddr),
-		lastSeen:   now,
+		ClientID:        clientID,
+		ClientAuth:      append([]byte(nil), clientAuth...),
+		AssignedIP:      append(net.IP(nil), assignedIP...),
+		Salt:            salt,
+		C2SKey:          append([]byte(nil), c2sKey...),
+		S2CKey:          append([]byte(nil), s2cKey...),
+		ProtocolVersion: version,
+		Padding:         padding,
+		MaxOuterBytes:   maxOuter,
+		remoteAddr:      cloneUDPAddr(remoteAddr),
+		lastSeen:        now,
 	}
 }
 
@@ -182,14 +327,32 @@ type SessionManager struct {
 	dns            []string
 	routes         []string
 
-	bySalt         map[[SaltSize]byte]*PeerSession
-	byIP           map[[4]byte]*PeerSession
-	byClient       map[string]*PeerSession
-	seenHandshakes map[[SaltSize]byte]time.Time
-	nextHost       byte
+	bySalt             map[[SaltSize]byte]*PeerSession
+	byIP               map[[4]byte]*PeerSession
+	byClient           map[string]*PeerSession
+	seenHandshakes     map[[SaltSize]byte]time.Time
+	nextHost           byte
+	idleTimeout        time.Duration
+	handshakeReplayTTL time.Duration
+	nowFunc            func() time.Time
 }
 
+// NewSessionManager создаёт менеджер сессий со значениями таймингов по умолчанию.
 func NewSessionManager(masterPassword string, params ArgonParams, subnetCIDR string, mtu int, dns, routes []string) (*SessionManager, error) {
+	return NewSessionManagerWithTiming(masterPassword, params, subnetCIDR, mtu, dns, routes, SessionIdleTimeout, HandshakeReplayTTL, nil)
+}
+
+// NewSessionManagerWithTiming создаёт менеджер сессий с настраиваемыми таймаутами простоя и кэша рукопожатий.
+func NewSessionManagerWithTiming(
+	masterPassword string,
+	params ArgonParams,
+	subnetCIDR string,
+	mtu int,
+	dns, routes []string,
+	idleTimeout time.Duration,
+	handshakeReplayTTL time.Duration,
+	nowFunc func() time.Time,
+) (*SessionManager, error) {
 	ip, ipNet, err := net.ParseCIDR(subnetCIDR)
 	if err != nil {
 		return nil, err
@@ -204,24 +367,52 @@ func NewSessionManager(masterPassword string, params ArgonParams, subnetCIDR str
 		serverIP[3] = 1
 	}
 
+	if idleTimeout <= 0 {
+		idleTimeout = SessionIdleTimeout
+	}
+	if handshakeReplayTTL <= 0 {
+		handshakeReplayTTL = HandshakeReplayTTL
+	}
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
+
 	psk := DerivePSK(masterPassword, params)
 
 	return &SessionManager{
-		masterPassword: masterPassword,
-		params:         params,
-		psk:            psk,
-		argonSem:       make(chan struct{}, MaxConcurrentArgon2),
-		serverIP:       serverIP,
-		subnet:         ipNet,
-		mtu:            mtu,
-		dns:            dns,
-		routes:         routes,
-		bySalt:         make(map[[SaltSize]byte]*PeerSession),
-		byIP:           make(map[[4]byte]*PeerSession),
-		byClient:       make(map[string]*PeerSession),
-		seenHandshakes: make(map[[SaltSize]byte]time.Time),
-		nextHost:       2,
+		masterPassword:     masterPassword,
+		params:             params,
+		psk:                psk,
+		argonSem:           make(chan struct{}, MaxConcurrentArgon2),
+		serverIP:           serverIP,
+		subnet:             ipNet,
+		mtu:                mtu,
+		dns:                dns,
+		routes:             routes,
+		bySalt:             make(map[[SaltSize]byte]*PeerSession),
+		byIP:               make(map[[4]byte]*PeerSession),
+		byClient:           make(map[string]*PeerSession),
+		seenHandshakes:     make(map[[SaltSize]byte]time.Time),
+		nextHost:           2,
+		idleTimeout:        idleTimeout,
+		handshakeReplayTTL: handshakeReplayTTL,
+		nowFunc:            nowFunc,
 	}, nil
+}
+
+func (m *SessionManager) now() time.Time {
+	if m != nil && m.nowFunc != nil {
+		return m.nowFunc()
+	}
+	return time.Now()
+}
+
+// IdleTimeout возвращает действующий таймаут простоя сессии.
+func (m *SessionManager) IdleTimeout() time.Duration {
+	if m != nil && m.idleTimeout > 0 {
+		return m.idleTimeout
+	}
+	return SessionIdleTimeout
 }
 
 func (m *SessionManager) PSK() []byte {
@@ -238,13 +429,18 @@ func (m *SessionManager) SubnetPrefixLen() int {
 }
 
 // LookupBySalt возвращает активную сессию по 16-байтной соли (без запуска Argon2id).
+// Если сессия превысила таймаут простоя, возвращает nil.
 func (m *SessionManager) LookupBySalt(salt []byte) *PeerSession {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
+	now := m.now()
 	m.mu.RLock()
 	sess := m.bySalt[saltKey]
 	m.mu.RUnlock()
+	if sess != nil && now.Sub(sess.LastSeen()) > m.IdleTimeout() {
+		return nil
+	}
 	return sess
 }
 
@@ -253,9 +449,9 @@ func (m *SessionManager) DeriveHandshakeKey(salt []byte) ([]byte, error) {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
-	now := time.Now()
+	now := m.now()
 	m.mu.RLock()
-	if _, seen := m.seenHandshakes[saltKey]; seen {
+	if exp, seen := m.seenHandshakes[saltKey]; seen && now.Before(exp) {
 		m.mu.RUnlock()
 		return nil, ErrHandshakeReplay
 	}
@@ -276,34 +472,51 @@ func (m *SessionManager) DeriveHandshakeKey(salt []byte) ([]byte, error) {
 
 // RegisterSession закрепляет за проверенным клиентом виртуальный IP в туннеле и сохраняет ключи сессии (c2s/s2c).
 func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr) (*PeerSession, error) {
+	return m.RegisterSessionWithProtocol(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, ProtocolVersionV5, DefaultPaddingConfig(), DefaultMaxOuterUDPSize)
+}
+
+// RegisterSessionWithProtocol регистрирует сессию с зафиксированной версией протокола и распределением padding.
+func (m *SessionManager) RegisterSessionWithProtocol(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, version byte, padding PaddingConfig, maxOuter int) (*PeerSession, error) {
+	return m.RegisterSessionWithProfile(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, version, padding, SessionProfile{}, maxOuter)
+}
+
+// RegisterSessionWithProfile регистрирует сессию с зафиксированным поведенческим профилем трафика.
+func (m *SessionManager) RegisterSessionWithProfile(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, version byte, padding PaddingConfig, profile SessionProfile, maxOuter int) (*PeerSession, error) {
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
-	now := time.Now()
+	now := m.now()
+	var reclaimedOld *PeerSession
+	defer func() {
+		if reclaimedOld != nil {
+			reclaimedOld.Close()
+		}
+	}()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.purgeExpiredLocked(now)
-
-	if exp, seen := m.seenHandshakes[saltKey]; seen && now.Before(exp) {
-		return nil, ErrHandshakeReplay
+	if err := m.reserveHandshakeLocked(saltKey, now); err != nil {
+		return nil, err
 	}
-	m.seenHandshakes[saltKey] = now.Add(HandshakeReplayTTL)
 
 	// Переиспользование существующего IP по clientID разрешено только при совпадении токена владения clientAuth.
 	// Старый объект не перезаписываем: пакетные циклы могут всё ещё безопасно читать его согласованные ключи.
-	if existing, ok := m.byClient[clientID]; ok && clientID != "" {
+	if existing, ok := m.byClient[clientID]; ok && clientID != "" && len(existing.AssignedIP) > 0 {
 		canReclaim := len(existing.ClientAuth) > 0 &&
 			len(clientAuth) == len(existing.ClientAuth) &&
 			subtle.ConstantTimeCompare(existing.ClientAuth, clientAuth) == 1
 		if canReclaim {
-			sess := newPeerSession(clientID, clientAuth, existing.AssignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now)
+			sess := newPeerSession(clientID, clientAuth, existing.AssignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
+			sess.Mode = ModeTunnel
+			sess.Profile = profile
 			var ipKey [4]byte
 			copy(ipKey[:], sess.AssignedIP.To4())
 			delete(m.bySalt, existing.Salt)
 			m.bySalt[saltKey] = sess
 			m.byIP[ipKey] = sess
 			m.byClient[clientID] = sess
+			reclaimedOld = existing
 			return sess, nil
 		}
 	}
@@ -315,7 +528,9 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 	var ipKey [4]byte
 	copy(ipKey[:], assignedIP.To4())
 
-	sess := newPeerSession(clientID, clientAuth, assignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now)
+	sess := newPeerSession(clientID, clientAuth, assignedIP, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
+	sess.Mode = ModeTunnel
+	sess.Profile = profile
 	m.bySalt[saltKey] = sess
 	m.byIP[ipKey] = sess
 	if clientID != "" && len(clientAuth) > 0 {
@@ -326,10 +541,85 @@ func (m *SessionManager) RegisterSession(clientID string, clientAuth, salt, c2sK
 	return sess, nil
 }
 
+// RegisterTransitSession регистрирует L4-транзитную сессию без выделения виртуального IP из пула туннеля.
+func (m *SessionManager) RegisterTransitSession(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, target, proto string, targetConn *net.UDPConn) (*PeerSession, error) {
+	maxOuter := DefaultMaxOuterUDPSize
+	if proto == ProtoTCP {
+		maxOuter = MaxTCPFrameSize
+	}
+	return m.RegisterTransitSessionWithProfile(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, ProtocolVersionV5, DefaultPaddingConfig(), SessionProfile{}, maxOuter)
+}
+
+// RegisterTransitSessionWithProtocol регистрирует транзитную сессию с зафиксированной версией протокола и padding.
+func (m *SessionManager) RegisterTransitSessionWithProtocol(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, target, proto string, targetConn *net.UDPConn, version byte, padding PaddingConfig, maxOuter int) (*PeerSession, error) {
+	return m.RegisterTransitSessionWithProfile(clientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, target, proto, targetConn, version, padding, SessionProfile{}, maxOuter)
+}
+
+// RegisterTransitSessionWithProfile регистрирует транзитную сессию с зафиксированным поведенческим профилем.
+func (m *SessionManager) RegisterTransitSessionWithProfile(clientID string, clientAuth, salt, c2sKey, s2cKey []byte, remoteAddr *net.UDPAddr, target, proto string, targetConn *net.UDPConn, version byte, padding PaddingConfig, profile SessionProfile, maxOuter int) (*PeerSession, error) {
+	var saltKey [SaltSize]byte
+	copy(saltKey[:], salt)
+
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.reserveHandshakeLocked(saltKey, now); err != nil {
+		return nil, err
+	}
+
+	sess := newPeerSession(clientID, clientAuth, nil, saltKey, c2sKey, s2cKey, remoteAddr, now, version, padding, maxOuter)
+	sess.Mode = ModeTransit
+	sess.Target = target
+	sess.Proto = proto
+	sess.TargetConn = targetConn
+	sess.Profile = profile
+	m.bySalt[saltKey] = sess
+	return sess, nil
+}
+
+// RemoveSession удаляет активную сессию по соли и освобождает её ресурсы (например, после закрытия TCP-потока).
+func (m *SessionManager) RemoveSession(salt []byte) {
+	var saltKey [SaltSize]byte
+	copy(saltKey[:], salt)
+
+	m.mu.Lock()
+	sess := m.bySalt[saltKey]
+	if sess != nil {
+		delete(m.bySalt, saltKey)
+		if ip4 := sess.AssignedIP.To4(); ip4 != nil {
+			var ipKey [4]byte
+			copy(ipKey[:], ip4)
+			if m.byIP[ipKey] == sess {
+				delete(m.byIP, ipKey)
+			}
+		}
+		if sess.ClientID != "" && m.byClient[sess.ClientID] == sess {
+			delete(m.byClient, sess.ClientID)
+		}
+	}
+	m.mu.Unlock()
+	sess.Close()
+}
+
+func (m *SessionManager) reserveHandshakeLocked(saltKey [SaltSize]byte, now time.Time) error {
+	m.purgeExpiredLocked(now)
+	if exp, seen := m.seenHandshakes[saltKey]; seen && now.Before(exp) {
+		return ErrHandshakeReplay
+	}
+	ttl := m.handshakeReplayTTL
+	if ttl <= 0 {
+		ttl = HandshakeReplayTTL
+	}
+	m.seenHandshakes[saltKey] = now.Add(ttl)
+	return nil
+}
+
 func (m *SessionManager) TouchSession(sess *PeerSession, remoteAddr *net.UDPAddr) {
+	now := m.now()
 	sess.stateMu.Lock()
 	sess.remoteAddr = cloneUDPAddr(remoteAddr)
-	sess.lastSeen = time.Now()
+	sess.lastSeen = now
 	sess.stateMu.Unlock()
 }
 
@@ -353,8 +643,10 @@ func (m *SessionManager) purgeExpiredLocked(now time.Time) {
 			delete(m.seenHandshakes, s)
 		}
 	}
+	idleTimeout := m.IdleTimeout()
+	var expired []*PeerSession
 	for saltKey, sess := range m.bySalt {
-		if now.Sub(sess.LastSeen()) > SessionIdleTimeout {
+		if now.Sub(sess.LastSeen()) > idleTimeout {
 			delete(m.bySalt, saltKey)
 			if ip4 := sess.AssignedIP.To4(); ip4 != nil {
 				var ipKey [4]byte
@@ -366,7 +658,30 @@ func (m *SessionManager) purgeExpiredLocked(now time.Time) {
 			if sess.ClientID != "" && m.byClient[sess.ClientID] == sess {
 				delete(m.byClient, sess.ClientID)
 			}
+			expired = append(expired, sess)
 		}
+	}
+	for _, sess := range expired {
+		sess.Close()
+	}
+}
+
+// CloseAll закрывает все активные транзитные соединения.
+func (m *SessionManager) CloseAll() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	sessions := make([]*PeerSession, 0, len(m.bySalt))
+	for k, s := range m.bySalt {
+		sessions = append(sessions, s)
+		delete(m.bySalt, k)
+	}
+	clear(m.byIP)
+	clear(m.byClient)
+	m.mu.Unlock()
+	for _, s := range sessions {
+		s.Close()
 	}
 }
 

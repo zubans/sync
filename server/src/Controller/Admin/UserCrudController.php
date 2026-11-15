@@ -3,6 +3,7 @@
 namespace App\Controller\Admin;
 
 use App\Entity\User;
+use App\Repository\ApiTokenRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
@@ -10,6 +11,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Filters;
 use EasyCorp\Bundle\EasyAdminBundle\Controller\AbstractCrudController;
 use EasyCorp\Bundle\EasyAdminBundle\Field\AssociationField;
+use EasyCorp\Bundle\EasyAdminBundle\Field\BooleanField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\ChoiceField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\DateTimeField;
 use EasyCorp\Bundle\EasyAdminBundle\Field\EmailField;
@@ -24,8 +26,10 @@ use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
  */
 final class UserCrudController extends AbstractCrudController
 {
-    public function __construct(private readonly UserPasswordHasherInterface $hasher)
-    {
+    public function __construct(
+        private readonly UserPasswordHasherInterface $hasher,
+        private readonly ApiTokenRepository $apiTokenRepository,
+    ) {
     }
 
     public static function getEntityFqcn(): string
@@ -44,11 +48,15 @@ final class UserCrudController extends AbstractCrudController
 
     public function configureActions(Actions $actions): Actions
     {
+        $phonebook = Action::new('phonebook', 'Телефонная книга', 'fa fa-book')
+            ->linkToRoute('admin_phonebook_user', fn (User $user): array => ['userId' => $user->getId()]);
         $contacts = Action::new('contacts', 'Контакты', 'fa fa-address-book')
             ->linkToUrl(fn (User $user) => ContactCrudController::indexUrlForUser($this->container->get(AdminUrlGeneratorInterface::class), $user));
 
         return $actions
             ->add(Crud::PAGE_INDEX, Action::DETAIL)
+            ->add(Crud::PAGE_INDEX, $phonebook)
+            ->add(Crud::PAGE_DETAIL, $phonebook)
             ->add(Crud::PAGE_INDEX, $contacts)
             ->add(Crud::PAGE_DETAIL, $contacts);
     }
@@ -74,6 +82,7 @@ final class UserCrudController extends AbstractCrudController
             ->renderExpanded()
             ->renderAsBadges();
         yield AssociationField::new('family', 'Семья');
+        yield BooleanField::new('enabled', 'Активен');
         yield DateTimeField::new('createdAt', 'Создан')->hideOnForm();
     }
 
@@ -85,7 +94,12 @@ final class UserCrudController extends AbstractCrudController
 
     public function updateEntity(EntityManagerInterface $entityManager, $entityInstance): void
     {
+        \assert($entityInstance instanceof User);
         $this->hashPassword($entityInstance);
+        if (!$entityInstance->isEnabled()) {
+            $entityInstance->setRoles([]);
+            $this->apiTokenRepository->revokeAllForUser($entityInstance);
+        }
         parent::updateEntity($entityManager, $entityInstance);
     }
 

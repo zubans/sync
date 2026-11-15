@@ -55,11 +55,69 @@ func endpointFor(profile Profile) (Endpoint, error) {
 	case "openvpn":
 		remote, err := firstOpenVPNRemote(profile.Config)
 		return Endpoint{Host: remote.Host, Port: remote.Port}, err
-	case "argon4":
+	case "argon4", "transit":
 		return parseArgonEndpoint(profile.Server)
 	default:
 		return parseHostPort(profile.Server)
 	}
+}
+
+func resolvedPortFor(profile Profile) (int, error) {
+	ep, err := endpointFor(profile)
+	if err != nil {
+		return 0, err
+	}
+	if ep.Port != 0 {
+		return ep.Port, nil
+	}
+	switch profile.Proto {
+	case "openconnect", "sstp":
+		return 443, nil
+	case "openvpn":
+		return 1194, nil
+	case "argon4", "transit", "amneziawg":
+		return 51820, nil
+	default:
+		return 443, nil
+	}
+}
+
+func transportProtoFor(profile Profile) string {
+	switch profile.Proto {
+	case "vless", "openconnect":
+		return "tcp"
+	case "hysteria2", "hysteria", "argon4":
+		return "udp"
+	case "openvpn":
+		if openVPNUsesUDP(profile.Config) {
+			return "udp"
+		}
+		return "tcp"
+	default:
+		return ""
+	}
+}
+
+func rewriteServerPort(raw string, port int) string {
+	trimmed := strings.TrimSpace(raw)
+	ep, err := parseHostPort(trimmed)
+	if err != nil {
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	}
+	formattedHost := ep.Host
+	if strings.Contains(formattedHost, ":") {
+		formattedHost = "[" + formattedHost + "]"
+	}
+	if idx := strings.Index(trimmed, "://"); idx >= 0 {
+		scheme := trimmed[:idx+3]
+		rest := trimmed[idx+3:]
+		pathPart := ""
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			pathPart = rest[slash:]
+		}
+		return fmt.Sprintf("%s%s:%d%s", scheme, formattedHost, port, pathPart)
+	}
+	return fmt.Sprintf("%s:%d", formattedHost, port)
 }
 
 func parseArgonEndpoint(raw string) (Endpoint, error) {

@@ -6,6 +6,9 @@ struct ProfileEditor: View {
     @EnvironmentObject var model: AppModel
     let profileID: UUID
     @State private var importing = false
+    @State private var mtuText = ""
+    @State private var probingMTU = false
+    @State private var probeResult: MTUProbeResult?
 
     private var binding: Binding<Profile> {
         Binding(
@@ -52,6 +55,13 @@ struct ProfileEditor: View {
                     TextField("Client ID (необязательно)", text: p.clientID)
                     SecureField("Client Secret (необязательно)", text: p.clientSecret)
                 }
+            case .transit:
+                Section("Транзитный шлюз (L4 без TUN)") {
+                    TextField("Адрес", text: p.server, prompt: Text("relay.example.com:51820"))
+                    SecureField("Мастер-пароль (пусто — слепой режим)", text: p.password)
+                    TextField("Client ID (необязательно)", text: p.clientID)
+                    SecureField("Client Secret (необязательно)", text: p.clientSecret)
+                }
             case .sstp:
                 Section("Сервер") {
                     TextField("Адрес", text: p.server, prompt: Text("vpn.example.com[:443]"))
@@ -59,11 +69,10 @@ struct ProfileEditor: View {
                 }
                 credentials(p, optional: false)
             }
-            if p.wrappedValue.proto != .argon4 {
+            if p.wrappedValue.proto != .argon4 && p.wrappedValue.proto != .transit {
                 Section {
                     Toggle("Шифровать подключение через Argon4", isOn: p.useArgon)
                     if p.wrappedValue.useArgon {
-                        TextField("Сервер Argon4", text: p.argonServer, prompt: Text("vpn.example.com:51820"))
                         SecureField("Мастер-пароль Argon4", text: p.argonPassword)
                         TextField("Client ID (необязательно)", text: p.clientID)
                         SecureField("Client Secret (необязательно)", text: p.clientSecret)
@@ -71,18 +80,117 @@ struct ProfileEditor: View {
                 } header: {
                     Text("Argon4-надстройка")
                 } footer: {
-                    Text("Сначала поднимается отдельный Argon4-туннель, затем сервер этого профиля подключается через него. Для пустого Client ID используется идентификатор профиля.")
+                    Text("Трафик к этому узлу (порт 51820) или через предыдущий транзитный шлюз дополнительно шифруется Argon4 (туннель или L4-транзит). Для пустого Client ID используется идентификатор профиля.")
                 }
             }
-            Section {
-                TextField("Сети", text: p.routes, prompt: Text("192.168.1.119, 10.0.0.0/8"))
-                if let error = Result(catching: { try RouteList.parse(p.wrappedValue.routes) }).failureMessage {
-                    Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            if p.wrappedValue.proto == .argon4 || p.wrappedValue.proto == .transit || p.wrappedValue.useArgon {
+                let profileBinding = Binding<String>(
+                    get: { p.wrappedValue.argonBehaviorProfile ?? "" },
+                    set: { p.wrappedValue.argonBehaviorProfile = $0.isEmpty ? nil : $0 }
+                )
+                Section("Поведенческий профиль Argon4") {
+                    Picker("Профиль трафика", selection: profileBinding) {
+                        Text("Отключён (по умолчанию)").tag("")
+                        Text("Базовый (baseline)").tag("baseline")
+                        Text("Видеозвонок (video-call)").tag("video-call")
+                    }
+                    if p.wrappedValue.argonBehaviorProfile == "video-call" {
+                        Toggle("Режим экономии заряда (редкие паузы/без фонового feedback)", isOn: p.argonLowPowerMode)
+                        Label(
+                            "Включает имитацию burst/feedback медиапотока поверх Argon4 v5 UDP: увеличивает служебный трафик, добавляет до ~18 мс задержки и повышенный расход батареи; авто-снижение до baseline через 2 часа. Не скрывает IP сервера и активный режим связи.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    }
                 }
-            } header: {
-                Text("Сети через этот узел")
-            } footer: {
-                Text("Эти адреса пойдут через узел, а не дальше по цепочке и не в локальную сеть. Сети, которые присылает сервер OpenConnect или OpenVPN, добавляются сами. Адрес из своей локальной подсети указывайте отдельно (/32): всю подсеть забрать у локальной сети нельзя.")
+            }
+            if p.wrappedValue.proto != .transit {
+                Section {
+                    TextField("Сети", text: p.routes, prompt: Text("192.168.1.119, 10.0.0.0/8"))
+                    if let error = Result(catching: { try RouteList.parse(p.wrappedValue.routes) }).failureMessage {
+                        Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("Сети через этот узел")
+                } footer: {
+                    Text("Эти адреса пойдут через узел, а не дальше по цепочке и не в локальную сеть. Сети, которые присылает сервер OpenConnect или OpenVPN, добавляются сами. Адрес из своей локальной подсети указывайте отдельно (/32): всю подсеть забрать у локальной сети нельзя.")
+                }
+            }
+            Section("MTU и автоподстройка канала") {
+                TextField("Внешний MTU (пусто — авто)", text: $mtuText, prompt: Text("Авто (576–9000)"))
+                    .onAppear {
+                        mtuText = p.wrappedValue.argonPathMTU.map(String.init) ?? ""
+                        probeResult = nil
+                    }
+                    .onChange(of: profileID) {
+                        mtuText = p.wrappedValue.argonPathMTU.map(String.init) ?? ""
+                        probeResult = nil
+                        probingMTU = false
+                    }
+                    .onChange(of: mtuText) { _, newValue in
+                        let digits = newValue.filter(\.isNumber)
+                        if digits != newValue {
+                            mtuText = digits
+                        }
+                        if digits.isEmpty {
+                            p.wrappedValue.argonPathMTU = nil
+                        } else if let v = Int(digits), (576...9000).contains(v) {
+                            p.wrappedValue.argonPathMTU = v
+                        }
+                    }
+                HStack {
+                    Button {
+                        probingMTU = true
+                        probeResult = nil
+                        let targetID = profileID
+                        Task {
+                            let res = await model.probeMTU(for: targetID)
+                            await MainActor.run {
+                                probingMTU = false
+                                probeResult = res
+                                if res.ok, (576...9000).contains(res.optimalPathMTU) {
+                                    mtuText = String(res.optimalPathMTU)
+                                    if let idx = model.profiles.firstIndex(where: { $0.id == targetID }) {
+                                        model.profiles[idx].argonPathMTU = res.optimalPathMTU
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        if probingMTU {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("Подбор MTU…")
+                            }
+                        } else {
+                            Label("Подобрать MTU", systemImage: "speedometer")
+                        }
+                    }
+                    .disabled(probingMTU)
+                    if p.wrappedValue.argonPathMTU != nil || !mtuText.isEmpty {
+                        Button("Авто") {
+                            mtuText = ""
+                            probeResult = nil
+                            p.wrappedValue.argonPathMTU = nil
+                        }
+                        .disabled(probingMTU)
+                    }
+                }
+                if let res = probeResult {
+                    if res.ok {
+                        Label(res.message, systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else {
+                        Label(res.error ?? "Не удалось подобрать MTU", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Text("Пустое поле включает автоматический подбор оптимального MTU и динамическую подстройку транзитов при изменении канала.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("Проверка") {
                 switch Result(catching: { try Endpoint.of(p.wrappedValue) }) {

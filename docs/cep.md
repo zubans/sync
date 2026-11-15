@@ -2,7 +2,7 @@
 
 `CepActivity` (пакет `cep`) — отдельная иконка «CEP» (`taskAffinity` `com.example.contactsync.cep`). Это Android-версия CEP для macOS: цепочка из нескольких VPN-узлов, телефон → узел 1 → узел 2 → … → интернет. Сервер каждого следующего узла доступен только через туннель предыдущего, весь остальной трафик уходит в последний узел. Root не нужен.
 
-Протоколы: VLESS (Reality, Vision, gRPC, WebSocket, HTTPUpgrade), Hysteria 2, Hysteria v1, OpenConnect (AnyConnect/ocserv, GlobalProtect, Pulse, Juniper, Fortinet), OpenVPN.
+Протоколы: Argon4, Транзитный шлюз (`transit`, в том числе слепой passthrough без пароля и аутентифицированный L4 TCP/UDP транзит), надстройка `useArgon` (`mode="auto"` поверх порта 51820 узла или предшествующего `transit`), VLESS (Reality, Vision, gRPC, WebSocket, HTTPUpgrade), Hysteria 2, Hysteria v1, OpenConnect (AnyConnect/ocserv, GlobalProtect, Pulse, Juniper, Fortinet), OpenVPN.
 
 ## Как пользоваться
 
@@ -14,7 +14,7 @@
 
 ## Устройство
 
-- **Движок** — `android/cep-engine` (Go, пакет `cepcore`): вся цепочка — один экземпляр sing-box 1.14 внутри `CepVpnService`. Узел N выходит в сеть через узел N-1 (`detour`), трафик VPN уходит в последний узел (`route.final`), «Сети через этот узел» — правило `ip_cidr` на свой узел. OpenConnect и OpenVPN — userspace-endpoint'ы sing-box, без системных интерфейсов. Сокеты движка выводятся из VPN через `VpnService.protect`. Решение — ADR-017 в KB.
+- **Движок** — `android/cep-engine` (Go, пакет `cepcore`): вся цепочка — один экземпляр sing-box 1.14 внутри `CepVpnService`. Узел N выходит в сеть через узел N-1 (`detour`), трафик VPN уходит в последний узел (`route.final`), «Сети через этот узел» — правило `ip_cidr` на свой узел. OpenConnect, OpenVPN и Argon4 (`tunnel`, L4 `transit` TCP/UDP и `auto`) — userspace-endpoint'ы sing-box, без системных интерфейсов. Сокеты движка выводятся из VPN через `VpnService.protect`. Решение — ADR-017 в KB.
 - **Адреса серверов** движок разрешает системным DNS до подъёма VPN и подключается по IP; SNI и проверка сертификата — по имени.
 - **OpenConnect за прокси-узлом.** OpenConnect ставит таймауты на соединение, а соединения VLESS поверх gRPC их не поддерживают. Между ними стоит обёртка `cep-deadline` (`deadline.go`): она отдаёт соединение как есть и эмулирует таймаут. DTLS (UDP) за прокси-узлом выключен, туннель идёт по TLS.
 - **IPv6** при «Блокировать IPv6» Android блокирует сам: у VPN нет адресов и маршрутов IPv6.

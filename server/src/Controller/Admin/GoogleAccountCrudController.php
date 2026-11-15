@@ -3,6 +3,8 @@
 namespace App\Controller\Admin;
 
 use App\Entity\GoogleAccount;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Action;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Actions;
 use EasyCorp\Bundle\EasyAdminBundle\Config\Crud;
@@ -17,6 +19,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\EmailField;
  *
  * @extends AbstractCrudController<GoogleAccount>
  */
+#[RequiresFeature(FeatureManager::DEVICE_DATA)]
 final class GoogleAccountCrudController extends AbstractCrudController
 {
     public static function getEntityFqcn(): string

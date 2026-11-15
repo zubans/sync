@@ -15,17 +15,33 @@ import (
 
 // ServerConfig описывает конфигурацию серверного демона Argon4 на Ubuntu.
 type ServerConfig struct {
-	ListenInterface string
-	ListenAddr      string
-	TunName         string
-	SubnetCIDR      string
-	OutInterface    string
-	EnableNAT       bool
-	MasterPassword  string
-	ArgonParams     ArgonParams
-	MTU             int
-	DNS             []string
-	Routes          []string
+	ListenInterface    string
+	ListenAddr         string
+	TunName            string
+	SubnetCIDR         string
+	OutInterface       string
+	EnableNAT          bool
+	MasterPassword     string
+	ArgonParams        ArgonParams
+	MTU                int
+	DNS                []string
+	Routes             []string
+	Mode               string
+	TransitTarget      string
+	TransitAllow       []string
+	TransitBlind       bool
+	ProtocolVersion      byte
+	DisallowV4           bool
+	Padding              PaddingConfig
+	BehaviorProfile      string
+	DisallowVideoCall    bool
+	VideoCallMaxDuration time.Duration
+	SessionIdleTimeout   time.Duration
+	HandshakeCacheTTL    time.Duration
+	BlindUDPIdleTimeout  time.Duration
+	Now                  func() time.Time
+	WriteUDP             func(wire []byte, dst *net.UDPAddr) error
+	LookupIP             func(host string) ([]net.IP, error)
 }
 
 type handshakeResponseCacheEntry struct {
@@ -35,24 +51,74 @@ type handshakeResponseCacheEntry struct {
 	expires    time.Time
 }
 
-// Server реализует шифрованный шлюз-надстройку Argon4 между UDP-интерфейсом и виртуальным TUN-интерфейсом Ubuntu.
+// Server реализует шифрованный шлюз Argon4 (режим tunnel поверх TUN и режим L4 transit поверх UDP/TCP).
 type Server struct {
-	cfg            ServerConfig
-	sessions       *SessionManager
-	udpConn        *net.UDPConn
-	tun            io.ReadWriteCloser
-	lastErrLog     atomic.Int64
-	handshakeMu    sync.Mutex
-	handshakeCache map[[SaltSize]byte]handshakeResponseCacheEntry
+	cfg               ServerConfig
+	protocolVersion   byte
+	padding           PaddingConfig
+	maxOuterUDP       int
+	handshakeCacheTTL time.Duration
+	blindIdleTimeout  time.Duration
+	nowFunc           func() time.Time
+	lookupIP          func(host string) ([]net.IP, error)
+	sessions          *SessionManager
+	udpConn           *net.UDPConn
+	tcpListener       *net.TCPListener
+	tun               io.ReadWriteCloser
+	lastErrLog        atomic.Int64
+	handshakeMu       sync.Mutex
+	handshakeCache    map[[SaltSize]byte]handshakeResponseCacheEntry
+	blindMu           sync.Mutex
+	blindUDP          map[string]*blindUDPPeer
 }
 
 func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
-	if cfg.MasterPassword == "" {
+	if cfg.Mode == "" {
+		cfg.Mode = ModeTunnel
+	}
+	if cfg.Mode != ModeTunnel && cfg.Mode != ModeTransit {
+		return nil, fmt.Errorf("неизвестный режим сервера %q (ожидается %q или %q)", cfg.Mode, ModeTunnel, ModeTransit)
+	}
+	effVersion := cfg.ProtocolVersion
+	if effVersion == 0 {
+		effVersion = ProtocolVersionV5
+	}
+	if effVersion != ProtocolVersionV4 && effVersion != ProtocolVersionV5 {
+		return nil, fmt.Errorf("%w: 0x%02x", ErrBadVersion, effVersion)
+	}
+	if effVersion == ProtocolVersionV4 && cfg.DisallowV4 {
+		return nil, fmt.Errorf("несовместимая конфигурация: выбрана версия v4 при запрете v4")
+	}
+
+	resolvedPadding, err := NormalizePaddingConfig(cfg.Padding, !cfg.TransitBlind)
+	if err != nil {
+		return nil, err
+	}
+	allowVC := !cfg.DisallowVideoCall
+	if _, _, err := ValidateProfileRequest(effVersion, cfg.Mode, "", ProfileConfig{
+		Name:           cfg.BehaviorProfile,
+		AllowVideoCall: &allowVC,
+		MaxDuration:    cfg.VideoCallMaxDuration,
+	}); err != nil {
+		return nil, err
+	}
+	maxOuterUDP := MaxOuterBytesForPathMTU(resolvedPadding.PathMTU)
+
+	if cfg.TransitBlind {
+		if cfg.Mode != ModeTransit {
+			return nil, fmt.Errorf("режим -transit-blind поддерживается только при -mode %s", ModeTransit)
+		}
+		if cfg.TransitTarget == "" {
+			return nil, fmt.Errorf("для -transit-blind требуется указать -transit-target")
+		}
+	} else if cfg.MasterPassword == "" {
 		return nil, fmt.Errorf("не задан мастер-пароль")
 	}
+
 	if cfg.MTU <= 0 {
 		cfg.MTU = 1380
 	}
+	cfg.MTU = EffectiveTunMTU(cfg.MTU, resolvedPadding.PathMTU, effVersion)
 	if cfg.SubnetCIDR == "" {
 		cfg.SubnetCIDR = "10.44.0.1/24"
 	}
@@ -60,16 +126,52 @@ func NewServer(cfg ServerConfig, tunDev io.ReadWriteCloser) (*Server, error) {
 		cfg.Routes = []string{"0.0.0.0/0"}
 	}
 
-	sm, err := NewSessionManager(cfg.MasterPassword, cfg.ArgonParams, cfg.SubnetCIDR, cfg.MTU, cfg.DNS, cfg.Routes)
-	if err != nil {
-		return nil, err
+	if cfg.SessionIdleTimeout < 0 || cfg.HandshakeCacheTTL < 0 || cfg.BlindUDPIdleTimeout < 0 {
+		return nil, fmt.Errorf("%w: отрицательные таймауты сервера недопустимы", ErrInvalidTimingConfig)
+	}
+	idleTimeout := cfg.SessionIdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = SessionIdleTimeout
+	}
+	cacheTTL := cfg.HandshakeCacheTTL
+	if cacheTTL == 0 {
+		cacheTTL = HandshakeReplayTTL
+	}
+	blindTimeout := cfg.BlindUDPIdleTimeout
+	if blindTimeout == 0 {
+		blindTimeout = BlindUDPIdleTimeout
+	}
+	nowFn := cfg.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	lookupFn := cfg.LookupIP
+	if lookupFn == nil {
+		lookupFn = net.LookupIP
+	}
+
+	var sm *SessionManager
+	if cfg.MasterPassword != "" {
+		var err error
+		sm, err = NewSessionManagerWithTiming(cfg.MasterPassword, cfg.ArgonParams, cfg.SubnetCIDR, cfg.MTU, cfg.DNS, cfg.Routes, idleTimeout, cacheTTL, nowFn)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &Server{
-		cfg:            cfg,
-		sessions:       sm,
-		tun:            tunDev,
-		handshakeCache: make(map[[SaltSize]byte]handshakeResponseCacheEntry),
+		cfg:               cfg,
+		protocolVersion:   effVersion,
+		padding:           resolvedPadding,
+		maxOuterUDP:       maxOuterUDP,
+		handshakeCacheTTL: cacheTTL,
+		blindIdleTimeout:  blindTimeout,
+		nowFunc:           nowFn,
+		lookupIP:          lookupFn,
+		sessions:          sm,
+		tun:               tunDev,
+		handshakeCache:    make(map[[SaltSize]byte]handshakeResponseCacheEntry),
+		blindUDP:          make(map[string]*blindUDPPeer),
 	}, nil
 }
 
@@ -128,15 +230,29 @@ func (s *Server) LocalAddr() net.Addr {
 	return s.udpConn.LocalAddr()
 }
 
-// Run запускает двунаправленную пересылку пакетов между UDP-сокетом и виртуальным TUN-интерфейсом.
+// Start запускает сетевые слушатели сервера согласно настроенному режиму (tunnel или transit).
+func (s *Server) Start() error {
+	if s.cfg.Mode == ModeTransit {
+		return s.StartTransit()
+	}
+	return s.StartUDP()
+}
+
+// Run запускает циклы обработки пакетов согласно режиму сервера.
 func (s *Server) Run() error {
 	errCh := make(chan error, 2)
 	go func() {
 		errCh <- s.udpToTunLoop()
 	}()
-	go func() {
-		errCh <- s.tunToUdpLoop()
-	}()
+	if s.cfg.Mode == ModeTransit {
+		go func() {
+			errCh <- s.tcpAcceptLoop()
+		}()
+	} else {
+		go func() {
+			errCh <- s.tunToUdpLoop()
+		}()
+	}
 	return <-errCh
 }
 
@@ -144,9 +260,14 @@ func (s *Server) Close() error {
 	if s.udpConn != nil {
 		_ = s.udpConn.Close()
 	}
+	if s.tcpListener != nil {
+		_ = s.tcpListener.Close()
+	}
 	if s.tun != nil {
 		_ = s.tun.Close()
 	}
+	s.sessions.CloseAll()
+	s.closeAllBlindUDP()
 	return nil
 }
 
@@ -170,18 +291,44 @@ func (s *Server) udpToTunLoop() error {
 	}
 }
 
-// HandlePacket обрабатывает один входящий зашифрованный кадр от remoteAddr и при необходимости возвращает зашифрованный ответ.
+func (s *Server) isHandshakeVersionAllowed(version byte) bool {
+	if version == s.protocolVersion {
+		return true
+	}
+	if s.protocolVersion == ProtocolVersionV5 && version == ProtocolVersionV4 && !s.cfg.DisallowV4 {
+		return true
+	}
+	return false
+}
+
+// HandlePacket обрабатывает один входящий кадр от remoteAddr и при необходимости возвращает зашифрованный ответ.
 func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
+	if s.cfg.Mode == ModeTransit && s.cfg.TransitBlind {
+		s.handleBlindUDP(pkt, remoteAddr)
+		return nil
+	}
+	if s.sessions == nil {
+		return nil
+	}
+	if s.maxOuterUDP > 0 && len(pkt) > s.maxOuterUDP {
+		s.logDrop(remoteAddr, "mtu", ErrMTUExceeded)
+		return nil
+	}
+
 	psk := s.sessions.PSK()
-	_, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(pkt, psk)
+	version, frameType, salt, _, seq, _, err := ParseAndVerifyHeader(pkt, psk)
 	if err != nil {
 		s.logDrop(remoteAddr, "header", err)
 		return nil
 	}
 
 	if frameType == FrameTypeHandshakeReq {
-		log.Printf("[argon4-server] получен handshake от %s", remoteAddr)
-		return s.handleHandshake(pkt, psk, salt, remoteAddr)
+		if !s.isHandshakeVersionAllowed(version) {
+			s.logDrop(remoteAddr, "handshake version", ErrBadVersion)
+			return nil
+		}
+		log.Printf("[argon4-server] получен handshake (v%d) от %s", version, remoteAddr)
+		return s.handleHandshake(pkt, psk, salt, version, remoteAddr)
 	}
 
 	sess := s.sessions.LookupBySalt(salt)
@@ -190,11 +337,18 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 		s.logDrop(remoteAddr, "no session", fmt.Errorf("frame type %d", frameType))
 		return nil
 	}
+	if version != sess.ProtocolVersion {
+		s.logDrop(remoteAddr, "downgrade", ErrDowngradeRejected)
+		return nil
+	}
 	if !sess.CheckReplay(seq) {
 		s.logDrop(remoteAddr, "replay pre-check", ErrReplayPacket)
 		return nil
 	}
-	_, _, _, plaintext, err := OpenPacketWithKey(pkt, psk, sess.C2SKey)
+	opened, err := OpenPacketWithOptions(pkt, psk, sess.C2SKey, OpenOptions{
+		ExpectedVersion: sess.ProtocolVersion,
+		MaxOuterBytes:   s.maxOuterUDP,
+	})
 	if err != nil {
 		s.logDrop(remoteAddr, "c2s auth", err)
 		return nil
@@ -203,32 +357,115 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 		s.logDrop(remoteAddr, "replay commit", ErrReplayPacket)
 		return nil
 	}
+	plaintext := opened.Plaintext
 
 	// Обновляем адрес клиента только после успешной проверки GCM-тега и защиты от повтора (невозможно угнать сессию повтором пакета).
 	s.sessions.TouchSession(sess, remoteAddr)
 
 	switch frameType {
 	case FrameTypeKeepalive:
-		wirePong, err := SealPacketWithSeq(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte("pong"))
+		if string(plaintext) == KeepaliveFeedbackPayload {
+			return nil
+		}
+		if kind, val, ok := ParseKeepalivePMTUCommand(plaintext); ok {
+			switch kind {
+			case "probe":
+				return s.buildPMTUProbeAck(sess, psk, val)
+			case "limit":
+				sess.SetRuntimeMaxOuter(val)
+				return nil
+			}
+		}
+		wirePong, err := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte(KeepalivePongPayload), sess.sealOptions(s.maxOuterUDP))
 		if err == nil {
 			return wirePong
 		}
 
 	case FrameTypeData:
-		srcIP, _, ok := ParseIPv4Addrs(plaintext)
-		if !ok {
+		if sess.Shaper != nil {
+			sess.Shaper.RecordInboundActivity()
+		}
+		s.deliverInboundPacket(sess, plaintext, remoteAddr)
+
+	case FrameTypeBatch:
+		if !sess.Profile.IsActive() {
+			s.logDrop(remoteAddr, "batch unexpected", ErrProfileUnsupported)
 			return nil
 		}
-		// Запрещаем подмену внутреннего адреса отправителя (IP spoofing между клиентами туннеля).
-		if !srcIP.Equal(sess.AssignedIP) {
-			s.logDrop(remoteAddr, "inner src IP mismatch", fmt.Errorf("got %s want %s", srcIP, sess.AssignedIP))
+		maxInner := MaxPayloadForSession(sess, s.maxOuterUDP)
+		subPackets, berr := UnpackBatchPlaintext(plaintext, maxInner)
+		if berr != nil {
+			s.logDrop(remoteAddr, "batch unpack", berr)
 			return nil
 		}
-		if s.tun != nil && len(plaintext) > 0 {
-			_, _ = s.tun.Write(plaintext)
+		if sess.Shaper != nil {
+			sess.Shaper.RecordInboundActivity()
+		}
+		for _, sub := range subPackets {
+			s.deliverInboundPacket(sess, sub, remoteAddr)
 		}
 	}
 	return nil
+}
+
+func (s *Server) deliverInboundPacket(sess *PeerSession, plaintext []byte, remoteAddr *net.UDPAddr) {
+	if sess.Mode == ModeTransit {
+		if sess.TargetConn != nil && len(plaintext) > 0 {
+			if _, err := sess.TargetConn.Write(plaintext); err != nil && isMsgSizeError(err) {
+				kMTU, _ := queryKernelConnMTU(sess.TargetConn)
+				innerCap := len(plaintext) - pmtuFallbackStep
+				if kMTU >= MinPathMTU && (kMTU-IPv4UDPOverhead) < innerCap {
+					innerCap = kMTU - IPv4UDPOverhead
+				}
+				overhead := OverheadV5
+				if sess.ProtocolVersion == ProtocolVersionV4 {
+					overhead = OverheadV4
+				}
+				if newMax := sess.SetRuntimeMaxOuter(innerCap + overhead); newMax > 0 {
+					s.sendPMTULimit(sess, newMax)
+				}
+			}
+		}
+		return
+	}
+	srcIP, _, ok := ParseIPv4Addrs(plaintext)
+	if !ok {
+		return
+	}
+	// Запрещаем подмену внутреннего адреса отправителя (IP spoofing между клиентами туннеля).
+	if !srcIP.Equal(sess.AssignedIP) {
+		s.logDrop(remoteAddr, "inner src IP mismatch", fmt.Errorf("got %s want %s", srcIP, sess.AssignedIP))
+		return
+	}
+	if s.tun != nil && len(plaintext) > 0 {
+		_, _ = s.tun.Write(plaintext)
+	}
+}
+
+// MaxPayloadForSession возвращает максимально допустимую длину полезной нагрузки внутри кадра сессии.
+func MaxPayloadForSession(sess *PeerSession, defaultMaxOuter int) int {
+	maxOuter := sess.MaxOuterBytes
+	if maxOuter <= 0 {
+		maxOuter = defaultMaxOuter
+	}
+	if maxOuter <= 0 {
+		return 0
+	}
+	overhead := OverheadV4
+	if sess.ProtocolVersion == ProtocolVersionV5 {
+		overhead = OverheadV5
+	}
+	if maxOuter <= overhead {
+		return 0
+	}
+	return maxOuter - overhead
+}
+
+func (s *Server) now() time.Time {
+	if s != nil && s.nowFunc != nil {
+		return s.nowFunc()
+	}
+	return time.Now()
 }
 
 // cachedHandshakeResponse делает повторную UDP-передачу идемпотентной: тот же запрос
@@ -237,13 +474,14 @@ func (s *Server) cachedHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAd
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
+	now := s.now()
 	s.handshakeMu.Lock()
 	defer s.handshakeMu.Unlock()
 	entry, ok := s.handshakeCache[saltKey]
 	if !ok {
 		return nil
 	}
-	if !time.Now().Before(entry.expires) {
+	if !now.Before(entry.expires) {
 		delete(s.handshakeCache, saltKey)
 		return nil
 	}
@@ -257,7 +495,11 @@ func (s *Server) cacheHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAdd
 	var saltKey [SaltSize]byte
 	copy(saltKey[:], salt)
 
-	now := time.Now()
+	now := s.now()
+	ttl := s.handshakeCacheTTL
+	if ttl <= 0 {
+		ttl = HandshakeReplayTTL
+	}
 	s.handshakeMu.Lock()
 	for key, entry := range s.handshakeCache {
 		if !now.Before(entry.expires) {
@@ -268,54 +510,80 @@ func (s *Server) cacheHandshakeResponse(pkt, salt []byte, remoteAddr *net.UDPAdd
 		remoteAddr: remoteAddr.String(),
 		request:    append([]byte(nil), pkt...),
 		response:   append([]byte(nil), response...),
-		expires:    now.Add(HandshakeReplayTTL),
+		expires:    now.Add(ttl),
 	}
 	s.handshakeMu.Unlock()
 }
 
-func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr) []byte {
-	if cached := s.cachedHandshakeResponse(pkt, salt, remoteAddr); cached != nil {
-		return cached
-	}
-
+func (s *Server) authenticateHandshake(pkt, psk, salt []byte, headerVersion byte, maxOuter int, remoteAddr *net.UDPAddr) (
+	hsKey []byte,
+	req HandshakeRequest,
+	clientAuth []byte,
+	srvPub []byte,
+	c2sKey []byte,
+	s2cKey []byte,
+	sessionPad PaddingConfig,
+	now time.Time,
+	ok bool,
+) {
 	hsKey, err := s.sessions.DeriveHandshakeKey(salt)
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake derive", err)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
-	_, _, _, plaintext, err := OpenPacketWithKey(pkt, psk, hsKey)
+	opened, err := OpenPacketWithOptions(pkt, psk, hsKey, OpenOptions{
+		ExpectedVersion: headerVersion,
+		AllowV4:         true,
+		MaxOuterBytes:   maxOuter,
+	})
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake open", err)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
-	var req HandshakeRequest
-	if err := json.Unmarshal(plaintext, &req); err != nil {
+	if err := json.Unmarshal(opened.Plaintext, &req); err != nil {
 		s.logDrop(remoteAddr, "handshake json", err)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
+	}
+	if headerVersion == ProtocolVersionV5 {
+		if req.ProtocolVersion != 0 && req.ProtocolVersion != int(ProtocolVersionV5) {
+			s.logDrop(remoteAddr, "handshake inner version mismatch", ErrDowngradeRejected)
+			return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
+		}
+		sessionPad = s.padding
+		if req.PaddingProfile != "" && req.PaddingProfile != PaddingProfileCustom {
+			preset, perr := PresetPaddingConfig(req.PaddingProfile, s.padding.PathMTU)
+			if perr != nil {
+				s.logDrop(remoteAddr, "handshake padding profile", perr)
+				return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
+			}
+			sessionPad = preset
+		}
+	} else if req.ProtocolVersion == int(ProtocolVersionV5) {
+		s.logDrop(remoteAddr, "handshake downgraded", ErrDowngradeRejected)
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
-	now := time.Now()
+	now = s.now()
 	reqTime := time.Unix(req.Timestamp, 0)
 	if now.Sub(reqTime).Abs() > HandshakeClockSkew {
 		s.logDrop(remoteAddr, "handshake timestamp", ErrClockSkew)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
 	clientPub, err := hex.DecodeString(req.ClientPub)
 	if err != nil || len(clientPub) != X25519KeySize {
 		s.logDrop(remoteAddr, "handshake clientPub", fmt.Errorf("некорректный ключ X25519"))
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
-	var clientAuth []byte
 	if req.ClientAuth != "" {
 		clientAuth, _ = hex.DecodeString(req.ClientAuth)
 	}
 
 	srvPriv, srvPub, err := GenerateX25519Keypair()
 	if err != nil {
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 	sharedSecret, err := ComputeX25519Shared(srvPriv, clientPub)
 	for i := range srvPriv {
@@ -323,38 +591,150 @@ func (s *Server) handleHandshake(pkt, psk, salt []byte, remoteAddr *net.UDPAddr)
 	}
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake ecdh", err)
-		return nil
+		return nil, HandshakeRequest{}, nil, nil, nil, nil, PaddingConfig{}, time.Time{}, false
 	}
 
-	c2sKey, s2cKey := DeriveSessionKeys(hsKey, sharedSecret, salt)
+	c2sKey, s2cKey = DeriveSessionKeys(hsKey, sharedSecret, salt)
 	for i := range sharedSecret {
 		sharedSecret[i] = 0
 	}
+	return hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, sessionPad, now, true
+}
 
-	peer, err := s.sessions.RegisterSession(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr)
+func applyProtocolResponseFields(resp *HandshakeResponse, version byte, pad PaddingConfig, prof SessionProfile) {
+	resp.ProtocolVersion = int(version)
+	if version == ProtocolVersionV5 {
+		resp.Capabilities = CapabilitiesForVersion(version, true)
+		resp.PaddingProfile = pad.Profile
+		if prof.IsActive() {
+			resp.BehaviorProfile = prof.Name
+			resp.ProfileVersion = prof.Version
+		}
+	}
+}
+
+func (s *Server) negotiateSessionProfile(headerVersion byte, proto string, req HandshakeRequest, sessionPad PaddingConfig) (SessionProfile, error) {
+	policy := ServerProfilePolicy{
+		DefaultProfile: s.cfg.BehaviorProfile,
+		AllowVideoCall: !s.cfg.DisallowVideoCall,
+		MaxDuration:    s.cfg.VideoCallMaxDuration,
+		PathMTU:        sessionPad.PathMTU,
+		DefaultPadding: sessionPad,
+		DefaultTiming:  DefaultTimingConfig(),
+	}
+	prof, err := NegotiateServerProfile(headerVersion, s.cfg.Mode, proto, req, policy, nil)
+	if err != nil {
+		return SessionProfile{}, err
+	}
+	if prof.Name == "" && headerVersion == ProtocolVersionV5 && s.cfg.BehaviorProfile != "" && req.BehaviorProfile == "" && req.ProfileVersion == 0 {
+		// Клиент не запрашивал профиль; явная политика — профиль включается только при явном согласовании.
+		return SessionProfile{}, nil
+	}
+	return prof, nil
+}
+
+func (s *Server) sendWire(wire []byte, addr *net.UDPAddr) error {
+	if addr == nil {
+		return net.ErrClosed
+	}
+	if s.cfg.WriteUDP != nil {
+		return s.cfg.WriteUDP(wire, addr)
+	}
+	if s.udpConn == nil {
+		return net.ErrClosed
+	}
+	_, err := s.udpConn.WriteToUDP(wire, addr)
+	return err
+}
+
+func (s *Server) attachSessionShaper(sess *PeerSession) {
+	if s == nil || sess == nil || !sess.Profile.IsActive() || (s.udpConn == nil && s.cfg.WriteUDP == nil) || s.sessions == nil {
+		return
+	}
+	psk := s.sessions.PSK()
+	maxOuter := sess.EffectiveMaxOuter(s.maxOuterUDP)
+	shaper := NewTrafficShaper(ShaperOptions{
+		Profile:          sess.Profile,
+		Salt:             sess.Salt[:],
+		PSK:              psk,
+		Key:              sess.S2CKey,
+		Version:          sess.ProtocolVersion,
+		MaxOuterBytes:    maxOuter,
+		NextSeq:          sess.NextS2CSeq,
+		IsServer:         true,
+		KeepaliveEnabled: false,
+		WriteWire: func(wire []byte) error {
+			return s.sendWire(wire, sess.RemoteAddr())
+		},
+		OnMsgSize: func(wireLen int, _ error) int {
+			newMax := sess.DownshiftMaxOuter(wireLen, 0)
+			if newMax > 0 {
+				s.sendPMTULimit(sess, newMax)
+			}
+			return newMax
+		},
+	})
+	sess.Shaper = shaper
+	shaper.Start()
+}
+
+func (s *Server) handleHandshake(pkt, psk, salt []byte, headerVersion byte, remoteAddr *net.UDPAddr) []byte {
+	if cached := s.cachedHandshakeResponse(pkt, salt, remoteAddr); cached != nil {
+		return cached
+	}
+
+	hsKey, req, clientAuth, srvPub, c2sKey, s2cKey, sessionPad, now, ok := s.authenticateHandshake(pkt, psk, salt, headerVersion, s.maxOuterUDP, remoteAddr)
+	if !ok {
+		return nil
+	}
+
+	if s.cfg.Mode == ModeTransit {
+		return s.handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPub, c2sKey, s2cKey, headerVersion, sessionPad, req, now, remoteAddr)
+	}
+	if req.Mode != "" && req.Mode != ModeTunnel && req.Mode != ModeAuto {
+		s.logDrop(remoteAddr, "tunnel mode mismatch", ErrTransitDenied)
+		return nil
+	}
+	sessionProfile, perr := s.negotiateSessionProfile(headerVersion, ProtoUDP, req, sessionPad)
+	if perr != nil {
+		s.logDrop(remoteAddr, "behavior profile", perr)
+		return nil
+	}
+
+	peer, err := s.sessions.RegisterSessionWithProfile(req.ClientID, clientAuth, salt, c2sKey, s2cKey, remoteAddr, headerVersion, sessionPad, sessionProfile, s.maxOuterUDP)
 	if err != nil {
 		s.logDrop(remoteAddr, "handshake register", err)
 		return nil
 	}
+	s.attachSessionShaper(peer)
 
+	respMTU := EffectiveProfileTunMTU(s.cfg.MTU, sessionPad.PathMTU, headerVersion, sessionProfile)
 	resp := HandshakeResponse{
-		AssignedIP: peer.AssignedIP.String(),
-		ServerIP:   s.sessions.ServerIP().String(),
-		SubnetCidr: s.sessions.SubnetPrefixLen(),
-		MTU:        s.cfg.MTU,
-		DNS:        s.cfg.DNS,
-		Routes:     s.cfg.Routes,
-		ServerTime: now.Unix(),
-		ServerPub:  hex.EncodeToString(srvPub),
+		AssignedIP:       peer.AssignedIP.String(),
+		ServerIP:         s.sessions.ServerIP().String(),
+		SubnetCidr:       s.sessions.SubnetPrefixLen(),
+		MTU:              respMTU,
+		EffectivePathMTU: PathMTUFromMaxOuter(peer.EffectiveMaxOuter(s.maxOuterUDP)),
+		DNS:              s.cfg.DNS,
+		Routes:           s.cfg.Routes,
+		ServerTime:       now.Unix(),
+		ServerPub:        hex.EncodeToString(srvPub),
+		Mode:             ModeTunnel,
 	}
+	applyProtocolResponseFields(&resp, headerVersion, sessionPad, sessionProfile)
 	respBytes, _ := json.Marshal(resp)
-	wireResp, err := SealPacketWithSeq(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes)
+	wireResp, err := SealPacketWithOptions(FrameTypeHandshakeResp, salt, psk, hsKey, 1, respBytes, SealOptions{
+		Version:       headerVersion,
+		Padding:       sessionPad,
+		SamplePad:     sessionProfile.SamplePaddingLen,
+		MaxOuterBytes: s.maxOuterUDP,
+	})
 	if err != nil {
 		return nil
 	}
 	s.cacheHandshakeResponse(pkt, salt, remoteAddr, wireResp)
-	log.Printf("[argon4-server] рукопожатие ОК: клиент=%q адрес=%s выдан=%s приложения=%v",
-		req.ClientID, remoteAddr, peer.AssignedIP, req.Apps)
+	log.Printf("[argon4-server] рукопожатие ОК: клиент=%q v%d профиль=%q (%s) адрес=%s выдан=%s приложения=%v",
+		req.ClientID, headerVersion, sessionProfile.Name, sessionProfile.Archetype, remoteAddr, peer.AssignedIP, req.Apps)
 	return wireResp
 }
 
@@ -368,16 +748,104 @@ func (s *Server) SealTunPacket(ipPkt []byte) ([]byte, *net.UDPAddr) {
 	if sess == nil {
 		return nil, nil
 	}
-	wirePkt, err := SealPacketWithSeq(FrameTypeData, sess.Salt[:], s.sessions.PSK(), sess.S2CKey, sess.NextS2CSeq(), ipPkt)
+	wirePkt, err := SealPacketWithOptions(FrameTypeData, sess.Salt[:], s.sessions.PSK(), sess.S2CKey, sess.NextS2CSeq(), ipPkt, sess.sealOptions(s.maxOuterUDP))
 	if err != nil {
 		return nil, nil
 	}
 	return wirePkt, sess.RemoteAddr()
 }
 
+func (s *Server) buildPMTUProbeAck(sess *PeerSession, psk []byte, requestedOuter int) []byte {
+	limit := sess.EffectiveMaxOuter(s.maxOuterUDP)
+	targetOuter := requestedOuter
+	if limit > 0 && targetOuter > limit {
+		targetOuter = limit
+	}
+	opts := sess.sealOptions(limit)
+	ackPayload := []byte(fmt.Sprintf("%s%d", KeepalivePMTUAckPrefix, targetOuter))
+	if sess.ProtocolVersion == ProtocolVersionV5 {
+		minOuter := OverheadV5 + len(ackPayload)
+		if targetOuter < minOuter {
+			targetOuter = minOuter
+			ackPayload = []byte(fmt.Sprintf("%s%d", KeepalivePMTUAckPrefix, targetOuter))
+		}
+		if padLen, err := ExactPadLenForOuter(len(ackPayload), targetOuter, ProtocolVersionV5); err == nil {
+			opts.UseFixedPad = true
+			opts.FixedPadding = padLen
+			opts.MaxOuterBytes = targetOuter
+		}
+	} else {
+		minOuter := OverheadV4 + len(ackPayload)
+		if targetOuter < minOuter {
+			targetOuter = minOuter
+			ackPayload = []byte(fmt.Sprintf("%s%d", KeepalivePMTUAckPrefix, targetOuter))
+		}
+		if padLen := targetOuter - OverheadV4 - len(ackPayload); padLen > 0 {
+			ackPayload = append(ackPayload, bytes.Repeat([]byte(" "), padLen)...)
+		}
+		opts.MaxOuterBytes = targetOuter
+	}
+	wireAck, err := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), ackPayload, opts)
+	if err != nil {
+		return nil
+	}
+	return wireAck
+}
+
+func (s *Server) sendPMTULimit(sess *PeerSession, newMaxOuter int) {
+	if s == nil || sess == nil || s.sessions == nil || newMaxOuter <= 0 {
+		return
+	}
+	addr := sess.RemoteAddr()
+	if addr == nil {
+		return
+	}
+	psk := s.sessions.PSK()
+	opts := sess.sealOptions(newMaxOuter)
+	opts.Padding.MinPad = 0
+	opts.Padding.SmallMinPad = 0
+	opts.UseFixedPad = sess.ProtocolVersion == ProtocolVersionV5
+	opts.FixedPadding = 0
+	payload := []byte(fmt.Sprintf("%s%d", KeepalivePMTULimitPrefix, newMaxOuter))
+	wire, err := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), payload, opts)
+	if err != nil {
+		return
+	}
+	_ = s.sendWire(wire, addr)
+}
+
 func (s *Server) handleUDPPacket(pkt []byte, remoteAddr *net.UDPAddr) {
 	if resp := s.HandlePacket(pkt, remoteAddr); resp != nil && s.udpConn != nil {
-		_, _ = s.udpConn.WriteToUDP(resp, remoteAddr)
+		if _, err := s.udpConn.WriteToUDP(resp, remoteAddr); err != nil && isMsgSizeError(err) && len(resp) >= SaltSize && s.sessions != nil {
+			if sess := s.sessions.LookupBySalt(resp[:SaltSize]); sess != nil {
+				if newMax := sess.DownshiftMaxOuter(len(resp), 0); newMax > 0 {
+					s.sendPMTULimit(sess, newMax)
+				}
+			}
+		}
+	}
+}
+
+// DispatchTunPacket ставит исходящий IPv4-пакет из TUN в шейпер активной сессии или шифрует его синхронно.
+func (s *Server) DispatchTunPacket(ipPkt []byte) {
+	_, dstIP, ok := ParseIPv4Addrs(ipPkt)
+	if !ok {
+		return
+	}
+	sess := s.sessions.LookupByDstIP(dstIP)
+	if sess == nil {
+		return
+	}
+	if sess.Shaper != nil {
+		_ = sess.Shaper.EnqueueReal(ipPkt)
+		return
+	}
+	if wirePkt, addr := s.SealTunPacket(ipPkt); wirePkt != nil && addr != nil {
+		if err := s.sendWire(wirePkt, addr); err != nil && isMsgSizeError(err) {
+			if newMax := sess.DownshiftMaxOuter(len(wirePkt), 0); newMax > 0 {
+				s.sendPMTULimit(sess, newMax)
+			}
+		}
 	}
 }
 
@@ -391,8 +859,6 @@ func (s *Server) tunToUdpLoop() error {
 		if err != nil {
 			return err
 		}
-		if wirePkt, addr := s.SealTunPacket(buf[:n]); wirePkt != nil && addr != nil && s.udpConn != nil {
-			_, _ = s.udpConn.WriteToUDP(wirePkt, addr)
-		}
+		s.DispatchTunPacket(buf[:n])
 	}
 }

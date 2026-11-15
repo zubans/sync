@@ -26,6 +26,7 @@ use Symfony\Component\Security\Http\Attribute\CurrentUser;
  * Синхронизация устройств — `GET …/events?since=` и `POST …/changes`; разовые правки — `/api/events/{id}`.
  */
 #[Route('/api')]
+#[\App\Security\RequiresFeature(\App\Service\FeatureManager::CALENDAR)]
 final class CalendarController extends AbstractController
 {
     /** Самый длинный период в `GET /api/events`. */

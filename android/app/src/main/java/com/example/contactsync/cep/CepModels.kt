@@ -1,5 +1,6 @@
 package com.example.contactsync.cep
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -12,6 +13,7 @@ enum class VpnProtocol(val raw: String, val title: String) {
     OPENVPN("openvpn", "OpenVPN"),
     OPENCONNECT("openconnect", "OpenConnect"),
     ARGON4("argon4", "Argon4"),
+    TRANSIT("transit", "Транзитный шлюз"),
     SSTP("sstp", "SSTP");
 
     /** Профиль задаётся ссылкой vless:// hysteria2:// hysteria://. */
@@ -64,6 +66,29 @@ data class CepProfile(
     val ignoreCertErrors: Boolean = false,
     /** Сети, которые идут через этот узел, а не дальше по цепочке: «192.168.1.119, 10.0.0.0/8». */
     val routes: String = "",
+    /** Подключаться к узлу внутри обфускации Argon4 (без отдельного поля сервера). */
+    val useArgon: Boolean = false,
+    val argonPassword: String = "",
+    val argonProtocolVersion: Int? = null,
+    val argonPaddingProfile: String? = null,
+    val argonFirstPacketProfile: String? = null,
+    val argonPathMTU: Int? = null,
+    /** Максимум попыток UDP-рукопожатия Argon4. */
+    val argonHandshakeMaxAttempts: Int? = null,
+    /** Начальный таймаут попытки handshake Argon4 (мс). */
+    val argonHandshakeInitialTimeoutMs: Int? = null,
+    /** Потолок таймаута одной попытки handshake Argon4 (мс). */
+    val argonHandshakeMaxTimeoutMs: Int? = null,
+    /** Минимальный простой перед отправкой keepalive Argon4 (с). */
+    val argonKeepaliveMinIdleSec: Int? = null,
+    /** Максимальный простой перед отправкой keepalive Argon4 (с). */
+    val argonKeepaliveMaxIdleSec: Int? = null,
+    /** Поведенческий профиль трафика Argon4 (null/"" — выкл., "baseline", "video-call"). */
+    val argonBehaviorProfile: String? = null,
+    /** Режим пониженного энергопотребления для профилей Argon4. */
+    val argonLowPowerMode: Boolean = false,
+    /** Лимит длительности профиля video-call в секундах. */
+    val argonVideoCallMaxDurationSec: Int? = null,
 ) {
     val protocol: VpnProtocol? get() = VpnProtocol.of(proto)
 }
@@ -98,3 +123,22 @@ data class CepPlan(
 
 /** UUID в верхнем регистре — так их пишет JSONEncoder на macOS. */
 fun newCepId(): String = UUID.randomUUID().toString().uppercase()
+
+/** Результат подбора оптимального внешнего MTU для узла цепочки (ответ Go-движка). */
+@Serializable
+data class MtuProbeResult(
+    val ok: Boolean = false,
+    val proto: String = "",
+    val server: String = "",
+    @SerialName("optimal_path_mtu") val optimalPathMtu: Int = 0,
+    @SerialName("inner_tun_mtu") val innerTunMtu: Int = 0,
+    @SerialName("effective_outer_udp") val effectiveOuterUdp: Int = 0,
+    @SerialName("interface_mtu") val interfaceMtu: Int = 0,
+    @SerialName("tcp_mss") val tcpMss: Int = 0,
+    @SerialName("rtt_ms") val rttMs: Long = 0,
+    val method: String = "",
+    val message: String = "",
+    @SerialName("preceding_budget") val precedingBudget: Int = 0,
+    @SerialName("supports_in_band") val supportsInBand: Boolean = false,
+    val error: String = "",
+)

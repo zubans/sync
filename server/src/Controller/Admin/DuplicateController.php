@@ -6,8 +6,10 @@ use App\Entity\Contact;
 use App\Entity\User;
 use App\Repository\ContactRepository;
 use App\Repository\UserRepository;
+use App\Security\RequiresFeature;
 use App\Service\ContactMerger;
 use App\Service\DuplicateFinder;
+use App\Service\FeatureManager;
 use EasyCorp\Bundle\EasyAdminBundle\Attribute\AdminRoute;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Request;
@@ -20,6 +22,7 @@ use Symfony\Component\Security\Http\Attribute\IsGranted;
  * можно откатить, восстановив их оттуда.
  */
 #[IsGranted(User::ROLE_ADMIN)]
+#[RequiresFeature(FeatureManager::CONTACTS)]
 #[AdminRoute('/duplicates', name: 'duplicates')]
 final class DuplicateController extends AbstractController
 {

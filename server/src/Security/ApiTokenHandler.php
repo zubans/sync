@@ -6,6 +6,7 @@ use App\Entity\ApiToken;
 use App\Repository\ApiTokenRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Security\Core\Exception\BadCredentialsException;
+use Symfony\Component\Security\Core\Exception\CustomUserMessageAuthenticationException;
 use Symfony\Component\Security\Http\AccessToken\AccessTokenHandlerInterface;
 use Symfony\Component\Security\Http\Authenticator\Passport\Badge\UserBadge;
 
@@ -33,6 +34,9 @@ final class ApiTokenHandler implements AccessTokenHandlerInterface
         }
 
         $user = $token->getUser();
+        if (!$user->isEnabled()) {
+            throw new CustomUserMessageAuthenticationException('Учётная запись отключена или доступ отозван.');
+        }
 
         return new UserBadge($user->getUserIdentifier(), static fn () => $user);
     }

@@ -4,6 +4,7 @@ namespace App\Command;
 
 use App\Entity\NewsDigest;
 use App\Service\NewsDigestPeriod;
+use App\Service\FeatureManager;
 use App\Service\NewsDigestService;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -39,8 +40,21 @@ final class NewsDigestCommand extends Command
             ->addOption('model', null, InputOption::VALUE_REQUIRED, 'Предпросмотр: модель agy вместо настроенной, например «Gemini 3.1 Pro (High)»');
     }
 
+    private ?FeatureManager $features = null;
+
+    #[\Symfony\Contracts\Service\Attribute\Required]
+    public function setFeatures(FeatureManager $features): void
+    {
+        $this->features = $features;
+    }
+
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        if ($this->features !== null && !$this->features->isEnabled(FeatureManager::AI_NEWS_DIGEST)) {
+            $output->writeln('<comment>ИИ сводок новостей отключён в админке — пропуск.</comment>');
+
+            return Command::SUCCESS;
+        }
         $io = new SymfonyStyle($input, $output);
         if ($input->getOption('preview')) {
             return $this->preview($io, (int) $input->getOption('hours'), $input->getOption('model'));

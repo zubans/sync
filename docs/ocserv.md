@@ -15,10 +15,10 @@ docs/ocserv.md   этот документ
 
 ## 1. Запуск
 
-Сервис `ocserv` добавлен в `compose.yaml`. Пользователи и настройки — в `.env` в корне проекта.
+Сервис `ocserv` входит в профиль `vpn` в `compose.yaml`. Пользователи и настройки — в `.env` в корне проекта.
 
 ```bash
-make ocserv-up
+make vpn-ocserv-up
 ```
 
 При первом старте entrypoint генерирует CA и серверный сертификат (сохраняются в томе `ocserv_data`,
@@ -28,8 +28,8 @@ make ocserv-up
 Проверить, что сервер слушает:
 
 ```bash
-make ocserv-status    # подключённые клиенты
-make ocserv-logs      # журнал
+make vpn-ocserv-status    # подключённые клиенты
+make vpn-ocserv-logs      # журнал
 ```
 
 ## 2. Пользователи
@@ -38,14 +38,14 @@ make ocserv-logs      # журнал
 
 ```bash
 echo 'OCSERV_USERS=alice:пароль1,bob:пароль2' >> .env
-make ocserv-up
+make vpn-ocserv-up
 ```
 
 Удобнее через make (правит `.env` и перезапускает сервис):
 
 ```bash
-make ocserv-add-user OCSERV_USER=alice OCSERV_PASS=пароль1
-make ocserv-rm-user  OCSERV_USER=alice
+make vpn-ocserv-add-user OCSERV_USER=alice OCSERV_PASS=пароль1
+make vpn-ocserv-rm-user  OCSERV_USER=alice
 ```
 
 Пароли хранятся в открытом виде в `.env` (как и другие секреты проекта; `.env` в `.gitignore`),
@@ -73,7 +73,7 @@ make ocserv-rm-user  OCSERV_USER=alice
 | `OCSERV_FORWARD_UDP` | `19132` | UDP-порты для проброса (через запятую) |
 | `OCSERV_FWD_TCP_PORT` / `OCSERV_FWD_UDP_PORT` | `25565` / `19132` | порты, публикуемые на хосте для проброса |
 
-После правки `.env`: `make ocserv-up` (пересоздаст контейнер с новыми настройками).
+После правки `.env`: `make vpn-ocserv-up` (пересоздаст контейнер с новыми настройками).
 
 ## 5. Проброс портов на клиента
 
@@ -84,16 +84,16 @@ Minecraft: TCP 25565 — Java, UDP 19132 — Bedrock). Трафик, прихо�
 1. Подключитесь клиентом и узнайте его VPN-IP:
 
    ```bash
-   make ocserv-ip OCSERV_USER=alice
+   make vpn-ocserv-ip OCSERV_USER=alice
    ```
 
-   (или `make ocserv-status` — там виден IP каждого клиента).
+   (или `make vpn-ocserv-status` — там виден IP каждого клиента).
 
 2. Укажите целевой IP и порты в `.env` и перезапустите:
 
    ```bash
    echo 'OCSERV_FORWARD_TARGET=10.45.0.2' >> .env
-   make ocserv-up
+   make vpn-ocserv-up
    ```
 
    Порты по умолчанию уже проброшены: TCP `25565` (`OCSERV_FORWARD_TCP`) и UDP `19132`
@@ -125,6 +125,6 @@ Minecraft: TCP 25565 — Java, UDP 19132 — Bedrock). Трафик, прихо�
   (`OCSERV_NO_ROUTES`). Если нужно маршрутизировать только Contact Sync — см. Argon4-туннель
   (`docs/argon-tunnel.md`).
 - Пользователи пересоздаются при каждом старте из `OCSERV_USERS`; правки `ocpasswd` внутри
-  контейнера не сохраняются — пользуйтесь `make ocserv-add-user` / `ocserv-rm-user`.
+  контейнера не сохраняются — пользуйтесь `make vpn-ocserv-add-user` / `make vpn-ocserv-rm-user` (или веб-админкой `/admin/vpn-user`).
 - Для продакшена замените самоподписанный сертификат на выпущенный для вашего домена
   (положите `server-cert.pem`, `server-key.pem`, `ca.pem` в том `ocserv_data`).

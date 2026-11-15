@@ -2,6 +2,7 @@
 
 namespace App\Command;
 
+use App\Service\FeatureManager;
 use App\Service\MarketAnalysisService;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
@@ -29,8 +30,21 @@ final class MarketAnalyzeCommand extends Command
         $this->addOption('limit', null, InputOption::VALUE_REQUIRED, 'Инструментов за проход', (string) MarketAnalysisService::PER_RUN);
     }
 
+    private ?FeatureManager $features = null;
+
+    #[\Symfony\Contracts\Service\Attribute\Required]
+    public function setFeatures(FeatureManager $features): void
+    {
+        $this->features = $features;
+    }
+
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
+        if ($this->features !== null && !$this->features->isEnabled(FeatureManager::AI_MARKET_ANALYSIS)) {
+            $output->writeln('<comment>ИИ анализа рынка акций отключён в админке — пропуск.</comment>');
+
+            return Command::SUCCESS;
+        }
         if (!$this->lock()) {
             $output->writeln('Анализ инструментов уже идёт');
 

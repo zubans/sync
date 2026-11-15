@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cep/argon4"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,11 +34,22 @@ type defaultRoute struct {
 	Interface string `json:"dev"`
 }
 
+type transitEndpoint struct {
+	ip   string
+	port int
+}
+
 type argonReady struct {
+	Mode      string   `json:"mode,omitempty"`
+	Listen    string   `json:"listen,omitempty"`
+	Port      int      `json:"port,omitempty"`
+	Target    string   `json:"target,omitempty"`
 	Interface string   `json:"interface"`
 	Address   string   `json:"address"`
 	ServerIP  string   `json:"server_ip"`
 	MTU       int      `json:"mtu"`
+	PathMTU   int      `json:"path_mtu,omitempty"`
+	InnerMTU  int      `json:"inner_mtu,omitempty"`
 	DNS       []string `json:"dns"`
 	Routes    []string `json:"routes"`
 }
@@ -86,6 +99,10 @@ func (e *Engine) preflight() error {
 		switch hop.Proto {
 		case "argon4":
 			tools = append(tools, "cep-argon4")
+		case "transit":
+			if strings.TrimSpace(hop.Password) != "" {
+				tools = append(tools, "cep-argon4")
+			}
 		case "vless":
 			tools = append(tools, "xray", "sing-box")
 		case "hysteria2", "hysteria":
@@ -105,6 +122,39 @@ func (e *Engine) preflight() error {
 	return nil
 }
 
+func nextNestedUDPBudget(configuredPathMTU, currentBudget int) int {
+	budget := configuredPathMTU
+	if budget <= 0 {
+		budget = argon4.DefaultPathMTU
+	}
+	if currentBudget > 0 && currentBudget < budget {
+		budget = currentBudget
+	}
+	budget -= 64
+	if budget < argon4.MinPathMTU {
+		return argon4.MinPathMTU
+	}
+	return budget
+}
+
+func withNestedUDPBudget(profile Profile, nestedUDPBudget int) Profile {
+	if nestedUDPBudget <= 0 {
+		return profile
+	}
+	effective := profile.ArgonPathMTU
+	if effective <= 0 {
+		effective = argon4.DefaultPathMTU
+	}
+	if effective > nestedUDPBudget {
+		effective = nestedUDPBudget
+	}
+	if effective < argon4.MinPathMTU {
+		effective = argon4.MinPathMTU
+	}
+	profile.ArgonPathMTU = effective
+	return profile
+}
+
 func (e *Engine) connect() error {
 	if err := validatePlan(e.plan); err != nil {
 		return err
@@ -119,7 +169,6 @@ func (e *Engine) connect() error {
 	e.log("исходный маршрут: %s через %s", original.Gateway, original.Interface)
 
 	serverIPs := make([][]string, len(e.plan.Hops))
-	argonIPs := make([][]string, len(e.plan.Hops))
 	for i, hop := range e.plan.Hops {
 		endpoint, _ := endpointFor(hop)
 		serverIPs[i], err = resolveIPv4(endpoint.Host)
@@ -127,35 +176,171 @@ func (e *Engine) connect() error {
 			return fmt.Errorf("«%s»: %w", hop.Name, err)
 		}
 		e.log("%s: %s → %s", hop.Name, endpoint.Host, strings.Join(serverIPs[i], ", "))
-		if hop.UseArgon {
-			argonEndpoint, _ := parseArgonEndpoint(hop.ArgonServer)
-			argonIPs[i], err = resolveIPv4(argonEndpoint.Host)
-			if err != nil {
-				return fmt.Errorf("«%s», Argon4: %w", hop.Name, err)
-			}
-		}
 	}
 
 	previousInterface := ""
+	var blindRelay *transitEndpoint
+	pendingRedirect := 0
+	nestedUDPBudget := 0
 	for i, hop := range e.plan.Hops {
 		if err := e.ctx.Err(); err != nil {
 			return err
 		}
-		nextInterface := previousInterface
-		if hop.UseArgon {
-			if err := e.addHostRoutes(argonIPs[i], nextInterface, original); err != nil {
-				return fmt.Errorf("узел %d, Argon4-надстройка: %w", i+1, err)
+		if hop.Proto == "transit" {
+			transitEP, err := parseArgonEndpoint(hop.Server)
+			if err != nil {
+				return fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
 			}
-			ready, err := e.startArgon(i, hop, argonIPs[i][0], true)
+			connectIP := serverIPs[i][0]
+			connectPort := transitEP.Port
+			if blindRelay != nil {
+				connectIP = blindRelay.ip
+				connectPort = blindRelay.port
+				if strings.TrimSpace(hop.Password) == "" {
+					e.log("узел %d «%s»: слепой транзит цепочкой через первый ретранслятор %s:%d", i+1, hop.Name, connectIP, connectPort)
+					continue
+				}
+				blindRelay = nil
+			} else if pendingRedirect > 0 {
+				connectIP = "127.0.0.1"
+				connectPort = pendingRedirect
+				pendingRedirect = 0
+			} else {
+				if err := e.addHostRoutes(serverIPs[i], previousInterface, original); err != nil {
+					return fmt.Errorf("узел %d, транзит: %w", i+1, err)
+				}
+			}
+			if strings.TrimSpace(hop.Password) == "" {
+				blindRelay = &transitEndpoint{ip: connectIP, port: connectPort}
+				effectiveOuter := hop.ArgonPathMTU
+				if effectiveOuter <= 0 {
+					nextProto := "udp"
+					if i+1 < len(e.plan.Hops) && !e.plan.Hops[i+1].UseArgon {
+						nextProto = transportProtoFor(e.plan.Hops[i+1])
+					}
+					pctx, pcancel := context.WithTimeout(e.ctx, 1500*time.Millisecond)
+					probeRes := argon4.ProbeNodeMTU(pctx, argon4.ProbeNodeMTURequest{
+						Proto:        "transit",
+						Server:       fmt.Sprintf("%s:%d", connectIP, connectPort),
+						TransitProto: nextProto,
+						PrecedingMTU: nestedUDPBudget,
+						TimeoutMs:    1200,
+					})
+					pcancel()
+					if probeRes.OK && probeRes.OptimalPathMTU > 0 {
+						effectiveOuter = probeRes.OptimalPathMTU
+					}
+				}
+				if effectiveOuter > 0 {
+					nestedUDPBudget = nextNestedUDPBudget(effectiveOuter, nestedUDPBudget)
+				}
+				e.log("узел %d «%s»: слепой транзит → %s:%d (внешн_mtu=%d, бюджет=%d)", i+1, hop.Name, connectIP, connectPort, effectiveOuter, nestedUDPBudget)
+				continue
+			}
+			nextHop := e.plan.Hops[i+1]
+			nextPort := 51820
+			targetProto := "udp"
+			if !nextHop.UseArgon {
+				var portErr error
+				nextPort, portErr = resolvedPortFor(nextHop)
+				if portErr != nil {
+					return fmt.Errorf("узел %d «%s», цель: %w", i+1, hop.Name, portErr)
+				}
+				targetProto = transportProtoFor(nextHop)
+			}
+			effectiveHop := withNestedUDPBudget(hop, nestedUDPBudget)
+			target := fmt.Sprintf("%s:%d", serverIPs[i+1][0], nextPort)
+			ready, err := e.startArgon(i, effectiveHop, connectIP, connectPort, false, "transit", target, targetProto, "127.0.0.1:0")
+			if err != nil {
+				return fmt.Errorf("узел %d «%s», транзит: %w", i+1, hop.Name, err)
+			}
+			if ready.Mode != "transit" || ready.Port <= 0 {
+				return fmt.Errorf("узел %d «%s»: транзитный узел вернул неожиданный режим %q (порт %d)", i+1, hop.Name, ready.Mode, ready.Port)
+			}
+			pendingRedirect = ready.Port
+			probedOuter := effectiveHop.ArgonPathMTU
+			if ready.PathMTU > 0 && (probedOuter <= 0 || ready.PathMTU < probedOuter) {
+				probedOuter = ready.PathMTU
+			}
+			if targetProto == "udp" {
+				nestedUDPBudget = nextNestedUDPBudget(probedOuter, nestedUDPBudget)
+			} else {
+				nestedUDPBudget = 0
+			}
+			e.log("узел %d «%s»: L4-транзит готов на 127.0.0.1:%d → %s (path_mtu=%d, влож_бюджет=%d)", i+1, hop.Name, ready.Port, target, ready.PathMTU, nestedUDPBudget)
+			continue
+		}
+
+		nextInterface := previousInterface
+		hopDialIP := serverIPs[i][0]
+		hopPortOverride := 0
+		effectiveHop := withNestedUDPBudget(hop, nestedUDPBudget)
+		if hop.UseArgon {
+			hopPort, err := resolvedPortFor(hop)
+			if err != nil {
+				return fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
+			}
+			argonIP := serverIPs[i][0]
+			argonPort := 51820
+			usedRelay := false
+			if blindRelay != nil {
+				argonIP, argonPort = blindRelay.ip, blindRelay.port
+				blindRelay = nil
+				usedRelay = true
+			} else if pendingRedirect > 0 {
+				argonIP, argonPort = "127.0.0.1", pendingRedirect
+				pendingRedirect = 0
+				usedRelay = true
+			} else {
+				if err := e.addHostRoutes(serverIPs[i], nextInterface, original); err != nil {
+					return fmt.Errorf("узел %d, Argon4-надстройка: %w", i+1, err)
+				}
+			}
+			target := fmt.Sprintf("%s:%d", serverIPs[i][0], hopPort)
+			ready, err := e.startArgon(i, effectiveHop, argonIP, argonPort, true, "auto", target, transportProtoFor(hop), "127.0.0.1:0")
 			if err != nil {
 				return fmt.Errorf("узел %d «%s», Argon4-надстройка: %w", i+1, hop.Name, err)
 			}
-			nextInterface = ready.Interface
+			if ready.Mode == "transit" && ready.Port > 0 {
+				hopDialIP = "127.0.0.1"
+				hopPortOverride = ready.Port
+				if ready.PathMTU > 0 && transportProtoFor(hop) == "udp" {
+					effectiveHop.ArgonPathMTU = nextNestedUDPBudget(ready.PathMTU, nestedUDPBudget)
+				}
+				e.log("узел %d «%s»: Argon4-надстройка в режиме L4-транзита на 127.0.0.1:%d (path_mtu=%d)", i+1, hop.Name, ready.Port, ready.PathMTU)
+			} else {
+				if ready.Interface == "" || ready.Address == "" {
+					return fmt.Errorf("узел %d «%s»: Argon4 вернул пустой интерфейс или адрес", i+1, hop.Name)
+				}
+				if ready.MTU > 0 && (effectiveHop.ArgonPathMTU <= 0 || ready.MTU < effectiveHop.ArgonPathMTU) {
+					effectiveHop.ArgonPathMTU = ready.MTU
+				}
+				e.log("узел %d «%s»: Argon4-надстройка поднята на %s (%s, mtu=%d)", i+1, hop.Name, ready.Interface, ready.Address, ready.MTU)
+				nextInterface = ready.Interface
+				if usedRelay {
+					if err := e.addHostRoutes(serverIPs[i], nextInterface, original); err != nil {
+						return fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
+					}
+				} else if ready.ServerIP != "" {
+					hopDialIP = ready.ServerIP
+				}
+			}
+		} else if blindRelay != nil {
+			hopDialIP = blindRelay.ip
+			hopPortOverride = blindRelay.port
+			blindRelay = nil
+		} else if pendingRedirect > 0 {
+			hopDialIP = "127.0.0.1"
+			hopPortOverride = pendingRedirect
+			pendingRedirect = 0
+		} else {
+			if err := e.addHostRoutes(serverIPs[i], nextInterface, original); err != nil {
+				return fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
+			}
 		}
-		if err := e.addHostRoutes(serverIPs[i], nextInterface, original); err != nil {
-			return fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
-		}
-		interfaceName, address, err := e.startHop(i, hop, serverIPs[i][0])
+		nestedUDPBudget = 0
+
+		interfaceName, address, err := e.startHop(i, effectiveHop, hopDialIP, hopPortOverride)
 		if err != nil {
 			return fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
 		}
@@ -188,34 +373,48 @@ func (e *Engine) connect() error {
 	return nil
 }
 
-func (e *Engine) startHop(index int, profile Profile, ip string) (string, string, error) {
+func (e *Engine) startHop(index int, profile Profile, ip string, portOverride int) (string, string, error) {
 	switch profile.Proto {
 	case "vless", "hysteria2", "hysteria":
-		return e.startProxy(index, profile, ip)
+		return e.startProxy(index, profile, ip, portOverride)
 	case "openconnect":
-		return e.startOpenConnect(index, profile, ip)
+		return e.startOpenConnect(index, profile, ip, portOverride)
 	case "openvpn":
-		return e.startOpenVPN(index, profile, ip)
+		return e.startOpenVPN(index, profile, ip, portOverride)
 	case "argon4":
-		ready, err := e.startArgon(index, profile, ip, false)
+		ready, err := e.startArgon(index, profile, ip, portOverride, false, "", "", "", "")
 		return ready.Interface, ready.Address, err
+	case "transit":
+		return "", "", fmt.Errorf("внутренняя ошибка: транзит обрабатывается до startHop")
 	default:
 		return "", "", fmt.Errorf("неподдерживаемый протокол %s", profile.Proto)
 	}
 }
 
-func (e *Engine) startArgon(index int, profile Profile, ip string, underlay bool) (argonReady, error) {
+func (e *Engine) startArgon(index int, profile Profile, ip string, portOverride int, underlay bool, mode, target, proto, listen string) (argonReady, error) {
 	var result argonReady
 	readyFile := e.privateFile(index, "argon-ready.json")
-	server, password := profile.Server, profile.Password
+	if underlay {
+		readyFile = e.privateFile(index, "argon-underlay-ready.json")
+	}
+	_ = os.Remove(readyFile)
+	password := profile.Password
 	tunName := fmt.Sprintf("cepa%d", index)
 	if underlay {
-		server, password = profile.ArgonServer, profile.ArgonPassword
+		password = profile.ArgonPassword
 		tunName = fmt.Sprintf("cepu%d", index)
 	}
-	endpoint, err := parseArgonEndpoint(server)
-	if err != nil {
-		return result, err
+	port := portOverride
+	if port <= 0 {
+		if underlay && mode == "auto" {
+			port = 51820
+		} else {
+			endpoint, err := parseArgonEndpoint(profile.Server)
+			if err != nil {
+				return result, err
+			}
+			port = endpoint.Port
+		}
 	}
 	clientID := strings.TrimSpace(profile.ClientID)
 	if clientID == "" {
@@ -225,9 +424,60 @@ func (e *Engine) startArgon(index int, profile Profile, ip string, underlay bool
 		clientID += "-underlay"
 	}
 	configuration := map[string]any{
-		"server": fmt.Sprintf("%s:%d", ip, endpoint.Port), "password": password,
-		"client_id": clientID, "client_secret": profile.ClientSecret,
-		"ready_file": readyFile, "tun_name": tunName,
+		"server":        fmt.Sprintf("%s:%d", ip, port),
+		"password":      password,
+		"client_id":     clientID,
+		"client_secret": profile.ClientSecret,
+		"ready_file":    readyFile,
+		"tun_name":      tunName,
+	}
+	if mode != "" {
+		configuration["mode"] = mode
+	}
+	if target != "" {
+		configuration["target"] = target
+	}
+	if proto != "" {
+		configuration["proto"] = proto
+	}
+	if listen != "" {
+		configuration["listen"] = listen
+	}
+	if profile.ArgonProtocolVersion != 0 {
+		configuration["protocol_version"] = profile.ArgonProtocolVersion
+	}
+	if profile.ArgonPaddingProfile != "" {
+		configuration["padding_profile"] = profile.ArgonPaddingProfile
+	}
+	if profile.ArgonFirstPacketProfile != "" {
+		configuration["first_packet_profile"] = profile.ArgonFirstPacketProfile
+	}
+	if profile.ArgonPathMTU != 0 {
+		configuration["path_mtu"] = profile.ArgonPathMTU
+	}
+	if profile.ArgonHandshakeMaxAttempts != 0 {
+		configuration["handshake_max_attempts"] = profile.ArgonHandshakeMaxAttempts
+	}
+	if profile.ArgonHandshakeInitialTimeoutMs != 0 {
+		configuration["handshake_initial_timeout_ms"] = profile.ArgonHandshakeInitialTimeoutMs
+	}
+	if profile.ArgonHandshakeMaxTimeoutMs != 0 {
+		configuration["handshake_max_timeout_ms"] = profile.ArgonHandshakeMaxTimeoutMs
+	}
+	if profile.ArgonKeepaliveMinIdleSec != 0 {
+		configuration["keepalive_min_idle_sec"] = profile.ArgonKeepaliveMinIdleSec
+	}
+	if profile.ArgonKeepaliveMaxIdleSec != 0 {
+		configuration["keepalive_max_idle_sec"] = profile.ArgonKeepaliveMaxIdleSec
+	}
+	if profile.ArgonBehaviorProfile != "" {
+		configuration["behavior_profile"] = profile.ArgonBehaviorProfile
+	}
+	if profile.ArgonLowPowerMode {
+		configuration["low_power_mode"] = true
+	}
+	if profile.ArgonVideoCallMaxDurationSec != 0 {
+		configuration["video_call_max_duration_sec"] = profile.ArgonVideoCallMaxDurationSec
 	}
 	configFile := e.privateFile(index, "argon.json")
 	if underlay {
@@ -239,7 +489,7 @@ func (e *Engine) startArgon(index int, profile Profile, ip string, underlay bool
 	if err := e.spawn(index, "cep-argon4", []string{"--config", configFile}, "", nil); err != nil {
 		return result, err
 	}
-	if err := e.wait(index, "Argon4 handshake и TUN", 60*time.Second, func() (bool, error) {
+	if err := e.wait(index, "Argon4 handshake", 60*time.Second, func() (bool, error) {
 		data, err := os.ReadFile(readyFile)
 		if os.IsNotExist(err) {
 			return false, nil
@@ -250,15 +500,20 @@ func (e *Engine) startArgon(index int, profile Profile, ip string, underlay bool
 		if err := json.Unmarshal(data, &result); err != nil {
 			return false, nil
 		}
+		if result.Mode == "transit" {
+			return result.Port > 0, nil
+		}
 		return result.Interface != "" && result.Address != "", nil
 	}); err != nil {
 		return result, err
 	}
-	e.argonRoutes[index] = result.Routes
+	if len(result.Routes) > 0 {
+		e.argonRoutes[index] = result.Routes
+	}
 	return result, nil
 }
 
-func (e *Engine) startProxy(index int, profile Profile, ip string) (string, string, error) {
+func (e *Engine) startProxy(index int, profile Profile, ip string, portOverride int) (string, string, error) {
 	link, err := parseProxyLink(profile.URI)
 	if err != nil {
 		return "", "", err
@@ -266,7 +521,7 @@ func (e *Engine) startProxy(index int, profile Profile, ip string) (string, stri
 	var outbound map[string]any
 	if link.Scheme == "vless" {
 		port := 20800 + index
-		config, err := xrayConfig(link, ip, port)
+		config, err := xrayConfigWithPort(link, ip, portOverride, port)
 		if err != nil {
 			return "", "", err
 		}
@@ -282,14 +537,24 @@ func (e *Engine) startProxy(index int, profile Profile, ip string) (string, stri
 		}
 		outbound = socksOutbound(port)
 	} else {
-		outbound, err = singBoxOutbound(link, ip)
+		outbound, err = singBoxOutboundWithPort(link, ip, portOverride)
 		if err != nil {
 			return "", "", err
 		}
 	}
 	interfaceName := fmt.Sprintf("ceps%d", index)
 	address := fmt.Sprintf("172.19.%d.1", index)
-	config := singBoxConfig(interfaceName, address+"/30", outbound)
+	tunMTU := 1400
+	if profile.ArgonPathMTU > 0 {
+		candidate := profile.ArgonPathMTU - 64
+		if candidate < argon4.MinPathMTU {
+			candidate = argon4.MinPathMTU
+		}
+		if candidate < tunMTU {
+			tunMTU = candidate
+		}
+	}
+	config := singBoxConfigWithMTU(interfaceName, address+"/30", outbound, tunMTU)
 	path := e.privateFile(index, "sing-box.json")
 	if err := writeSecretJSON(path, config); err != nil {
 		return "", "", err
@@ -303,7 +568,7 @@ func (e *Engine) startProxy(index int, profile Profile, ip string) (string, stri
 	return interfaceName, address, nil
 }
 
-func (e *Engine) startOpenConnect(index int, profile Profile, ip string) (string, string, error) {
+func (e *Engine) startOpenConnect(index int, profile Profile, ip string, portOverride int) (string, string, error) {
 	script := e.privateFile(index, "openconnect.sh")
 	innerFile := e.privateFile(index, "openconnect-inner")
 	readyFile := e.privateFile(index, "openconnect-ready")
@@ -311,7 +576,11 @@ func (e *Engine) startOpenConnect(index int, profile Profile, ip string) (string
 case "$reason" in
   connect)
     ip addr replace "$INTERNAL_IP4_ADDRESS/32" dev "$TUNDEV"
-    ip link set dev "$TUNDEV" mtu "${INTERNAL_IP4_MTU:-1300}" up
+    OC_MTU="${CEP_FORCE_MTU:-${INTERNAL_IP4_MTU:-1300}}"
+    if [ -n "$INTERNAL_IP4_MTU" ] && [ "$INTERNAL_IP4_MTU" -lt "$OC_MTU" ] 2>/dev/null; then
+      OC_MTU="$INTERNAL_IP4_MTU"
+    fi
+    ip link set dev "$TUNDEV" mtu "$OC_MTU" up
     {
       n=0
       while [ "$n" -lt "${CISCO_SPLIT_INC:-0}" ]; do
@@ -353,8 +622,19 @@ exit 0
 	if profile.IgnoreCertErrors {
 		args = append(args, "--no-cert-check")
 	}
-	args = append(args, strings.TrimSpace(profile.Server))
+	targetServer := strings.TrimSpace(profile.Server)
+	if portOverride > 0 {
+		targetServer = rewriteServerPort(targetServer, portOverride)
+	}
+	args = append(args, targetServer)
 	environment := []string{"CEP_INNER_FILE=" + innerFile, "CEP_READY_FILE=" + readyFile}
+	if profile.ArgonPathMTU > 0 {
+		forceMTU := profile.ArgonPathMTU - 64
+		if forceMTU < argon4.MinPathMTU {
+			forceMTU = argon4.MinPathMTU
+		}
+		environment = append(environment, "CEP_FORCE_MTU="+strconv.Itoa(forceMTU))
+	}
 	if err := e.spawn(index, "openconnect", args, profile.Password+"\n", environment); err != nil {
 		return "", "", err
 	}
@@ -379,9 +659,9 @@ exit 0
 	return interfaceName, address, nil
 }
 
-func (e *Engine) startOpenVPN(index int, profile Profile, ip string) (string, string, error) {
+func (e *Engine) startOpenVPN(index int, profile Profile, ip string, portOverride int) (string, string, error) {
 	interfaceName := fmt.Sprintf("cepo%d", index)
-	config, err := pinOpenVPNRemote(profile.Config, ip, interfaceName)
+	config, err := pinOpenVPNRemoteWithPort(profile.Config, ip, portOverride, interfaceName)
 	if err != nil {
 		return "", "", err
 	}
@@ -401,11 +681,26 @@ func (e *Engine) startOpenVPN(index int, profile Profile, ip string) (string, st
 		}
 		args = append(args, "--auth-user-pass", auth, "--auth-nocache")
 	}
+	nestedOpenVPNMTU := 0
+	if profile.ArgonPathMTU > 0 {
+		nestedOpenVPNMTU = profile.ArgonPathMTU - 64
+		if nestedOpenVPNMTU < argon4.MinPathMTU {
+			nestedOpenVPNMTU = argon4.MinPathMTU
+		}
+		mssFix := nestedOpenVPNMTU - 60
+		if mssFix < 480 {
+			mssFix = 480
+		}
+		args = append(args, "--mssfix", strconv.Itoa(mssFix))
+	}
 	if err := e.spawn(index, "openvpn", args, "", nil); err != nil {
 		return "", "", err
 	}
 	if err := e.waitInterface(index, interfaceName); err != nil {
 		return "", "", err
+	}
+	if nestedOpenVPNMTU > 0 && nestedOpenVPNMTU < 1500 {
+		_ = exec.Command("ip", "link", "set", "dev", interfaceName, "mtu", strconv.Itoa(nestedOpenVPNMTU)).Run()
 	}
 	address, _ := interfaceAddress(interfaceName)
 	return interfaceName, address, nil

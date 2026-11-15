@@ -3,6 +3,8 @@
 namespace App\Controller\Admin;
 
 use App\Entity\NewsStoryline;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use Doctrine\ORM\QueryBuilder;
 use EasyCorp\Bundle\EasyAdminBundle\Collection\FieldCollection;
 use EasyCorp\Bundle\EasyAdminBundle\Collection\FilterCollection;
@@ -24,6 +26,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
  *
  * @extends AbstractCrudController<NewsStoryline>
  */
+#[RequiresFeature(FeatureManager::NEWS)]
 final class NewsStorylineCrudController extends AbstractCrudController
 {
     public static function getEntityFqcn(): string

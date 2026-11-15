@@ -3,6 +3,8 @@
 namespace App\Controller\Admin;
 
 use App\Entity\CalendarEvent;
+use App\Security\RequiresFeature;
+use App\Service\FeatureManager;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\QueryBuilder;
 use EasyCorp\Bundle\EasyAdminBundle\Collection\FieldCollection;
@@ -26,6 +28,7 @@ use EasyCorp\Bundle\EasyAdminBundle\Field\TextField;
  *
  * @extends AbstractCrudController<CalendarEvent>
  */
+#[RequiresFeature(FeatureManager::CALENDAR)]
 final class CalendarEventCrudController extends AbstractCrudController
 {
     public static function getEntityFqcn(): string

@@ -3,17 +3,35 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
 
+func resolvedSNI(link ProxyLink) string {
+	if sni := link.sni(); sni != "" {
+		return sni
+	}
+	if net.ParseIP(link.Host) == nil {
+		return link.Host
+	}
+	return ""
+}
+
 func singBoxConfig(interfaceName, tunAddress string, outbound map[string]any) map[string]any {
+	return singBoxConfigWithMTU(interfaceName, tunAddress, outbound, 1400)
+}
+
+func singBoxConfigWithMTU(interfaceName, tunAddress string, outbound map[string]any, mtu int) map[string]any {
+	if mtu <= 0 {
+		mtu = 1400
+	}
 	outbound["tag"] = "proxy"
 	return map[string]any{
 		"log": map[string]any{"level": "info", "timestamp": true},
 		"inbounds": []any{map[string]any{
 			"type": "tun", "tag": "tun-in", "interface_name": interfaceName,
-			"address": []string{tunAddress}, "mtu": 1400,
+			"address": []string{tunAddress}, "mtu": mtu,
 			"auto_route": false, "stack": "gvisor",
 		}},
 		"outbounds": []any{outbound},
@@ -22,12 +40,20 @@ func singBoxConfig(interfaceName, tunAddress string, outbound map[string]any) ma
 }
 
 func singBoxOutbound(link ProxyLink, server string) (map[string]any, error) {
+	return singBoxOutboundWithPort(link, server, 0)
+}
+
+func singBoxOutboundWithPort(link ProxyLink, server string, portOverride int) (map[string]any, error) {
 	tls := map[string]any{"enabled": true}
-	if sni := link.sni(); sni != "" {
+	if sni := resolvedSNI(link); sni != "" {
 		tls["server_name"] = sni
 	}
 	if link.flag("insecure") || link.flag("allowInsecure") {
 		tls["insecure"] = true
+	}
+	targetPort := link.Port
+	if portOverride > 0 {
+		targetPort = portOverride
 	}
 	switch link.Scheme {
 	case "hysteria2":
@@ -35,7 +61,7 @@ func singBoxOutbound(link ProxyLink, server string) (map[string]any, error) {
 			tls["alpn"] = strings.Split(alpn, ",")
 		}
 		out := map[string]any{
-			"type": "hysteria2", "server": server, "server_port": link.Port,
+			"type": "hysteria2", "server": server, "server_port": targetPort,
 			"password": link.UserInfo, "tls": tls,
 		}
 		if obfs := link.q("obfs"); obfs != "" && obfs != "none" {
@@ -50,7 +76,7 @@ func singBoxOutbound(link ProxyLink, server string) (map[string]any, error) {
 		}
 		tls["alpn"] = []string{defaultString(link.q("alpn"), "hysteria")}
 		out := map[string]any{
-			"type": "hysteria", "server": server, "server_port": link.Port,
+			"type": "hysteria", "server": server, "server_port": targetPort,
 			"up_mbps": queryInt(link, "upmbps", 50), "down_mbps": queryInt(link, "downmbps", 100),
 			"tls": tls,
 		}
@@ -71,6 +97,14 @@ func socksOutbound(port int) map[string]any {
 }
 
 func xrayConfig(link ProxyLink, server string, socksPort int) (map[string]any, error) {
+	return xrayConfigWithPort(link, server, 0, socksPort)
+}
+
+func xrayConfigWithPort(link ProxyLink, server string, portOverride, socksPort int) (map[string]any, error) {
+	targetPort := link.Port
+	if portOverride > 0 {
+		targetPort = portOverride
+	}
 	if link.Scheme != "vless" {
 		return nil, fmt.Errorf("xray-конфиг строится только для VLESS")
 	}
@@ -92,7 +126,7 @@ func xrayConfig(link ProxyLink, server string, socksPort int) (map[string]any, e
 		reality := map[string]any{
 			"publicKey": link.q("pbk"), "fingerprint": defaultString(link.q("fp"), "chrome"),
 		}
-		if sni := link.sni(); sni != "" {
+		if sni := resolvedSNI(link); sni != "" {
 			reality["serverName"] = sni
 		}
 		if value := link.q("sid"); value != "" {
@@ -104,7 +138,7 @@ func xrayConfig(link ProxyLink, server string, socksPort int) (map[string]any, e
 		stream["realitySettings"] = reality
 	case "tls":
 		tls := map[string]any{"fingerprint": defaultString(link.q("fp"), "chrome")}
-		if sni := link.sni(); sni != "" {
+		if sni := resolvedSNI(link); sni != "" {
 			tls["serverName"] = sni
 		}
 		if alpn := link.q("alpn"); alpn != "" {
@@ -165,7 +199,7 @@ func xrayConfig(link ProxyLink, server string, socksPort int) (map[string]any, e
 		"outbounds": []any{map[string]any{
 			"protocol": "vless",
 			"settings": map[string]any{"vnext": []any{map[string]any{
-				"address": server, "port": link.Port, "users": []any{user},
+				"address": server, "port": targetPort, "users": []any{user},
 			}}},
 			"streamSettings": stream,
 		}},

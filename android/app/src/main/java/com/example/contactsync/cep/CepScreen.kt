@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,6 +53,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,6 +64,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 
 /** Экраны CEP: «Подключение» (состояние и журнал), «Цепочки», «Профили» и их редакторы. */
 private sealed interface Screen {
@@ -369,6 +373,10 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
     val loadConfig = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(model::readConfigFile)?.let { save(p.copy(config = it)) }
     }
+    val scope = rememberCoroutineScope()
+    var mtuText by remember(id) { mutableStateOf(p.argonPathMTU?.toString().orEmpty()) }
+    var probingMtu by remember(id) { mutableStateOf(false) }
+    var probeResult by remember(id) { mutableStateOf<MtuProbeResult?>(null) }
 
     LazyColumn(modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { Text(proto.title, style = MaterialTheme.typography.titleMedium) }
@@ -399,6 +407,15 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
                 item { Field("Секрет клиента", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
                 item { Text("Туннель переносит IPv4. Argon4 может быть отдельным узлом или основой для следующего узла цепочки.", style = MaterialTheme.typography.bodySmall) }
             }
+            proto == VpnProtocol.TRANSIT -> {
+                item { Field("Сервер", p.server, hint = "host:51820; без порта используется 51820") { save(p.copy(server = it.trim())) } }
+                item { Field("Мастер-пароль", p.password, secret = true, hint = "Пусто — слепой passthrough-транзит к следующему узлу Argon4") { save(p.copy(password = it)) } }
+                if (p.password.trim().isNotEmpty()) {
+                    item { Field("ID клиента", p.clientID, hint = "Если пусто, используется ID профиля") { save(p.copy(clientID = it.trim())) } }
+                    item { Field("Секрет клиента", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
+                }
+                item { Text("L4-транзит (TCP/UDP) для следующего узла цепочки или слепой ретранслятор для Argon4 без пароля.", style = MaterialTheme.typography.bodySmall) }
+            }
             else -> {
                 item { Field("Сервер", p.server, hint = "host, host:port или https://host:port") { save(p.copy(server = it.trim())) } }
                 item { Field("Логин", p.username) { save(p.copy(username = it)) } }
@@ -411,11 +428,112 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
                 item { LabeledSwitch("Не проверять сертификат", p.ignoreCertErrors) { save(p.copy(ignoreCertErrors = it)) } }
             }
         }
+        if (proto != VpnProtocol.ARGON4 && proto != VpnProtocol.TRANSIT && proto.unsupportedReason == null) {
+            item {
+                LabeledSwitch("Шифровать через Argon4", p.useArgon) { save(p.copy(useArgon = it)) }
+            }
+            if (p.useArgon) {
+                item { Field("Мастер-пароль Argon4", p.argonPassword, secret = true) { save(p.copy(argonPassword = it)) } }
+                item { Field("ID клиента Argon4", p.clientID, hint = "Если пусто, используется ID профиля") { save(p.copy(clientID = it.trim())) } }
+                item { Field("Секрет клиента Argon4", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }
+            }
+        }
+        if (proto == VpnProtocol.ARGON4 || proto == VpnProtocol.TRANSIT || p.useArgon) {
+            item {
+                ArgonBehaviorProfilePicker(p.argonBehaviorProfile.orEmpty()) { selected ->
+                    save(p.copy(argonBehaviorProfile = selected.ifBlank { null }))
+                }
+            }
+            if (p.argonBehaviorProfile == "video-call") {
+                item {
+                    LabeledSwitch("Режим экономии заряда Argon4", p.argonLowPowerMode) {
+                        save(p.copy(argonLowPowerMode = it))
+                    }
+                }
+                item {
+                    Text(
+                        "Предупреждение: профиль video-call увеличивает служебный трафик, добавленную задержку (до ~18 мс) и расход батареи; авто-снижение до baseline через 2 часа. Не скрывает IP сервера и активный режим связи.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+        if (proto != VpnProtocol.TRANSIT) {
+            item {
+                Field(
+                    "Сети через этот узел", p.routes,
+                    hint = "Например 192.168.1.119, 10.0.0.0/8 — пойдут через этот узел, а не дальше по цепочке",
+                ) { save(p.copy(routes = it)) }
+            }
+        }
         item {
             Field(
-                "Сети через этот узел", p.routes,
-                hint = "Например 192.168.1.119, 10.0.0.0/8 — пойдут через этот узел, а не дальше по цепочке",
-            ) { save(p.copy(routes = it)) }
+                label = "Внешний MTU (пусто — автоподбор)",
+                value = mtuText,
+                hint = "576–9000. При пустом значении оптимальный MTU подбирается автоматически при запуске.",
+            ) { raw ->
+                val digits = raw.filter(Char::isDigit)
+                mtuText = digits
+                val parsed = digits.toIntOrNull()
+                if (digits.isEmpty()) {
+                    save(p.copy(argonPathMTU = null))
+                } else if (parsed != null && parsed in 576..9000) {
+                    save(p.copy(argonPathMTU = parsed))
+                }
+            }
+        }
+        item {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                OutlinedButton(
+                    enabled = !probingMtu,
+                    onClick = {
+                        probingMtu = true
+                        probeResult = null
+                        scope.launch {
+                            val res = model.probeMtu(p)
+                            probeResult = res
+                            probingMtu = false
+                            if (res.ok && res.optimalPathMtu in 576..9000) {
+                                mtuText = res.optimalPathMtu.toString()
+                                save(p.copy(argonPathMTU = res.optimalPathMtu))
+                            }
+                        }
+                    },
+                ) {
+                    if (probingMtu) {
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.padding(end = 8.dp).size(16.dp))
+                        Text("Подбор MTU…")
+                    } else {
+                        Text("Подобрать MTU")
+                    }
+                }
+                if (p.argonPathMTU != null || mtuText.isNotEmpty()) {
+                    TextButton(
+                        enabled = !probingMtu,
+                        onClick = {
+                            mtuText = ""
+                            probeResult = null
+                            save(p.copy(argonPathMTU = null))
+                        },
+                    ) {
+                        Text("Сбросить (авто)")
+                    }
+                }
+            }
+        }
+        probeResult?.let { res ->
+            item {
+                Text(
+                    text = if (res.ok) res.message else "Ошибка: ${res.error}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (res.ok) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                )
+            }
         }
         item {
             OutlinedButton(onClick = { model.deleteProfile(id); onClose() }, modifier = Modifier.padding(vertical = 12.dp)) { Text("Удалить профиль") }
@@ -432,6 +550,25 @@ private fun FlavorPicker(value: String, onChange: (String) -> Unit) {
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             OpenConnectFlavor.entries.forEach { f ->
                 DropdownMenuItem(text = { Text(f.title) }, onClick = { open = false; onChange(f.raw) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArgonBehaviorProfilePicker(value: String, onChange: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val options = listOf(
+        "" to "Отключён (по умолчанию)",
+        "baseline" to "Базовый (baseline)",
+        "video-call" to "Видеозвонок (video-call)",
+    )
+    val title = options.firstOrNull { it.first == value }?.second ?: value
+    Box {
+        OutlinedButton(onClick = { open = true }) { Text("Поведенческий профиль Argon4: $title") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (raw, label) ->
+                DropdownMenuItem(text = { Text(label) }, onClick = { open = false; onChange(raw) })
             }
         }
     }

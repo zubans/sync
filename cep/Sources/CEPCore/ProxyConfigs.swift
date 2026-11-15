@@ -9,7 +9,7 @@ public enum JSON {
 /// Конфиг sing-box: TUN без автомаршрутов, весь трафик из него уходит в один outbound.
 /// Маршруты в TUN прокладывает движок — так прокси-узел встаёт в цепочку как обычный интерфейс.
 public enum SingBoxConfig {
-    public static func make(tunAddress: String, outbound: [String: Any]) -> [String: Any] {
+    public static func make(tunAddress: String, outbound: [String: Any], mtu: Int = 1400) -> [String: Any] {
         var out = outbound
         out["tag"] = "proxy"
         return [
@@ -18,7 +18,7 @@ public enum SingBoxConfig {
                 "type": "tun",
                 "tag": "tun-in",
                 "address": [tunAddress],
-                "mtu": 1400,
+                "mtu": mtu,
                 "auto_route": false,
                 "stack": "gvisor",
             ] as [String: Any]],
@@ -30,11 +30,12 @@ public enum SingBoxConfig {
         ]
     }
 
-    /// Outbound sing-box для Hysteria 2 / Hysteria; server — уже разрешённый IP.
-    public static func outbound(for link: ProxyLink, server: String) throws -> [String: Any] {
+    /// Outbound sing-box для Hysteria 2 / Hysteria; server — уже разрешённый IP или 127.0.0.1 при транзите.
+    public static func outbound(for link: ProxyLink, server: String, portOverride: Int? = nil) throws -> [String: Any] {
         var tls: [String: Any] = ["enabled": true]
-        if let sni = link.sni { tls["server_name"] = sni }
+        tls["server_name"] = link.sni ?? link.host
         if link.flag("insecure") || link.flag("allowInsecure") { tls["insecure"] = true }
+        let targetPort = portOverride ?? link.port
 
         switch link.scheme {
         case "hysteria2":
@@ -42,7 +43,7 @@ public enum SingBoxConfig {
             var out: [String: Any] = [
                 "type": "hysteria2",
                 "server": server,
-                "server_port": link.port,
+                "server_port": targetPort,
                 "password": link.userInfo,
                 "tls": tls,
             ]
@@ -61,7 +62,7 @@ public enum SingBoxConfig {
             var out: [String: Any] = [
                 "type": "hysteria",
                 "server": server,
-                "server_port": link.port,
+                "server_port": targetPort,
                 "up_mbps": link.q("upmbps").flatMap(Int.init) ?? 50,
                 "down_mbps": link.q("downmbps").flatMap(Int.init) ?? 100,
                 "tls": tls,
@@ -84,7 +85,7 @@ public enum SingBoxConfig {
 /// Конфиг xray для VLESS: эталонная реализация, умеет Reality, Vision, xhttp, ws, grpc.
 /// Наружу xray отдаёт SOCKS на 127.0.0.1, в TUN его заворачивает sing-box.
 public enum XrayConfig {
-    public static func make(link: ProxyLink, server: String, socksPort: Int) throws -> [String: Any] {
+    public static func make(link: ProxyLink, server: String, portOverride: Int? = nil, socksPort: Int) throws -> [String: Any] {
         guard link.scheme == "vless" else { throw ConfigError("xray-конфиг строится только для VLESS") }
         guard !link.userInfo.isEmpty else { throw ConfigError("в ссылке VLESS нет UUID") }
 
@@ -108,7 +109,7 @@ public enum XrayConfig {
             stream["realitySettings"] = reality
         case "tls":
             var tls: [String: Any] = ["fingerprint": link.q("fp") ?? "chrome"]
-            if let sni = link.sni { tls["serverName"] = sni }
+            tls["serverName"] = link.sni ?? link.host
             if let alpn = link.q("alpn") { tls["alpn"] = alpn.split(separator: ",").map(String.init) }
             if link.flag("allowInsecure") || link.flag("insecure") { tls["allowInsecure"] = true }
             stream["tlsSettings"] = tls
@@ -171,7 +172,7 @@ public enum XrayConfig {
             ] as [String: Any]],
             "outbounds": [[
                 "protocol": "vless",
-                "settings": ["vnext": [["address": server, "port": link.port, "users": [user]]]],
+                "settings": ["vnext": [["address": server, "port": portOverride ?? link.port, "users": [user]]]],
                 "streamSettings": stream,
             ] as [String: Any]],
         ]
