@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type wizard struct {
@@ -197,8 +199,8 @@ func runWizard(store *Store, input io.Reader, output io.Writer) (bool, error) {
 			}
 			continue
 		}
-		w.printf("\n1. Создать новую цепочку\n2. Добавить узел в цепочку\n3. Проверить цепочку\n0. Сохранить и выйти\n")
-		choice, err := w.choice("Выбор: ", 3)
+		w.printf("\n1. Создать новую цепочку\n2. Добавить узел в цепочку\n3. Проверить цепочку\n4. Подобрать MTU для узла\n0. Сохранить и выйти\n")
+		choice, err := w.choice("Выбор: ", 4)
 		if err != nil {
 			return changed, err
 		}
@@ -231,6 +233,12 @@ func runWizard(store *Store, input io.Reader, output io.Writer) (bool, error) {
 				continue
 			}
 			checkPlan(plan, w.output)
+		case 4:
+			updated, err := w.probeMTUInteractive(store)
+			if err != nil {
+				return changed, err
+			}
+			changed = changed || updated
 		}
 	}
 }
@@ -241,6 +249,45 @@ func runAddNode(store *Store, input io.Reader, output io.Writer) (bool, error) {
 		return false, fmt.Errorf("сначала создайте цепочку командой wizard")
 	}
 	return w.addNode(store)
+}
+
+func (w *wizard) probeMTUInteractive(store *Store) (bool, error) {
+	if len(store.Profiles) == 0 {
+		w.printf("\nУзлов пока нет.\n")
+		return false, nil
+	}
+	w.printf("\nУзлы:\n")
+	for i, p := range store.Profiles {
+		mtuText := "авто"
+		if p.ArgonPathMTU > 0 {
+			mtuText = strconv.Itoa(p.ArgonPathMTU)
+		}
+		w.printf("  %d. %s (%s, MTU: %s)\n", i+1, p.Name, p.Proto, mtuText)
+	}
+	choice, err := w.choice("Номер узла (0 — назад): ", len(store.Profiles))
+	if err != nil || choice == 0 {
+		return false, err
+	}
+	idx := choice - 1
+	p := store.Profiles[idx]
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	w.printf("Подбор оптимального MTU для %q (%s)...\n", p.Name, p.Proto)
+	effPreceding := precedingMTUInChain(store, "", p.ID)
+	effTarget := nextTargetInChain(store, "", p.ID)
+	res := probeNodeMTUForProfile(ctx, p, effPreceding, effTarget)
+	if !res.OK {
+		w.printf("Не удалось подобрать MTU: %s\n", res.Error)
+		return false, nil
+	}
+	w.printf("%s\n", res.Message)
+	apply, err := w.confirm(fmt.Sprintf("Записать оптимальный внешний MTU=%d для %q?", res.OptimalPathMTU, p.Name), true)
+	if err != nil || !apply {
+		return false, err
+	}
+	store.Profiles[idx].ArgonPathMTU = res.OptimalPathMTU
+	w.printf("MTU=%d применён.\n", res.OptimalPathMTU)
+	return true, nil
 }
 
 func runSelectChain(store *Store, input io.Reader, output io.Writer) (string, error) {

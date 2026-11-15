@@ -99,12 +99,16 @@ public struct Argon4Ready: Decodable, Equatable, Sendable {
     public var address: String
     public var serverIP: String
     public var mtu: Int
+    public var pathMTU: Int?
+    public var innerMTU: Int?
     public var dns: [String]
     public var routes: [String]
 
     enum CodingKeys: String, CodingKey {
         case mode, listen, port, target, interface, address, mtu, dns, routes
         case serverIP = "server_ip"
+        case pathMTU = "path_mtu"
+        case innerMTU = "inner_mtu"
     }
 
     public init(from decoder: Decoder) throws {
@@ -117,6 +121,8 @@ public struct Argon4Ready: Decodable, Equatable, Sendable {
         address = try c.decodeIfPresent(String.self, forKey: .address) ?? ""
         serverIP = try c.decodeIfPresent(String.self, forKey: .serverIP) ?? ""
         mtu = try c.decodeIfPresent(Int.self, forKey: .mtu) ?? 1380
+        pathMTU = try c.decodeIfPresent(Int.self, forKey: .pathMTU)
+        innerMTU = try c.decodeIfPresent(Int.self, forKey: .innerMTU)
         dns = try c.decodeIfPresent([String].self, forKey: .dns) ?? []
         routes = try c.decodeIfPresent([String].self, forKey: .routes) ?? []
     }

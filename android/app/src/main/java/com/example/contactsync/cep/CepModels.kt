@@ -1,5 +1,6 @@
 package com.example.contactsync.cep
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -122,3 +123,22 @@ data class CepPlan(
 
 /** UUID в верхнем регистре — так их пишет JSONEncoder на macOS. */
 fun newCepId(): String = UUID.randomUUID().toString().uppercase()
+
+/** Результат подбора оптимального внешнего MTU для узла цепочки (ответ Go-движка). */
+@Serializable
+data class MtuProbeResult(
+    val ok: Boolean = false,
+    val proto: String = "",
+    val server: String = "",
+    @SerialName("optimal_path_mtu") val optimalPathMtu: Int = 0,
+    @SerialName("inner_tun_mtu") val innerTunMtu: Int = 0,
+    @SerialName("effective_outer_udp") val effectiveOuterUdp: Int = 0,
+    @SerialName("interface_mtu") val interfaceMtu: Int = 0,
+    @SerialName("tcp_mss") val tcpMss: Int = 0,
+    @SerialName("rtt_ms") val rttMs: Long = 0,
+    val method: String = "",
+    val message: String = "",
+    @SerialName("preceding_budget") val precedingBudget: Int = 0,
+    @SerialName("supports_in_band") val supportsInBand: Boolean = false,
+    val error: String = "",
+)

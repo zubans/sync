@@ -97,6 +97,22 @@ final class Engine {
         var previousInterface: String?
         var pendingRedirect: Int?
         var blindRelay: (ip: String, port: Int)?
+        var nestedUDPBudget: Int? = nil
+
+        func clampedHop(_ profile: Profile) -> Profile {
+            guard let budget = nestedUDPBudget else { return profile }
+            var copy = profile
+            if copy.argonPathMTU == nil || copy.argonPathMTU! > budget {
+                copy.argonPathMTU = budget
+            }
+            return copy
+        }
+
+        func nextNestedBudget(for profile: Profile) -> Int {
+            let outer = min(profile.argonPathMTU ?? 1500, nestedUDPBudget ?? 1500)
+            return max(576, outer - 64)
+        }
+
         for (i, hop) in plan.hops.enumerated() {
             try checkStop()
             setHop(i) { $0.state = .connecting; $0.serverIP = serverIPs[i][0] }
@@ -107,7 +123,10 @@ final class Engine {
                     if hop.password.isEmpty {
                         let connectIP: String
                         let connectPort: Int
-                        if let redirPort = pendingRedirect {
+                        if let relay = blindRelay {
+                            connectIP = relay.ip
+                            connectPort = relay.port
+                        } else if let redirPort = pendingRedirect {
                             pendingRedirect = nil
                             connectIP = "127.0.0.1"
                             connectPort = redirPort
@@ -117,22 +136,46 @@ final class Engine {
                             connectPort = transitPort
                         }
                         blindRelay = (connectIP, connectPort)
+                        var effectiveBlindOuter = hop.argonPathMTU
+                        if effectiveBlindOuter == nil {
+                            let nextProto = (i + 1 < plan.hops.count && !plan.hops[i + 1].useArgon) ? ArgonTransportProto.of(plan.hops[i + 1]) : "udp"
+                            let probe = MTUProbe.probeEndpointSync(
+                                host: connectIP,
+                                port: connectPort,
+                                proto: "transit",
+                                transport: nextProto == "tcp" ? "tcp" : "udp",
+                                precedingBudget: nestedUDPBudget ?? 0,
+                                timeoutMs: 1200
+                            )
+                            if probe.ok, probe.optimalPathMTU > 0 {
+                                effectiveBlindOuter = probe.optimalPathMTU
+                            }
+                        }
+                        if let blindOuter = effectiveBlindOuter {
+                            var blindHop = hop
+                            blindHop.argonPathMTU = blindOuter
+                            nestedUDPBudget = nextNestedBudget(for: blindHop)
+                        }
                         setHop(i) {
                             $0.state = .up
                             $0.interface = previousInterface ?? original.interface
                             $0.localAddress = "\(connectIP):\(connectPort)"
                             $0.message = "слепой транзит к узлу \(i + 2)"
                         }
-                        log("узел \(i + 1) «\(hop.name)»: слепой транзит → \(connectIP):\(connectPort)")
+                        log("узел \(i + 1) «\(hop.name)»: слепой транзит → \(connectIP):\(connectPort) (внешн_mtu=\(effectiveBlindOuter.map(String.init) ?? "авто"), бюджет=\(nestedUDPBudget.map(String.init) ?? "авто"))")
                     } else {
                         let nextHop = plan.hops[i + 1]
                         let nextPort = nextHop.useArgon ? 51820 : (try Endpoint.resolvedPort(for: nextHop))
                         let target = "\(serverIPs[i + 1][0]):\(nextPort)"
-                        let targetProto = nextHop.useArgon ? "" : ArgonTransportProto.of(nextHop)
+                        let targetProto = nextHop.useArgon ? "udp" : ArgonTransportProto.of(nextHop)
 
                         let connectIP: String
                         let connectPort: Int
-                        if let redirPort = pendingRedirect {
+                        if let relay = blindRelay {
+                            blindRelay = nil
+                            connectIP = relay.ip
+                            connectPort = relay.port
+                        } else if let redirPort = pendingRedirect {
                             pendingRedirect = nil
                             connectIP = "127.0.0.1"
                             connectPort = redirPort
@@ -141,22 +184,30 @@ final class Engine {
                             connectIP = serverIPs[i][0]
                             connectPort = transitPort
                         }
+                        let effectiveHop = clampedHop(hop)
                         let ready = try runArgonHelper(
-                            i, hop, ip: connectIP, underlay: false,
-                            mode: "transit", target: target, proto: targetProto,
+                            i, effectiveHop, ip: connectIP, underlay: false,
+                            mode: "transit", target: target, proto: nextHop.useArgon ? "" : ArgonTransportProto.of(nextHop),
                             listen: "127.0.0.1:0", portOverride: connectPort
                         )
                         guard ready.mode == "transit", ready.port > 0 else {
                             throw EngineError("Транзитный узел вернул неожиданный режим \(ready.mode)")
                         }
                         pendingRedirect = ready.port
+                        var discoveredHop = effectiveHop
+                        if let probedPath = ready.pathMTU, probedPath > 0 {
+                            if discoveredHop.argonPathMTU == nil || probedPath < discoveredHop.argonPathMTU! {
+                                discoveredHop.argonPathMTU = probedPath
+                            }
+                        }
+                        nestedUDPBudget = (targetProto == "udp") ? nextNestedBudget(for: discoveredHop) : nil
                         setHop(i) {
                             $0.state = .up
                             $0.interface = previousInterface ?? original.interface
                             $0.localAddress = "127.0.0.1:\(ready.port)"
                             $0.message = "L4-транзит → \(target)"
                         }
-                        log("узел \(i + 1) «\(hop.name)»: транзит слушает 127.0.0.1:\(ready.port) → \(target)")
+                        log("узел \(i + 1) «\(hop.name)»: транзит слушает 127.0.0.1:\(ready.port) → \(target) (path_mtu=\(ready.pathMTU ?? 0), бюджет=\(nestedUDPBudget ?? 0))")
                     }
                     continue
                 }
@@ -164,9 +215,10 @@ final class Engine {
                 var routeInterface = previousInterface
                 var hopDialIP = serverIPs[i][0]
                 var hopPortOverride: Int?
+                var effectiveHop = clampedHop(hop)
 
-                if hop.useArgon {
-                    let hopPort = try Endpoint.resolvedPort(for: hop)
+                if effectiveHop.useArgon {
+                    let hopPort = try Endpoint.resolvedPort(for: effectiveHop)
                     let argonIP: String
                     let argonPort: Int
                     if let relay = blindRelay {
@@ -184,19 +236,25 @@ final class Engine {
                     }
 
                     let ready = try runArgonHelper(
-                        i, hop, ip: argonIP, underlay: true,
+                        i, effectiveHop, ip: argonIP, underlay: true,
                         mode: "auto", target: "\(serverIPs[i][0]):\(hopPort)",
-                        proto: ArgonTransportProto.of(hop), listen: "127.0.0.1:0", portOverride: argonPort
+                        proto: ArgonTransportProto.of(effectiveHop), listen: "127.0.0.1:0", portOverride: argonPort
                     )
                     if ready.mode == "transit", ready.port > 0 {
                         hopDialIP = "127.0.0.1"
                         hopPortOverride = ready.port
-                        log("узел \(i + 1) «\(hop.name)»: Argon4-надстройка работает в режиме L4-транзита на 127.0.0.1:\(ready.port)")
+                        if let probedPath = ready.pathMTU, probedPath > 0, ArgonTransportProto.of(effectiveHop) == "udp" {
+                            effectiveHop.argonPathMTU = max(576, min(probedPath, nestedUDPBudget ?? 1500) - 64)
+                        }
+                        log("узел \(i + 1) «\(hop.name)»: Argon4-надстройка работает в режиме L4-транзита на 127.0.0.1:\(ready.port) (path_mtu=\(ready.pathMTU ?? 0))")
                     } else {
                         guard !ready.interface.isEmpty, !ready.address.isEmpty else {
                             throw EngineError("Argon4: помощник вернул пустой интерфейс или адрес")
                         }
-                        log("узел \(i + 1) «\(hop.name)»: Argon4-надстройка поднята на \(ready.interface) (\(ready.address))")
+                        if ready.mtu > 0, effectiveHop.argonPathMTU == nil || ready.mtu < effectiveHop.argonPathMTU! {
+                            effectiveHop.argonPathMTU = ready.mtu
+                        }
+                        log("узел \(i + 1) «\(hop.name)»: Argon4-надстройка поднята на \(ready.interface) (\(ready.address), mtu=\(ready.mtu))")
                         routeInterface = ready.interface
                         try addRoutes(serverIPs[i], routeInterface)
                     }
@@ -212,7 +270,8 @@ final class Engine {
                     try addRoutes(serverIPs[i], routeInterface)
                 }
 
-                let (iface, address) = try startHop(i, hop, ip: hopDialIP, portOverride: hopPortOverride)
+                let (iface, address) = try startHop(i, effectiveHop, ip: hopDialIP, portOverride: hopPortOverride)
+                nestedUDPBudget = nil
                 setHop(i) { $0.state = .up; $0.interface = iface; $0.localAddress = address; $0.message = nil }
                 log("узел \(i + 1) «\(hop.name)» поднят на \(iface) (\(address))")
                 try routeInner(i, hop, iface: iface)
@@ -427,7 +486,8 @@ final class Engine {
         }
         let address = "172.19.\(i).1"
         let cfg = privateFile(i, "config")
-        try writeSecret(JSON.data(SingBoxConfig.make(tunAddress: "\(address)/30", outbound: outbound)), to: cfg)
+        let proxyMTU = min(1400, max(576, (hop.argonPathMTU ?? 1500) - 64))
+        try writeSecret(JSON.data(SingBoxConfig.make(tunAddress: "\(address)/30", outbound: outbound, mtu: proxyMTU)), to: cfg)
         try spawn(i, tool: .singBox, ["run", "-c", cfg.path, "-D", privateDir.path, "--disable-color"])
         let iface = try waitForInterface(hop: i) { _, addrs in addrs.contains(address) }
         return (iface.name, address)
@@ -447,6 +507,13 @@ final class Engine {
             // После --config: перекрывает script-security из .ovpn, чужие up/down-скрипты под root не выполнятся.
             "--script-security", "1",
         ]
+        var nestedOVPNMTU: Int?
+        if let cap = hop.argonPathMTU {
+            let nested = max(576, cap - 64)
+            nestedOVPNMTU = nested
+            let mss = max(480, nested - 60)
+            args += ["--mssfix", "\(mss)"]
+        }
         if !hop.username.isEmpty {
             let auth = privateFile(i, "auth")
             try writeSecret(Data("\(hop.username)\n\(hop.password)\n".utf8), to: auth)
@@ -454,6 +521,9 @@ final class Engine {
         }
         try spawn(i, tool: .openvpn, args)
         let iface = try waitForInterface(hop: i) { name, addrs in !before.contains(name) && name.hasPrefix("utun") && !addrs.isEmpty }
+        if let nested = nestedOVPNMTU, nested < 1500 {
+            _ = Shell.run("/sbin/ifconfig", [iface.name, "mtu", "\(nested)"])
+        }
         return (iface.name, iface.address)
     }
 
@@ -464,7 +534,11 @@ final class Engine {
         #!/bin/sh
         case "$reason" in
           connect)
-            /sbin/ifconfig "$TUNDEV" inet "$INTERNAL_IP4_ADDRESS" "$INTERNAL_IP4_ADDRESS" netmask 255.255.255.255 mtu "${INTERNAL_IP4_MTU:-1300}" up
+            OC_MTU="${CEP_FORCE_MTU:-${INTERNAL_IP4_MTU:-1300}}"
+            if [ -n "$INTERNAL_IP4_MTU" ] && [ "$INTERNAL_IP4_MTU" -lt "$OC_MTU" ] 2>/dev/null; then
+              OC_MTU="$INTERNAL_IP4_MTU"
+            fi
+            /sbin/ifconfig "$TUNDEV" inet "$INTERNAL_IP4_ADDRESS" "$INTERNAL_IP4_ADDRESS" netmask 255.255.255.255 mtu "$OC_MTU" up
             # внутренние сети и DNS от сервера — движку, он проложит их через этот узел
             {
               n=0
@@ -500,7 +574,11 @@ final class Engine {
         if let ca = Tool.bundledCAFile { args.append("--cafile=\(ca)") }
         if !hop.authGroup.isEmpty { args.append("--authgroup=\(hop.authGroup)") }
         args.append(portOverride.map { Endpoint.rewritePort(hop.server, port: $0) } ?? hop.server.trimmingCharacters(in: .whitespaces))
-        try spawn(i, tool: .openconnect, args, stdin: hop.password + "\n", env: ["CEP_INNER_FILE": privateFile(i, "inner").path])
+        var ocEnv = ["CEP_INNER_FILE": privateFile(i, "inner").path]
+        if let cap = hop.argonPathMTU {
+            ocEnv["CEP_FORCE_MTU"] = String(max(576, cap - 64))
+        }
+        try spawn(i, tool: .openconnect, args, stdin: hop.password + "\n", env: ocEnv)
         let iface = try waitForInterface(hop: i) { name, addrs in !before.contains(name) && name.hasPrefix("utun") && !addrs.isEmpty }
         return (iface.name, iface.address)
     }
@@ -532,8 +610,10 @@ final class Engine {
         let setconf = privateFile(i, "awg.conf")
         try writeSecret(Data(conf.setconfText(endpointIP: ip, portOverride: portOverride).utf8), to: setconf)
         try check(Shell.run(awg, ["setconf", iface, setconf.path]), "awg setconf")
+        let nestedCap = hop.argonPathMTU.map { max(576, $0 - 80) }
+        let awgMTU = min(conf.mtu ?? 1376, nestedCap ?? (conf.mtu ?? 1376))
         try check(Shell.run("/sbin/ifconfig", [iface, "inet", address, address, "netmask", "255.255.255.255",
-                                                "mtu", String(conf.mtu ?? 1376), "up"]), "ifconfig")
+                                                "mtu", String(awgMTU), "up"]), "ifconfig")
         _ = try waitUntil(hop: i, "рукопожатие AmneziaWG", timeout: 30) { () -> Bool? in
             let out = Shell.run(awg, ["show", iface, "latest-handshakes"]).output
             let handshaken = out.split(separator: "\n").contains { line in

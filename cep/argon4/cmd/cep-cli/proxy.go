@@ -19,12 +19,19 @@ func resolvedSNI(link ProxyLink) string {
 }
 
 func singBoxConfig(interfaceName, tunAddress string, outbound map[string]any) map[string]any {
+	return singBoxConfigWithMTU(interfaceName, tunAddress, outbound, 1400)
+}
+
+func singBoxConfigWithMTU(interfaceName, tunAddress string, outbound map[string]any, mtu int) map[string]any {
+	if mtu <= 0 {
+		mtu = 1400
+	}
 	outbound["tag"] = "proxy"
 	return map[string]any{
 		"log": map[string]any{"level": "info", "timestamp": true},
 		"inbounds": []any{map[string]any{
 			"type": "tun", "tag": "tun-in", "interface_name": interfaceName,
-			"address": []string{tunAddress}, "mtu": 1400,
+			"address": []string{tunAddress}, "mtu": mtu,
 			"auto_route": false, "stack": "gvisor",
 		}},
 		"outbounds": []any{outbound},

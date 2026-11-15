@@ -2,6 +2,7 @@ package cepcore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -86,6 +87,7 @@ type argon4Endpoint struct {
 	logger      log.ContextLogger
 	device      packetdevice.Device
 	client      *argon4.Client
+	routerIP    net.IP
 	transit     atomic.Bool
 	ready       atomic.Bool
 	readGroup   sync.WaitGroup
@@ -135,6 +137,7 @@ func newArgon4Endpoint(ctx context.Context, _ adapter.Router, logger log.Context
 		PaddingProfile:     options.PaddingProfile,
 		FirstPacketProfile: options.FirstPacketProfile,
 		PathMTU:            options.PathMTU,
+		AutoMTU:            options.PathMTU == 0,
 		Timing:             options.timingConfig(),
 		Profile:            options.profileConfig(),
 	}, outboundDialer)
@@ -217,10 +220,23 @@ func (e *argon4Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
 			e.readGroup.Wait()
 			return err
 		})
+		if e.options.PathMTU == 0 {
+			if pathMTU, derr := e.client.DiscoverPathMTU(scope.Context()); derr == nil && pathMTU > 0 {
+				e.logger.Info("Argon4: оптимальный MTU подобран: path_mtu=", pathMTU, " tun_mtu=", e.client.EffectiveTunMTU())
+			}
+		}
 		response := e.client.Response()
+		e.routerIP = net.ParseIP(response.ServerIP)
+		tunMTU := e.client.EffectiveTunMTU()
+		if tunMTU <= 0 {
+			tunMTU = response.MTU
+		}
+		e.client.SetOnMTUChanged(func(newPathMTU, _ int) {
+			e.logger.Info("Argon4: автоподстройка MTU path_mtu=", newPathMTU, " tun_mtu=", e.client.EffectiveTunMTU())
+		})
 		assignedIP := netip.MustParseAddr(response.AssignedIP)
 		if err := e.device.UpdateConfiguration(packetdevice.Configuration{
-			MTU:       uint32(response.MTU),
+			MTU:       uint32(tunMTU),
 			Addresses: []netip.Prefix{netip.PrefixFrom(assignedIP, response.SubnetCidr)},
 		}); err != nil {
 			return fmt.Errorf("Argon4: настройка виртуального адреса: %w", err)
@@ -229,8 +245,8 @@ func (e *argon4Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
 			return fmt.Errorf("Argon4: запуск packet-device: %w", err)
 		}
 		e.ready.Store(true)
-		e.logger.Info("Argon4: подключено, адрес ", assignedIP, "/", response.SubnetCidr)
-		e.readGroup.Add(2)
+		e.logger.Info("Argon4: подключено, адрес ", assignedIP, "/", response.SubnetCidr, " MTU ", tunMTU)
+		e.readGroup.Add(3)
 		go func() {
 			defer e.readGroup.Done()
 			e.readLoop()
@@ -238,6 +254,10 @@ func (e *argon4Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
 		go func() {
 			defer e.readGroup.Done()
 			e.keepaliveLoop()
+		}()
+		go func() {
+			defer e.readGroup.Done()
+			e.client.RunPLPMTUDMonitor(e.loopContext)
 		}()
 	}
 	return nil
@@ -271,13 +291,34 @@ func (e *argon4Endpoint) keepaliveLoop() {
 	})
 }
 
+func (e *argon4Endpoint) injectFragNeeded(pkt []byte) {
+	if e.device == nil || e.client == nil {
+		return
+	}
+	nextMTU := e.client.EffectiveTunMTU()
+	if nextMTU <= 0 {
+		nextMTU = argon4.MinPathMTU - argon4.OverheadV5
+	}
+	if icmp, ok := argon4.BuildIPv4FragNeededPacket(pkt, e.routerIP, nextMTU); ok {
+		out := buf.NewSize(len(icmp))
+		_, _ = out.Write(icmp)
+		_ = e.device.WriteInboundBuffers([]*buf.Buffer{out})
+		out.Release()
+	}
+}
+
 func (e *argon4Endpoint) writePacketBuffers(packetBuffers []*buf.Buffer) error {
 	defer buf.ReleaseMulti(packetBuffers)
 	if !e.ready.Load() {
 		return E.New("Argon4: endpoint ещё не готов")
 	}
 	for _, packetBuffer := range packetBuffers {
-		if err := e.client.WritePacket(packetBuffer.Bytes()); err != nil {
+		pkt := packetBuffer.Bytes()
+		if err := e.client.WritePacket(pkt); err != nil {
+			if errors.Is(err, argon4.ErrMTUExceeded) {
+				e.injectFragNeeded(pkt)
+				continue
+			}
 			return err
 		}
 	}
@@ -291,6 +332,10 @@ func (e *argon4Endpoint) WritePackets(packets [][]byte) error {
 	}
 	for _, packet := range packets {
 		if err := e.client.WritePacket(packet); err != nil {
+			if errors.Is(err, argon4.ErrMTUExceeded) {
+				e.injectFragNeeded(packet)
+				continue
+			}
 			return err
 		}
 	}

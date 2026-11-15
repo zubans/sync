@@ -367,6 +367,15 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 		if string(plaintext) == KeepaliveFeedbackPayload {
 			return nil
 		}
+		if kind, val, ok := ParseKeepalivePMTUCommand(plaintext); ok {
+			switch kind {
+			case "probe":
+				return s.buildPMTUProbeAck(sess, psk, val)
+			case "limit":
+				sess.SetRuntimeMaxOuter(val)
+				return nil
+			}
+		}
 		wirePong, err := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), []byte(KeepalivePongPayload), sess.sealOptions(s.maxOuterUDP))
 		if err == nil {
 			return wirePong
@@ -402,7 +411,20 @@ func (s *Server) HandlePacket(pkt []byte, remoteAddr *net.UDPAddr) []byte {
 func (s *Server) deliverInboundPacket(sess *PeerSession, plaintext []byte, remoteAddr *net.UDPAddr) {
 	if sess.Mode == ModeTransit {
 		if sess.TargetConn != nil && len(plaintext) > 0 {
-			_, _ = sess.TargetConn.Write(plaintext)
+			if _, err := sess.TargetConn.Write(plaintext); err != nil && isMsgSizeError(err) {
+				kMTU, _ := queryKernelConnMTU(sess.TargetConn)
+				innerCap := len(plaintext) - pmtuFallbackStep
+				if kMTU >= MinPathMTU && (kMTU-IPv4UDPOverhead) < innerCap {
+					innerCap = kMTU - IPv4UDPOverhead
+				}
+				overhead := OverheadV5
+				if sess.ProtocolVersion == ProtocolVersionV4 {
+					overhead = OverheadV4
+				}
+				if newMax := sess.SetRuntimeMaxOuter(innerCap + overhead); newMax > 0 {
+					s.sendPMTULimit(sess, newMax)
+				}
+			}
 		}
 		return
 	}
@@ -630,10 +652,7 @@ func (s *Server) attachSessionShaper(sess *PeerSession) {
 		return
 	}
 	psk := s.sessions.PSK()
-	maxOuter := sess.MaxOuterBytes
-	if maxOuter <= 0 {
-		maxOuter = s.maxOuterUDP
-	}
+	maxOuter := sess.EffectiveMaxOuter(s.maxOuterUDP)
 	shaper := NewTrafficShaper(ShaperOptions{
 		Profile:          sess.Profile,
 		Salt:             sess.Salt[:],
@@ -646,6 +665,13 @@ func (s *Server) attachSessionShaper(sess *PeerSession) {
 		KeepaliveEnabled: false,
 		WriteWire: func(wire []byte) error {
 			return s.sendWire(wire, sess.RemoteAddr())
+		},
+		OnMsgSize: func(wireLen int, _ error) int {
+			newMax := sess.DownshiftMaxOuter(wireLen, 0)
+			if newMax > 0 {
+				s.sendPMTULimit(sess, newMax)
+			}
+			return newMax
 		},
 	})
 	sess.Shaper = shaper
@@ -684,15 +710,16 @@ func (s *Server) handleHandshake(pkt, psk, salt []byte, headerVersion byte, remo
 
 	respMTU := EffectiveProfileTunMTU(s.cfg.MTU, sessionPad.PathMTU, headerVersion, sessionProfile)
 	resp := HandshakeResponse{
-		AssignedIP: peer.AssignedIP.String(),
-		ServerIP:   s.sessions.ServerIP().String(),
-		SubnetCidr: s.sessions.SubnetPrefixLen(),
-		MTU:        respMTU,
-		DNS:        s.cfg.DNS,
-		Routes:     s.cfg.Routes,
-		ServerTime: now.Unix(),
-		ServerPub:  hex.EncodeToString(srvPub),
-		Mode:       ModeTunnel,
+		AssignedIP:       peer.AssignedIP.String(),
+		ServerIP:         s.sessions.ServerIP().String(),
+		SubnetCidr:       s.sessions.SubnetPrefixLen(),
+		MTU:              respMTU,
+		EffectivePathMTU: PathMTUFromMaxOuter(peer.EffectiveMaxOuter(s.maxOuterUDP)),
+		DNS:              s.cfg.DNS,
+		Routes:           s.cfg.Routes,
+		ServerTime:       now.Unix(),
+		ServerPub:        hex.EncodeToString(srvPub),
+		Mode:             ModeTunnel,
 	}
 	applyProtocolResponseFields(&resp, headerVersion, sessionPad, sessionProfile)
 	respBytes, _ := json.Marshal(resp)
@@ -728,9 +755,74 @@ func (s *Server) SealTunPacket(ipPkt []byte) ([]byte, *net.UDPAddr) {
 	return wirePkt, sess.RemoteAddr()
 }
 
+func (s *Server) buildPMTUProbeAck(sess *PeerSession, psk []byte, requestedOuter int) []byte {
+	limit := sess.EffectiveMaxOuter(s.maxOuterUDP)
+	targetOuter := requestedOuter
+	if limit > 0 && targetOuter > limit {
+		targetOuter = limit
+	}
+	opts := sess.sealOptions(limit)
+	ackPayload := []byte(fmt.Sprintf("%s%d", KeepalivePMTUAckPrefix, targetOuter))
+	if sess.ProtocolVersion == ProtocolVersionV5 {
+		minOuter := OverheadV5 + len(ackPayload)
+		if targetOuter < minOuter {
+			targetOuter = minOuter
+			ackPayload = []byte(fmt.Sprintf("%s%d", KeepalivePMTUAckPrefix, targetOuter))
+		}
+		if padLen, err := ExactPadLenForOuter(len(ackPayload), targetOuter, ProtocolVersionV5); err == nil {
+			opts.UseFixedPad = true
+			opts.FixedPadding = padLen
+			opts.MaxOuterBytes = targetOuter
+		}
+	} else {
+		minOuter := OverheadV4 + len(ackPayload)
+		if targetOuter < minOuter {
+			targetOuter = minOuter
+			ackPayload = []byte(fmt.Sprintf("%s%d", KeepalivePMTUAckPrefix, targetOuter))
+		}
+		if padLen := targetOuter - OverheadV4 - len(ackPayload); padLen > 0 {
+			ackPayload = append(ackPayload, bytes.Repeat([]byte(" "), padLen)...)
+		}
+		opts.MaxOuterBytes = targetOuter
+	}
+	wireAck, err := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), ackPayload, opts)
+	if err != nil {
+		return nil
+	}
+	return wireAck
+}
+
+func (s *Server) sendPMTULimit(sess *PeerSession, newMaxOuter int) {
+	if s == nil || sess == nil || s.sessions == nil || newMaxOuter <= 0 {
+		return
+	}
+	addr := sess.RemoteAddr()
+	if addr == nil {
+		return
+	}
+	psk := s.sessions.PSK()
+	opts := sess.sealOptions(newMaxOuter)
+	opts.Padding.MinPad = 0
+	opts.Padding.SmallMinPad = 0
+	opts.UseFixedPad = sess.ProtocolVersion == ProtocolVersionV5
+	opts.FixedPadding = 0
+	payload := []byte(fmt.Sprintf("%s%d", KeepalivePMTULimitPrefix, newMaxOuter))
+	wire, err := SealPacketWithOptions(FrameTypeKeepalive, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), payload, opts)
+	if err != nil {
+		return
+	}
+	_ = s.sendWire(wire, addr)
+}
+
 func (s *Server) handleUDPPacket(pkt []byte, remoteAddr *net.UDPAddr) {
 	if resp := s.HandlePacket(pkt, remoteAddr); resp != nil && s.udpConn != nil {
-		_, _ = s.udpConn.WriteToUDP(resp, remoteAddr)
+		if _, err := s.udpConn.WriteToUDP(resp, remoteAddr); err != nil && isMsgSizeError(err) && len(resp) >= SaltSize && s.sessions != nil {
+			if sess := s.sessions.LookupBySalt(resp[:SaltSize]); sess != nil {
+				if newMax := sess.DownshiftMaxOuter(len(resp), 0); newMax > 0 {
+					s.sendPMTULimit(sess, newMax)
+				}
+			}
+		}
 	}
 }
 
@@ -749,7 +841,11 @@ func (s *Server) DispatchTunPacket(ipPkt []byte) {
 		return
 	}
 	if wirePkt, addr := s.SealTunPacket(ipPkt); wirePkt != nil && addr != nil {
-		_ = s.sendWire(wirePkt, addr)
+		if err := s.sendWire(wirePkt, addr); err != nil && isMsgSizeError(err) {
+			if newMax := sess.DownshiftMaxOuter(len(wirePkt), 0); newMax > 0 {
+				s.sendPMTULimit(sess, newMax)
+			}
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package cepcore
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 )
@@ -396,5 +397,113 @@ func TestBehaviorProfilePlanValidationAndPropagation(t *testing.T) {
 	ep := cfg["endpoints"].([]any)[0].(map[string]any)
 	if ep["behavior_profile"] != "video-call" || ep["low_power_mode"] != true {
 		t.Fatalf("поведенческий профиль не попал в endpoint конфиг: %v", ep)
+	}
+}
+
+func TestIntermediateTransitNestedPathMTUAndBlindToAuth(t *testing.T) {
+	// 1. Blind -> Auth Transit (UDP) -> Argon4 (v5): Validate разрешает, внутренний path_mtu урезается
+	planJSON := mustJSON(Plan{
+		ChainName: "blind-auth-argon",
+		Hops: []Profile{
+			{ID: "b1", Name: "Blind", Proto: "transit", Server: "1.1.1.1:51820"},
+			{ID: "t1", Name: "AuthRelay", Proto: "transit", Server: "2.2.2.2:51820", Password: "p1", ArgonProtocolVersion: 5, ArgonPathMTU: 1350},
+			{ID: "a1", Name: "Exit", Proto: "argon4", Server: "3.3.3.3:51820", Password: "p2", ArgonProtocolVersion: 5, ArgonPathMTU: 1350},
+		},
+		DNS: []string{"1.1.1.1"},
+	})
+	if res := Validate(planJSON); res != "[]" {
+		t.Fatalf("ожидалась валидная цепочка Blind -> Auth Transit -> Argon4, получено %s", res)
+	}
+	plan, err := parsePlan(planJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := buildConfig(plan, []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eps := cfg["endpoints"].([]any)
+	if len(eps) != 2 {
+		t.Fatalf("ожидалось 2 argon4 endpoint-а (blind пропускается через rewrite), получено %d", len(eps))
+	}
+	transitEp := eps[0].(map[string]any)
+	exitEp := eps[1].(map[string]any)
+	if transitEp["server"] != "1.1.1.1:51820" || transitEp["target"] != "3.3.3.3:51820" {
+		t.Fatalf("Auth Transit после Blind должен стучаться на адрес слепого ретранслятора: %v", transitEp)
+	}
+	if gotMTU, ok := exitEp["path_mtu"].(int); !ok || gotMTU != 1286 {
+		t.Fatalf("ожидался урезанный path_mtu=1286 для вложенного Argon4 поверх UDP-транзита, получено %v (%T)", exitEp["path_mtu"], exitEp["path_mtu"])
+	}
+
+	// 2. Двойной слепой транзит -> Argon4 тоже допустим
+	doubleBlind := mustJSON(Plan{
+		ChainName: "double-blind",
+		Hops: []Profile{
+			{ID: "b1", Name: "Blind1", Proto: "transit", Server: "1.1.1.1:51820"},
+			{ID: "b2", Name: "Blind2", Proto: "transit", Server: "2.2.2.2:51820"},
+			{ID: "a1", Name: "Exit", Proto: "argon4", Server: "3.3.3.3:51820", Password: "p2"},
+		},
+		DNS: []string{"1.1.1.1"},
+	})
+	if res := Validate(doubleBlind); res != "[]" {
+		t.Fatalf("ожидалась валидная цепочка Blind1 -> Blind2 -> Argon4, получено %s", res)
+	}
+}
+
+func TestProbeProfileMTUAndChainBudget(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+
+	chain := Plan{
+		ChainName: "mtu-chain",
+		Hops: []Profile{
+			{ID: "t1", Name: "Transit", Proto: "transit", Server: "10.0.0.1:51820", Password: "p1", ArgonPathMTU: 1350},
+			{ID: "n2", Name: "VLESS", Proto: "vless", URI: "vless://11111111-1111-1111-1111-111111111111@" + ln.Addr().String() + "?type=tcp#exit"},
+		},
+		DNS: []string{"1.1.1.1"},
+	}
+	resJSON := ProbeProfileMTU(mustJSON(chain.Hops[1]), mustJSON(chain))
+	var res map[string]any
+	if err := json.Unmarshal([]byte(resJSON), &res); err != nil {
+		t.Fatalf("ProbeProfileMTU JSON: %v (%s)", err, resJSON)
+	}
+	if ok, _ := res["ok"].(bool); !ok {
+		t.Fatalf("ожидался успешный подбор MTU: %s", resJSON)
+	}
+	if b, _ := res["preceding_budget"].(float64); int(b) != 1286 {
+		t.Fatalf("ожидался preceding_budget=1286, получено %v", res)
+	}
+	if opt, _ := res["optimal_path_mtu"].(float64); int(opt) <= 0 || int(opt) > 1286 {
+		t.Fatalf("optimal_path_mtu вышел за бюджет транзита: %v", res)
+	}
+
+	// Слепой транзит с заданным ArgonPathMTU также передаёт бюджет следующему узлу и влуп-конфиг TUN.
+	plan := &Plan{
+		ChainName: "blind-tun",
+		Hops: []Profile{
+			{ID: "b1", Name: "Blind", Proto: "transit", Server: "1.2.3.4:51820", ArgonPathMTU: 1300},
+			{ID: "e1", Name: "Exit", Proto: "argon4", Server: "5.6.7.8:51820", Password: "p2"},
+		},
+		DNS: []string{"1.1.1.1"},
+	}
+	cfg, err := buildConfig(plan, []string{"1.2.3.4", "5.6.7.8"})
+	if err != nil {
+		t.Fatalf("buildConfig: %v", err)
+	}
+	inb := cfg["inbounds"].([]any)[0].(map[string]any)
+	if mtuVal, _ := inb["mtu"].(int); mtuVal >= tunMTU {
+		t.Fatalf("ожидалось автоматическое сужение TUN MTU ниже %d при суженном транзите, получено %v", tunMTU, mtuVal)
 	}
 }

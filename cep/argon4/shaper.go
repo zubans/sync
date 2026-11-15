@@ -55,6 +55,7 @@ type ShaperOptions struct {
 	KeepaliveEnabled bool
 	IsServer         bool
 	OnFatalError     func(error)
+	OnMsgSize        func(wireLen int, err error) int
 }
 
 // TrafficShaper управляет очередью отправки Argon4 v5 для заданного поведенческого профиля.
@@ -70,6 +71,7 @@ type TrafficShaper struct {
 	psk             []byte
 	key             []byte
 	maxOuter        int
+	atomicMaxOuter  atomic.Int64
 
 	mu          sync.Mutex
 	closed      bool
@@ -165,7 +167,7 @@ func NewTrafficShaper(opts ShaperOptions) *TrafficShaper {
 		nextKf = now.Add(RandomDurationBetween(prof.KeyframeMinInterval, prof.KeyframeMaxInterval, randFn))
 	}
 
-	return &TrafficShaper{
+	sh := &TrafficShaper{
 		opts:            opts,
 		profile:         prof,
 		downgradeTarget: downgradeTarget,
@@ -185,6 +187,30 @@ func NewTrafficShaper(opts ShaperOptions) *TrafficShaper {
 		stopCh:          make(chan struct{}),
 		doneCh:          make(chan struct{}),
 	}
+	sh.atomicMaxOuter.Store(int64(maxOuter))
+	return sh
+}
+
+// SetMaxOuterBytes динамически уменьшает/обновляет допустимый размер внешнего кадра шейпера во время работы.
+func (s *TrafficShaper) SetMaxOuterBytes(maxOuter int) {
+	if s == nil || maxOuter <= 0 {
+		return
+	}
+	floor := MinPathMTU - IPv4UDPOverhead
+	if maxOuter < floor {
+		maxOuter = floor
+	}
+	s.atomicMaxOuter.Store(int64(maxOuter))
+}
+
+func (s *TrafficShaper) effectiveMaxOuter() int {
+	if s == nil {
+		return 0
+	}
+	if v := int(s.atomicMaxOuter.Load()); v > 0 {
+		return v
+	}
+	return s.maxOuter
 }
 
 // Start запускает рабочий цикл планировщика. Повторный вызов безопасен.
@@ -521,8 +547,9 @@ func (s *TrafficShaper) popRealLocked(now time.Time) *sendItem {
 	head := s.realQueue[0]
 	if s.profile.CoalesceEnabled && len(s.realQueue) >= 2 && len(head.payload) <= s.profile.CoalesceThreshold {
 		maxOuter := s.profile.TargetMaxOuter
-		if s.maxOuter > 0 && (maxOuter == 0 || s.maxOuter < maxOuter) {
-			maxOuter = s.maxOuter
+		effMax := s.effectiveMaxOuter()
+		if effMax > 0 && (maxOuter == 0 || effMax < maxOuter) {
+			maxOuter = effMax
 		}
 		maxBatchRaw := s.profile.CoalesceMaxBytes
 		if avail := maxOuter - OverheadV5 - 12; avail > 0 && avail < maxBatchRaw {
@@ -717,17 +744,27 @@ func (s *TrafficShaper) emitItem(item *sendItem, prof SessionProfile) error {
 	if ver == 0 {
 		ver = ProtocolVersionV5
 	}
+	effMax := s.effectiveMaxOuter()
 	seq := s.opts.NextSeq()
 	wire, err := SealPacketWithOptions(item.frameType, s.salt, s.psk, s.key, seq, item.payload, SealOptions{
 		Version:       ver,
 		Padding:       prof.Padding,
 		SamplePad:     prof.SamplePaddingLen,
-		MaxOuterBytes: s.maxOuter,
+		MaxOuterBytes: effMax,
 	})
 	if err != nil {
+		if errors.Is(err, ErrMTUExceeded) {
+			return nil
+		}
 		return err
 	}
 	if err := s.opts.WriteWire(wire); err != nil {
+		if isMsgSizeError(err) && s.opts.OnMsgSize != nil {
+			if shrunk := s.opts.OnMsgSize(len(wire), err); shrunk > 0 {
+				s.SetMaxOuterBytes(shrunk)
+			}
+			return nil
+		}
 		return err
 	}
 	switch item.frameType {

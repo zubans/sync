@@ -230,7 +230,7 @@ public enum ChainValidation {
                             throw ConfigError("Слепой транзитный шлюз не поддерживает поведенческие профили Argon4")
                         }
                         let next = plan.hops[index + 1]
-                        if next.proto != .argon4 && !next.useArgon {
+                        if next.proto != .argon4 && !next.useArgon && next.proto != .transit {
                             throw ConfigError("Для транзитного шлюза без пароля следующий узел должен использовать Argon4")
                         }
                     } else if hop.argonBehaviorProfile == "video-call" {

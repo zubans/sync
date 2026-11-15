@@ -2,9 +2,11 @@ package cepcore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"contactsync/cep-engine/argon4"
@@ -33,6 +35,7 @@ func (e *argon4Endpoint) transitConfig(target, proto string) argon4.ClientConfig
 		PaddingProfile:     e.options.PaddingProfile,
 		FirstPacketProfile: e.options.FirstPacketProfile,
 		PathMTU:            e.options.PathMTU,
+		AutoMTU:            e.options.PathMTU == 0,
 		Timing:             e.options.timingConfig(),
 		Profile:            e.options.profileConfig(),
 	}
@@ -76,7 +79,8 @@ func (e *argon4Endpoint) listenTransitPacket(ctx context.Context, destination M.
 }
 
 func (e *argon4Endpoint) connectTransitUDP(ctx context.Context, target string, destination M.Socksaddr) (*argon4.Client, *net.UDPAddr, func(), error) {
-	client, err := argon4.NewClient(e.transitConfig(target, argon4.ProtoUDP), e.dialer)
+	cfg := e.transitConfig(target, argon4.ProtoUDP)
+	client, err := argon4.NewClient(cfg, e.dialer)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -84,9 +88,17 @@ func (e *argon4Endpoint) connectTransitUDP(ctx context.Context, target string, d
 		_ = client.Close()
 		return nil, nil, nil, err
 	}
+	if cfg.AutoMTU {
+		if pathMTU, derr := client.DiscoverPathMTU(ctx); derr == nil && pathMTU > 0 {
+			e.logger.Info("Argon4 транзит: автоподбор MTU path_mtu=", pathMTU, " inner_max=", client.MaxInnerPayload())
+		}
+	}
+	client.SetOnMTUChanged(func(newPathMTU, newMaxInner int) {
+		e.logger.Info("Argon4 транзит: автоподстройка MTU path_mtu=", newPathMTU, " inner_max=", newMaxInner)
+	})
 	keepCtx, cancelKeepalive := context.WithCancel(e.loopContext)
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		client.RunKeepalive(keepCtx, func(err error) {
@@ -94,6 +106,10 @@ func (e *argon4Endpoint) connectTransitUDP(ctx context.Context, target string, d
 				e.logger.Debug("Argon4 транзит keepalive остановлен: ", err)
 			}
 		})
+	}()
+	go func() {
+		defer wg.Done()
+		client.RunPLPMTUDMonitor(keepCtx)
 	}()
 	stopKeepalive := func() {
 		cancelKeepalive()
@@ -117,6 +133,7 @@ type argonTransitUDPConn struct {
 	client        *argon4.Client
 	remoteAddr    *net.UDPAddr
 	stopKeepalive func()
+	lastMTULogNs  atomic.Int64
 	closeOnce     sync.Once
 }
 
@@ -143,6 +160,11 @@ func (c *argonTransitUDPConn) ReadFrom(p []byte) (int, net.Addr, error) {
 
 func (c *argonTransitUDPConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	if err := c.client.WritePacket(p); err != nil {
+		if errors.Is(err, argon4.ErrMTUExceeded) {
+			// Отбрасываем одиночную дейтаграмму сверх адаптированного MTU транзита,
+			// не обрывая сессию, чтобы верхний протокол (QUIC/WG) снизил размер кадра.
+			return len(p), nil
+		}
 		return 0, err
 	}
 	return len(p), nil

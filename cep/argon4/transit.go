@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -366,15 +367,44 @@ func (c *TransitStreamConn) SetWriteDeadline(t time.Time) error { return c.raw.S
 
 // TransitProxy запускает локальный 127.0.0.1 TCP/UDP ретранслятор поверх Argon4-транзита.
 type TransitProxy struct {
-	config    ClientConfig
-	response  HandshakeResponse
-	tcpLn     net.Listener
-	udpLn     *net.UDPConn
-	udpClient *Client
-	port      int
-	listen    string
-	done      chan struct{}
-	closeOnce sync.Once
+	config      ClientConfig
+	response    HandshakeResponse
+	tcpLn       net.Listener
+	udpLn       *net.UDPConn
+	udpClient   *Client
+	port        int
+	listen      string
+	pathMTU     atomic.Int64
+	maxInnerUDP atomic.Int64
+	done        chan struct{}
+	closeOnce   sync.Once
+}
+
+func (p *TransitProxy) initMTU() {
+	pathMTU := p.response.EffectivePathMTU
+	if pathMTU <= 0 {
+		pathMTU = p.config.PathMTU
+	}
+	if p.udpClient != nil {
+		if live := p.udpClient.PathMTU(); live > 0 {
+			pathMTU = live
+		}
+		if inner := p.udpClient.MaxInnerPayload(); inner > 0 {
+			p.maxInnerUDP.Store(int64(inner))
+		}
+		p.udpClient.SetOnMTUChanged(func(newPathMTU, newMaxInner int) {
+			p.pathMTU.Store(int64(newPathMTU))
+			p.maxInnerUDP.Store(int64(newMaxInner))
+			log.Printf("[argon4-transit] автоподстройка MTU транзита: path_mtu=%d inner_max=%d", newPathMTU, newMaxInner)
+		})
+	}
+	if pathMTU <= 0 {
+		pathMTU = DefaultPathMTU
+	}
+	p.pathMTU.Store(int64(ClampPathMTUValue(pathMTU)))
+	if p.maxInnerUDP.Load() <= 0 {
+		p.maxInnerUDP.Store(int64(MaxInnerPayloadForOuter(pathMTU-IPv4UDPOverhead, byte(p.response.ProtocolVersion))))
+	}
 }
 
 // ConnectAuto выполняет UDP-рукопожатие и определяет режим сервера ("tunnel" или "transit").
@@ -383,6 +413,9 @@ func ConnectAuto(ctx context.Context, config ClientConfig, listenAddr string) (*
 	probeCfg := config
 	if probeCfg.Mode == "" {
 		probeCfg.Mode = ModeAuto
+	}
+	if probeCfg.PathMTU == 0 {
+		probeCfg.AutoMTU = true
 	}
 	timingCfg, err := NormalizeTimingConfig(probeCfg.Timing)
 	if err != nil {
@@ -399,12 +432,18 @@ func ConnectAuto(ctx context.Context, config ClientConfig, listenAddr string) (*
 		return nil, nil, err
 	}
 	if !client.IsTransit() {
+		if probeCfg.AutoMTU {
+			_, _ = client.DiscoverPathMTU(hsCtx)
+		}
 		return nil, client, nil
 	}
 
 	resp := client.Response()
 	proxyCfg := config
 	proxyCfg.Mode = ModeTransit
+	if proxyCfg.PathMTU == 0 {
+		proxyCfg.AutoMTU = true
+	}
 	if resp.Target != "" {
 		proxyCfg.Target = resp.Target
 	}
@@ -415,6 +454,9 @@ func ConnectAuto(ctx context.Context, config ClientConfig, listenAddr string) (*
 		return nil, nil, fmt.Errorf("%w: поведенческий профиль %q поддерживается в L4-транзите только при proto=udp", ErrProfileUnsupported, ProfileVideoCall)
 	}
 	if proto == ProtoUDP {
+		if proxyCfg.AutoMTU {
+			_, _ = client.DiscoverPathMTU(hsCtx)
+		}
 		proxy, err := startTransitProxyWithUDP(ctx, proxyCfg, resp, listenAddr, client, false)
 		if err != nil {
 			_ = client.Close()
@@ -445,12 +487,18 @@ func StartTransitProxy(ctx context.Context, config ClientConfig, listenAddr stri
 	case ProtoUDP:
 		udpCfg := config
 		udpCfg.Proto = ProtoUDP
+		if udpCfg.PathMTU == 0 {
+			udpCfg.AutoMTU = true
+		}
 		client, err := NewClient(udpCfg)
 		if err != nil {
 			return nil, err
 		}
 		if err := client.Connect(hsCtx); err != nil {
 			return nil, err
+		}
+		if udpCfg.AutoMTU {
+			_, _ = client.DiscoverPathMTU(hsCtx)
 		}
 		proxy, err := startTransitProxyWithUDP(ctx, udpCfg, client.Response(), listenAddr, client, false)
 		if err != nil {
@@ -481,12 +529,18 @@ func StartTransitProxy(ctx context.Context, config ClientConfig, listenAddr stri
 		// Универсальный режим ("" — и TCP, и UDP на одном локальном порту): проверяем оба.
 		udpCfg := config
 		udpCfg.Proto = ProtoUDP
+		if udpCfg.PathMTU == 0 {
+			udpCfg.AutoMTU = true
+		}
 		client, err := NewClient(udpCfg)
 		if err != nil {
 			return nil, err
 		}
 		if err := client.Connect(hsCtx); err != nil {
 			return nil, err
+		}
+		if udpCfg.AutoMTU {
+			_, _ = client.DiscoverPathMTU(hsCtx)
 		}
 		resp := client.Response()
 		if resp.Target != "" {
@@ -527,6 +581,7 @@ func startTransitProxyWithUDP(ctx context.Context, config ClientConfig, resp Han
 		listen:    udpLn.LocalAddr().String(),
 		done:      make(chan struct{}),
 	}
+	p.initMTU()
 	go p.runUDPRelay()
 	go func() {
 		select {
@@ -566,6 +621,7 @@ func startTCPProxy(ctx context.Context, config ClientConfig, resp HandshakeRespo
 		listen:    ln.Addr().String(),
 		done:      make(chan struct{}),
 	}
+	p.initMTU()
 	if udpLn != nil {
 		go p.runUDPRelay()
 	}
@@ -583,7 +639,27 @@ func startTCPProxy(ctx context.Context, config ClientConfig, resp HandshakeRespo
 func (p *TransitProxy) ListenAddr() string          { return p.listen }
 func (p *TransitProxy) Port() int                   { return p.port }
 func (p *TransitProxy) Target() string              { return p.response.Target }
-func (p *TransitProxy) MTU() int                    { return p.response.MTU }
+func (p *TransitProxy) PathMTU() int {
+	if v := int(p.pathMTU.Load()); v > 0 {
+		return v
+	}
+	return DefaultPathMTU
+}
+func (p *TransitProxy) InnerUDPMTU() int {
+	if v := int(p.maxInnerUDP.Load()); v > 0 {
+		return v
+	}
+	return p.response.MTU
+}
+func (p *TransitProxy) MTU() int {
+	if v := int(p.maxInnerUDP.Load()); v > 0 && (p.response.MTU <= 0 || v < p.response.MTU) {
+		return v
+	}
+	if p.response.MTU > 0 {
+		return p.response.MTU
+	}
+	return int(p.pathMTU.Load())
+}
 func (p *TransitProxy) Response() HandshakeResponse { return p.response }
 func (p *TransitProxy) Done() <-chan struct{}       { return p.done }
 
@@ -736,12 +812,24 @@ func (p *TransitProxy) runUDPRelay() {
 		<-readerDone
 	}()
 
-	// Keepalive только после фактического простоя исходящего канала с jitter.
+	// Keepalive только после фактического простоя исходящего канала с jitter,
+	// а также фоновый PLPMTUD-монитор для автоподстройки MTU транзита при изменении канала.
+	var relayWG sync.WaitGroup
+	relayWG.Add(2)
 	go func() {
-		defer close(kaDone)
+		defer relayWG.Done()
 		p.udpClient.RunKeepalive(kaCtx, nil)
 	}()
+	go func() {
+		defer relayWG.Done()
+		p.udpClient.RunPLPMTUDMonitor(kaCtx)
+	}()
+	go func() {
+		relayWG.Wait()
+		close(kaDone)
+	}()
 
+	var lastMTULog time.Time
 	buf := make([]byte, 65535)
 	for {
 		n, peerAddr, err := p.udpLn.ReadFromUDP(buf)
@@ -754,6 +842,13 @@ func (p *TransitProxy) runUDPRelay() {
 			lastPeer.Store(&clone)
 		}
 		if err := p.udpClient.WritePacket(buf[:n]); err != nil {
+			if errors.Is(err, ErrMTUExceeded) || isMsgSizeError(err) {
+				if time.Since(lastMTULog) >= 5*time.Second {
+					lastMTULog = time.Now()
+					log.Printf("[argon4-transit] пакет %d байт превышает текущий предел inner_max=%d (path_mtu=%d)", n, p.InnerUDPMTU(), p.PathMTU())
+				}
+				continue
+			}
 			return
 		}
 	}

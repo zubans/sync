@@ -85,6 +85,8 @@ func main() {
 	dropResponses := flag.Int("drop-responses", 0, "число первых ответов, которые нужно потерять")
 	echoData := flag.Bool("echo-data", false, "возвращать data-кадры с переставленными IPv4-адресами")
 	mode := flag.String("mode", "tunnel", "режим сервера: tunnel, transit, auto")
+	transitBlind := flag.Bool("transit-blind", false, "режим слепого транзита без пароля")
+	transitTarget := flag.String("transit-target", "", "фиксированная цель для слепого транзита host:port")
 	transitAllow := flag.String("transit-allow", "", "CIDR/host:port через запятую для L4-транзита")
 	protoVersion := flag.Int("protocol-version", int(tunnel.ProtocolVersionV5), "версия протокола Argon4 (4 или 5)")
 	allowV4 := flag.Bool("allow-v4", true, "разрешать приём legacy v4")
@@ -95,8 +97,8 @@ func main() {
 	sessionIdle := flag.Duration("session-idle-timeout", tunnel.SessionIdleTimeout, "таймаут неактивности сессии сервера")
 	wireLog := flag.String("wire-log", "", "файл для записи длин (in/out) зашифрованных UDP-кадров")
 	flag.Parse()
-	if *password == "" || *addrFile == "" {
-		log.Fatal("flags -password and -addr-file are required")
+	if (!*transitBlind && *password == "") || *addrFile == "" {
+		log.Fatal("flags -password (unless -transit-blind) and -addr-file are required")
 	}
 
 	var allowList []string
@@ -128,6 +130,20 @@ func main() {
 		tunDevice = echo
 		defer echo.Close()
 	}
+	var writeUDP func([]byte, *net.UDPAddr) error
+	if *mode != tunnel.ModeTransit {
+		writeUDP = func(wire []byte, dst *net.UDPAddr) error {
+			connMu.Lock()
+			c := sharedConn
+			connMu.Unlock()
+			if c == nil || dst == nil {
+				return net.ErrClosed
+			}
+			logWire("tx", len(wire))
+			_, werr := c.WriteToUDP(wire, dst)
+			return werr
+		}
+	}
 	srv, err := tunnel.NewServer(tunnel.ServerConfig{
 		ListenAddr:      *listen,
 		SubnetCIDR:      "10.44.0.1/24",
@@ -137,6 +153,8 @@ func main() {
 		DNS:             []string{"1.1.1.1"},
 		Routes:          []string{"0.0.0.0/0"},
 		Mode:            *mode,
+		TransitBlind:    *transitBlind,
+		TransitTarget:   *transitTarget,
 		TransitAllow:    allowList,
 		ProtocolVersion: byte(*protoVersion),
 		DisallowV4:      !*allowV4,
@@ -147,17 +165,7 @@ func main() {
 		BehaviorProfile:    *behaviorProfile,
 		DisallowVideoCall:  !*allowVideoCall,
 		SessionIdleTimeout: *sessionIdle,
-		WriteUDP: func(wire []byte, dst *net.UDPAddr) error {
-			connMu.Lock()
-			c := sharedConn
-			connMu.Unlock()
-			if c == nil || dst == nil {
-				return net.ErrClosed
-			}
-			logWire("tx", len(wire))
-			_, werr := c.WriteToUDP(wire, dst)
-			return werr
-		},
+		WriteUDP:           writeUDP,
 	}, tunDevice)
 	if err != nil {
 		log.Fatal(err)

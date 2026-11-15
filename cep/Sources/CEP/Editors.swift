@@ -6,6 +6,9 @@ struct ProfileEditor: View {
     @EnvironmentObject var model: AppModel
     let profileID: UUID
     @State private var importing = false
+    @State private var mtuText = ""
+    @State private var probingMTU = false
+    @State private var probeResult: MTUProbeResult?
 
     private var binding: Binding<Profile> {
         Binding(
@@ -113,6 +116,81 @@ struct ProfileEditor: View {
                 } footer: {
                     Text("Эти адреса пойдут через узел, а не дальше по цепочке и не в локальную сеть. Сети, которые присылает сервер OpenConnect или OpenVPN, добавляются сами. Адрес из своей локальной подсети указывайте отдельно (/32): всю подсеть забрать у локальной сети нельзя.")
                 }
+            }
+            Section("MTU и автоподстройка канала") {
+                TextField("Внешний MTU (пусто — авто)", text: $mtuText, prompt: Text("Авто (576–9000)"))
+                    .onAppear {
+                        mtuText = p.wrappedValue.argonPathMTU.map(String.init) ?? ""
+                        probeResult = nil
+                    }
+                    .onChange(of: profileID) {
+                        mtuText = p.wrappedValue.argonPathMTU.map(String.init) ?? ""
+                        probeResult = nil
+                        probingMTU = false
+                    }
+                    .onChange(of: mtuText) { _, newValue in
+                        let digits = newValue.filter(\.isNumber)
+                        if digits != newValue {
+                            mtuText = digits
+                        }
+                        if digits.isEmpty {
+                            p.wrappedValue.argonPathMTU = nil
+                        } else if let v = Int(digits), (576...9000).contains(v) {
+                            p.wrappedValue.argonPathMTU = v
+                        }
+                    }
+                HStack {
+                    Button {
+                        probingMTU = true
+                        probeResult = nil
+                        let targetID = profileID
+                        Task {
+                            let res = await model.probeMTU(for: targetID)
+                            await MainActor.run {
+                                probingMTU = false
+                                probeResult = res
+                                if res.ok, (576...9000).contains(res.optimalPathMTU) {
+                                    mtuText = String(res.optimalPathMTU)
+                                    if let idx = model.profiles.firstIndex(where: { $0.id == targetID }) {
+                                        model.profiles[idx].argonPathMTU = res.optimalPathMTU
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        if probingMTU {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("Подбор MTU…")
+                            }
+                        } else {
+                            Label("Подобрать MTU", systemImage: "speedometer")
+                        }
+                    }
+                    .disabled(probingMTU)
+                    if p.wrappedValue.argonPathMTU != nil || !mtuText.isEmpty {
+                        Button("Авто") {
+                            mtuText = ""
+                            probeResult = nil
+                            p.wrappedValue.argonPathMTU = nil
+                        }
+                        .disabled(probingMTU)
+                    }
+                }
+                if let res = probeResult {
+                    if res.ok {
+                        Label(res.message, systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else {
+                        Label(res.error ?? "Не удалось подобрать MTU", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Text("Пустое поле включает автоматический подбор оптимального MTU и динамическую подстройку транзитов при изменении канала.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("Проверка") {
                 switch Result(catching: { try Endpoint.of(p.wrappedValue) }) {

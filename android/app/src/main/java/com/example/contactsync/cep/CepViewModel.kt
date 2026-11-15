@@ -5,9 +5,11 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /** Профили, цепочки и подключение CEP. Профили с паролями лежат в закрытом каталоге приложения. */
@@ -83,6 +85,21 @@ class CepViewModel(app: Application) : AndroidViewModel(app) {
     } catch (e: UnsatisfiedLinkError) {
         // движок собран только под arm64 и x86_64
         listOf("Движок CEP не собран для процессора этого устройства")
+    }
+
+    /** Подбирает оптимальный внешний MTU для узла с учётом предыдущих хопов цепочки (если узел уже в цепочке). */
+    suspend fun probeMtu(profile: CepProfile): MtuProbeResult = withContext(Dispatchers.IO) {
+        try {
+            val profileJson = CepLogic.json.encodeToString(CepProfile.serializer(), profile)
+            val chain = _store.value.chains.firstOrNull { profile.id in it.hops }
+            val chainJson = chain?.let { planJson(it) } ?: ""
+            val raw = cepcore.Cepcore.probeProfileMTU(profileJson, chainJson)
+            CepLogic.json.decodeFromString(MtuProbeResult.serializer(), raw)
+        } catch (e: UnsatisfiedLinkError) {
+            MtuProbeResult(ok = false, error = "Движок CEP не собран для процессора этого устройства")
+        } catch (e: Throwable) {
+            MtuProbeResult(ok = false, error = e.message ?: "Ошибка подбора MTU")
+        }
     }
 
     // Перенос с macOS

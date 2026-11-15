@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -51,6 +54,8 @@ type readyStatus struct {
 	Address   string   `json:"address,omitempty"`
 	ServerIP  string   `json:"server_ip,omitempty"`
 	MTU       int      `json:"mtu,omitempty"`
+	PathMTU   int      `json:"path_mtu,omitempty"`
+	InnerMTU  int      `json:"inner_mtu,omitempty"`
 	DNS       []string `json:"dns,omitempty"`
 	Routes    []string `json:"routes,omitempty"`
 }
@@ -103,6 +108,7 @@ func run(configPath string) error {
 		PaddingProfile:     config.PaddingProfile,
 		FirstPacketProfile: config.FirstPacketProfile,
 		PathMTU:            config.PathMTU,
+		AutoMTU:            config.PathMTU == 0,
 		Timing: argon4.TimingConfig{
 			HandshakeMaxAttempts:    config.HandshakeMaxAttempts,
 			HandshakeInitialTimeout: time.Duration(config.HandshakeInitialTimeoutMs) * time.Millisecond,
@@ -140,21 +146,26 @@ func run(configPath string) error {
 			cancelConnect()
 			return err
 		}
+		if clientCfg.AutoMTU {
+			_, _ = client.DiscoverPathMTU(connectContext)
+		}
 		cancelConnect()
 	}
 
 	if proxy != nil {
 		defer proxy.Close()
 		if err := writeReady(config.ReadyFile, readyStatus{
-			Mode:   argon4.ModeTransit,
-			Listen: proxy.ListenAddr(),
-			Port:   proxy.Port(),
-			Target: proxy.Target(),
-			MTU:    proxy.MTU(),
+			Mode:     argon4.ModeTransit,
+			Listen:   proxy.ListenAddr(),
+			Port:     proxy.Port(),
+			Target:   proxy.Target(),
+			MTU:      proxy.MTU(),
+			PathMTU:  proxy.PathMTU(),
+			InnerMTU: proxy.InnerUDPMTU(),
 		}); err != nil {
 			return err
 		}
-		log.Printf("Argon4: L4-транзит слушает %s -> %s", proxy.ListenAddr(), proxy.Target())
+		log.Printf("Argon4: L4-транзит слушает %s -> %s (path_mtu=%d, inner_max=%d)", proxy.ListenAddr(), proxy.Target(), proxy.PathMTU(), proxy.InnerUDPMTU())
 		select {
 		case <-ctx.Done():
 			log.Print("Argon4: остановка транзита")
@@ -168,7 +179,10 @@ func run(configPath string) error {
 
 	defer client.Close()
 	response := client.Response()
-	log.Printf("Argon4: handshake выполнен, адрес %s/%d", response.AssignedIP, response.SubnetCidr)
+	if tunMTU := client.EffectiveTunMTU(); tunMTU > 0 {
+		response.MTU = tunMTU
+	}
+	log.Printf("Argon4: handshake выполнен, адрес %s/%d (path_mtu=%d, tun_mtu=%d)", response.AssignedIP, response.SubnetCidr, client.PathMTU(), response.MTU)
 
 	tunName := config.TunName
 	if tunName == "" {
@@ -192,6 +206,8 @@ func run(configPath string) error {
 		Address:   response.AssignedIP,
 		ServerIP:  response.ServerIP,
 		MTU:       response.MTU,
+		PathMTU:   client.PathMTU(),
+		InnerMTU:  response.MTU,
 		DNS:       response.DNS,
 		Routes:    response.Routes,
 	}); err != nil {
@@ -199,24 +215,30 @@ func run(configPath string) error {
 	}
 	log.Printf("Argon4: %s поднят, MTU %d", interfaceName, response.MTU)
 
-	errors := make(chan error, 2)
-	go func() { errors <- tunToArgon(device, client) }()
-	go func() { errors <- argonToTun(device, client) }()
-	keepaliveDone := make(chan struct{})
+	routerIP := net.ParseIP(response.ServerIP)
+	errCh := make(chan error, 2)
+	go func() { errCh <- tunToArgonWithMTU(device, client, routerIP) }()
+	go func() { errCh <- argonToTun(device, client) }()
+	var bgWG sync.WaitGroup
+	bgWG.Add(2)
 	go func() {
-		defer close(keepaliveDone)
+		defer bgWG.Done()
 		client.RunKeepalive(ctx, func(err error) {
 			if ctx.Err() == nil {
 				log.Printf("Argon4: keepalive остановлен: %v", err)
 			}
 		})
 	}()
+	go func() {
+		defer bgWG.Done()
+		client.RunPLPMTUDMonitor(ctx)
+	}()
 
 	var runErr error
 	select {
 	case <-ctx.Done():
 		log.Print("Argon4: остановка")
-	case runErr = <-errors:
+	case runErr = <-errCh:
 		if runErr != nil && ctx.Err() == nil {
 			runErr = fmt.Errorf("передача пакетов: %w", runErr)
 		}
@@ -224,7 +246,7 @@ func run(configPath string) error {
 	stop()
 	_ = client.Close()
 	_ = device.Close()
-	<-keepaliveDone
+	bgWG.Wait()
 	_ = os.Remove(config.ReadyFile)
 	return runErr
 }
@@ -251,6 +273,13 @@ type packetClient interface {
 }
 
 func tunToArgon(device tun.Device, client packetClient) error {
+	return tunToArgonWithMTU(device, client, nil)
+}
+
+func tunToArgonWithMTU(device tun.Device, client packetClient, routerIP net.IP) error {
+	type mtuProvider interface {
+		EffectiveTunMTU() int
+	}
 	buffer := make([]byte, 65535+tunOffset)
 	for {
 		sizes := []int{0}
@@ -261,7 +290,20 @@ func tunToArgon(device tun.Device, client packetClient) error {
 		if n != 1 || sizes[0] == 0 {
 			continue
 		}
-		if err := client.WritePacket(buffer[tunOffset : tunOffset+sizes[0]]); err != nil {
+		pkt := buffer[tunOffset : tunOffset+sizes[0]]
+		if err := client.WritePacket(pkt); err != nil {
+			if errors.Is(err, argon4.ErrMTUExceeded) {
+				nextMTU := argon4.MinPathMTU - argon4.OverheadV5
+				if mp, ok := client.(mtuProvider); ok && mp.EffectiveTunMTU() > 0 {
+					nextMTU = mp.EffectiveTunMTU()
+				}
+				if icmp, ok := argon4.BuildIPv4FragNeededPacket(pkt, routerIP, nextMTU); ok {
+					out := make([]byte, tunOffset+len(icmp))
+					copy(out[tunOffset:], icmp)
+					_, _ = device.Write([][]byte{out}, tunOffset)
+				}
+				continue
+			}
 			return err
 		}
 	}

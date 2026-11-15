@@ -52,25 +52,27 @@ type HandshakeRequest struct {
 	PaddingProfile  string   `json:"paddingProfile,omitempty"`
 	BehaviorProfile string   `json:"behaviorProfile,omitempty"`
 	ProfileVersion  int      `json:"profileVersion,omitempty"`
+	AutoMTU         bool     `json:"autoMtu,omitempty"`
 }
 
 // HandshakeResponse возвращается сервером зашифрованным внутри кадра FrameTypeHandshakeResp.
 type HandshakeResponse struct {
-	AssignedIP      string   `json:"assignedIp,omitempty"`
-	ServerIP        string   `json:"serverIp,omitempty"`
-	SubnetCidr      int      `json:"subnetCidr,omitempty"`
-	MTU             int      `json:"mtu,omitempty"`
-	DNS             []string `json:"dns,omitempty"`
-	Routes          []string `json:"routes,omitempty"`
-	ServerTime      int64    `json:"serverTime"`
-	ServerPub       string   `json:"serverPub"`
-	Mode            string   `json:"mode,omitempty"`
-	Target          string   `json:"target,omitempty"`
-	ProtocolVersion int      `json:"protocolVersion,omitempty"`
-	Capabilities    []string `json:"capabilities,omitempty"`
-	PaddingProfile  string   `json:"paddingProfile,omitempty"`
-	BehaviorProfile string   `json:"behaviorProfile,omitempty"`
-	ProfileVersion  int      `json:"profileVersion,omitempty"`
+	AssignedIP       string   `json:"assignedIp,omitempty"`
+	ServerIP         string   `json:"serverIp,omitempty"`
+	SubnetCidr       int      `json:"subnetCidr,omitempty"`
+	MTU              int      `json:"mtu,omitempty"`
+	EffectivePathMTU int      `json:"effectivePathMtu,omitempty"`
+	DNS              []string `json:"dns,omitempty"`
+	Routes           []string `json:"routes,omitempty"`
+	ServerTime       int64    `json:"serverTime"`
+	ServerPub        string   `json:"serverPub"`
+	Mode             string   `json:"mode,omitempty"`
+	Target           string   `json:"target,omitempty"`
+	ProtocolVersion  int      `json:"protocolVersion,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	PaddingProfile   string   `json:"paddingProfile,omitempty"`
+	BehaviorProfile  string   `json:"behaviorProfile,omitempty"`
+	ProfileVersion   int      `json:"profileVersion,omitempty"`
 }
 
 // ReplayWindow реализует 64-пакетное скользящее окно защиты от повтора (anti-replay) по принципу RFC 6479 / WireGuard.
@@ -145,12 +147,74 @@ type PeerSession struct {
 	TargetConn      *net.UDPConn
 	Shaper          *TrafficShaper
 
-	stateMu    sync.RWMutex
-	remoteAddr *net.UDPAddr
-	lastSeen   time.Time
-	replay     ReplayWindow
-	s2cSeq     atomic.Uint64
-	closeOnce  sync.Once
+	stateMu         sync.RWMutex
+	remoteAddr      *net.UDPAddr
+	lastSeen        time.Time
+	replay          ReplayWindow
+	s2cSeq          atomic.Uint64
+	runtimeMaxOuter atomic.Int64
+	closeOnce       sync.Once
+}
+
+// EffectiveMaxOuter возвращает действующий внешний лимит UDP-кадра сессии с учётом динамической автоподстройки MTU.
+func (s *PeerSession) EffectiveMaxOuter(defaultMaxOuter int) int {
+	if s == nil {
+		return defaultMaxOuter
+	}
+	base := s.MaxOuterBytes
+	if base <= 0 {
+		base = defaultMaxOuter
+	}
+	if dyn := int(s.runtimeMaxOuter.Load()); dyn > 0 && (base <= 0 || dyn < base) {
+		return dyn
+	}
+	return base
+}
+
+// SetRuntimeMaxOuter ограничивает внешний лимит UDP-кадра сессии сверху до maxOuter (без снижения ниже MinPathMTU-28).
+func (s *PeerSession) SetRuntimeMaxOuter(maxOuter int) int {
+	if s == nil || maxOuter <= 0 {
+		return 0
+	}
+	floor := MinPathMTU - IPv4UDPOverhead
+	if maxOuter < floor {
+		maxOuter = floor
+	}
+	for {
+		cur := int(s.runtimeMaxOuter.Load())
+		if cur > 0 && cur <= maxOuter {
+			return cur
+		}
+		if s.runtimeMaxOuter.CompareAndSwap(int64(cur), int64(maxOuter)) {
+			if s.Shaper != nil {
+				s.Shaper.SetMaxOuterBytes(s.EffectiveMaxOuter(maxOuter))
+			}
+			return maxOuter
+		}
+	}
+}
+
+// DownshiftMaxOuter снижает рабочий внешний лимит UDP-кадра при ошибке EMSGSIZE/переполнении пути.
+func (s *PeerSession) DownshiftMaxOuter(failedWireLen, kernelPathMTU int) int {
+	if s == nil {
+		return 0
+	}
+	cur := s.EffectiveMaxOuter(DefaultMaxOuterUDPSize)
+	candidate := cur - pmtuFallbackStep
+	if failedWireLen > 0 && failedWireLen-pmtuFallbackStep < candidate {
+		candidate = failedWireLen - pmtuFallbackStep
+	}
+	if kernelPathMTU >= MinPathMTU {
+		kOuter := kernelPathMTU - IPv4UDPOverhead
+		if kOuter < candidate || candidate <= 0 {
+			candidate = kOuter
+		}
+	}
+	floor := MinPathMTU - IPv4UDPOverhead
+	if candidate < floor {
+		candidate = floor
+	}
+	return s.SetRuntimeMaxOuter(candidate)
 }
 
 func (s *PeerSession) sealOptions(defaultMaxOuter int) SealOptions {
@@ -158,10 +222,7 @@ func (s *PeerSession) sealOptions(defaultMaxOuter int) SealOptions {
 	if ver == 0 {
 		ver = ProtocolVersionV5
 	}
-	maxOuter := s.MaxOuterBytes
-	if maxOuter <= 0 {
-		maxOuter = defaultMaxOuter
-	}
+	maxOuter := s.EffectiveMaxOuter(defaultMaxOuter)
 	prof := s.Profile
 	if s.Shaper != nil {
 		prof = s.Shaper.EffectiveProfile()

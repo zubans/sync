@@ -9,7 +9,7 @@ public enum JSON {
 /// Конфиг sing-box: TUN без автомаршрутов, весь трафик из него уходит в один outbound.
 /// Маршруты в TUN прокладывает движок — так прокси-узел встаёт в цепочку как обычный интерфейс.
 public enum SingBoxConfig {
-    public static func make(tunAddress: String, outbound: [String: Any]) -> [String: Any] {
+    public static func make(tunAddress: String, outbound: [String: Any], mtu: Int = 1400) -> [String: Any] {
         var out = outbound
         out["tag"] = "proxy"
         return [
@@ -18,7 +18,7 @@ public enum SingBoxConfig {
                 "type": "tun",
                 "tag": "tun-in",
                 "address": [tunAddress],
-                "mtu": 1400,
+                "mtu": mtu,
                 "auto_route": false,
                 "stack": "gvisor",
             ] as [String: Any]],

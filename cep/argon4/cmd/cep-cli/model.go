@@ -166,7 +166,7 @@ func validatePlan(plan *Plan) error {
 					return fmt.Errorf("«%s»: слепой транзитный шлюз не поддерживает поведенческие профили Argon4", hop.Name)
 				}
 				next := plan.Hops[i+1]
-				if next.Proto != "argon4" && !next.UseArgon {
+				if next.Proto != "argon4" && !next.UseArgon && next.Proto != "transit" {
 					return fmt.Errorf("«%s»: для транзитного шлюза без пароля следующий узел должен использовать Argon4", hop.Name)
 				}
 			} else if hop.ArgonBehaviorProfile == "video-call" {

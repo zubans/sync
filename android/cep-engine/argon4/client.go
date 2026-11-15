@@ -35,9 +35,11 @@ type ClientConfig struct {
 	FirstPacketProfile string
 	Padding            *PaddingConfig
 	PathMTU            int
+	AutoMTU            bool
 	Timing             TimingConfig
 	Profile            ProfileConfig
 	Clock              Clock
+	OnMTUChanged       func(pathMTU, innerMTU int)
 }
 
 // Client — клиентская Argon4-сессия с раздельными ключами направлений и anti-replay.
@@ -49,6 +51,8 @@ type Client struct {
 	padding            PaddingConfig
 	firstPacketPadding PaddingConfig
 	maxOuterUDP        int
+	runtimeMaxOuter    atomic.Int64
+	mtuMu              sync.Mutex
 	timing             TimingConfig
 	clock              Clock
 	tracker            *ActivityTracker
@@ -68,6 +72,7 @@ type Client struct {
 	replay      ReplayWindow
 	readMu      sync.Mutex
 	pendingRead [][]byte
+	probeCh     chan int
 	shaperErrMu sync.Mutex
 	shaperErr   error
 	closeOnce   sync.Once
@@ -160,7 +165,7 @@ func NewClient(config ClientConfig, dialer N.Dialer) (*Client, error) {
 	if clk == nil {
 		clk = RealClock{}
 	}
-	return &Client{
+	client := &Client{
 		config:             config,
 		dialer:             dialer,
 		protocolVersion:    ver,
@@ -172,7 +177,10 @@ func NewClient(config ClientConfig, dialer N.Dialer) (*Client, error) {
 		tracker:            NewActivityTracker(clk),
 		reqProfileName:     reqProfName,
 		reqProfileVer:      reqProfVer,
-	}, nil
+		probeCh:            make(chan int, 8),
+	}
+	client.runtimeMaxOuter.Store(int64(maxOuter))
+	return client, nil
 }
 
 // Connect выполняет X25519-handshake. При потере ответа повторяется тот же зашифрованный
@@ -218,6 +226,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		PaddingProfile:  c.padding.Profile,
 		BehaviorProfile: c.reqProfileName,
 		ProfileVersion:  c.reqProfileVer,
+		AutoMTU:         c.config.AutoMTU || c.config.PathMTU == 0,
 	}
 	plaintext, err := json.Marshal(request)
 	if err != nil {
@@ -275,6 +284,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.response = response
 	c.transitMode = effectiveMode == ModeTransit
 	c.profile = sessProf
+	if response.EffectivePathMTU >= MinPathMTU {
+		srvOuter := MaxOuterBytesForPathMTU(response.EffectivePathMTU)
+		if cur := c.EffectiveMaxOuterUDP(); srvOuter < cur {
+			c.setMaxOuter(srvOuter, false)
+		}
+	}
 	if sessProf.IsActive() {
 		shaper := NewTrafficShaper(ShaperOptions{
 			Profile:          sessProf,
@@ -282,13 +297,20 @@ func (c *Client) Connect(ctx context.Context) error {
 			PSK:              c.psk,
 			Key:              c.c2sKey,
 			Version:          c.protocolVersion,
-			MaxOuterBytes:    c.maxOuterUDP,
+			MaxOuterBytes:    c.EffectiveMaxOuterUDP(),
 			NextSeq:          func() uint64 { return c.seq.Add(1) },
 			WriteWire:        func(w []byte) error { _, werr := conn.Write(w); return werr },
 			Clock:            c.clock,
 			Tracker:          c.tracker,
 			KeepaliveEnabled: true,
 			IsServer:         false,
+			OnMsgSize: func(wireLen int, werr error) int {
+				_, adapted := c.AdaptOnMsgSize(wireLen, werr)
+				if adapted {
+					return c.EffectiveMaxOuterUDP()
+				}
+				return c.EffectiveMaxOuterUDP()
+			},
 			OnFatalError: func(ferr error) {
 				c.shaperErrMu.Lock()
 				if c.shaperErr == nil {
@@ -359,9 +381,11 @@ func validateHandshakeResponse(response HandshakeResponse) error {
 }
 
 func (c *Client) Response() HandshakeResponse {
+	c.mtuMu.Lock()
 	response := c.response
-	response.DNS = append([]string(nil), c.response.DNS...)
-	response.Routes = append([]string(nil), c.response.Routes...)
+	c.mtuMu.Unlock()
+	response.DNS = append([]string(nil), response.DNS...)
+	response.Routes = append([]string(nil), response.Routes...)
 	return response
 }
 
@@ -400,6 +424,475 @@ func (c *Client) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
+// EffectiveMaxOuterUDP возвращает актуальный внешний лимит UDP-кадра с учётом автоподстройки MTU.
+func (c *Client) EffectiveMaxOuterUDP() int {
+	if c == nil {
+		return DefaultMaxOuterUDPSize
+	}
+	if v := int(c.runtimeMaxOuter.Load()); v > 0 {
+		return v
+	}
+	if c.maxOuterUDP > 0 {
+		return c.maxOuterUDP
+	}
+	return DefaultMaxOuterUDPSize
+}
+
+// PathMTU возвращает текущий рабочий внешний path MTU клиентской сессии.
+func (c *Client) PathMTU() int {
+	return PathMTUFromMaxOuter(c.EffectiveMaxOuterUDP())
+}
+
+// MaxInnerPayload возвращает максимальный размер полезной нагрузки внутри одного кадра Argon4.
+func (c *Client) MaxInnerPayload() int {
+	return MaxInnerPayloadForOuter(c.EffectiveMaxOuterUDP(), c.protocolVersion)
+}
+
+// EffectiveTunMTU возвращает MTU TUN-интерфейса с учётом актуального path MTU и поведенческого профиля.
+func (c *Client) EffectiveTunMTU() int {
+	c.mtuMu.Lock()
+	mtu := c.response.MTU
+	pad := c.padding
+	c.mtuMu.Unlock()
+	if mtu <= 0 {
+		mtu = 1380
+	}
+	return EffectiveProfileTunMTU(mtu, c.PathMTU(), c.protocolVersion, padToProfile(pad, c.profile))
+}
+
+func padToProfile(pad PaddingConfig, prof SessionProfile) SessionProfile {
+	if !prof.IsActive() {
+		return prof
+	}
+	prof.Padding = pad
+	return prof
+}
+
+func (c *Client) currentPaddingSnapshot() (PaddingConfig, int) {
+	c.mtuMu.Lock()
+	defer c.mtuMu.Unlock()
+	maxOuter := c.EffectiveMaxOuterUDP()
+	pad := c.padding
+	if p := PathMTUFromMaxOuter(maxOuter); p > 0 {
+		pad.PathMTU = p
+	}
+	return pad, maxOuter
+}
+
+func (c *Client) setMaxOuter(maxOuter int, allowGrow bool) int {
+	if c == nil || maxOuter <= 0 {
+		return 0
+	}
+	floor := MinPathMTU - IPv4UDPOverhead
+	ceil := c.maxOuterUDP
+	if ceil <= 0 {
+		ceil = DefaultMaxOuterUDPSize
+	}
+	if maxOuter < floor {
+		maxOuter = floor
+	}
+	if maxOuter > ceil {
+		maxOuter = ceil
+	}
+	for {
+		cur := int(c.runtimeMaxOuter.Load())
+		if !allowGrow && cur > 0 && cur <= maxOuter {
+			return cur
+		}
+		if allowGrow && cur == maxOuter {
+			return cur
+		}
+		if c.runtimeMaxOuter.CompareAndSwap(int64(cur), int64(maxOuter)) {
+			newPathMTU := PathMTUFromMaxOuter(maxOuter)
+			c.mtuMu.Lock()
+			c.padding.PathMTU = newPathMTU
+			if !c.transitMode && c.response.MTU > 0 {
+				c.response.MTU = EffectiveProfileTunMTU(c.response.MTU, newPathMTU, c.protocolVersion, c.profile)
+			}
+			cb := c.config.OnMTUChanged
+			c.mtuMu.Unlock()
+			if c.shaper != nil {
+				c.shaper.SetMaxOuterBytes(maxOuter)
+			}
+			if cb != nil {
+				cb(newPathMTU, MaxInnerPayloadForOuter(maxOuter, c.protocolVersion))
+			}
+			return maxOuter
+		}
+	}
+}
+
+// SetOnMTUChanged задаёт обработчик динамического изменения рабочего MTU клиента.
+func (c *Client) SetOnMTUChanged(fn func(pathMTU, maxInner int)) {
+	if c == nil {
+		return
+	}
+	c.mtuMu.Lock()
+	c.config.OnMTUChanged = fn
+	c.mtuMu.Unlock()
+}
+
+// ClampMaxOuterUDP монотонно ограничивает внешний лимит кадра сверху значением maxOuter.
+func (c *Client) ClampMaxOuterUDP(maxOuter int) int {
+	return c.setMaxOuter(maxOuter, false)
+}
+
+// SetPathMTU обновляет рабочий path MTU клиента (допускается повышение при восстановлении канала в пределах конфига).
+func (c *Client) SetPathMTU(pathMTU int) int {
+	clamped := ClampPathMTUValue(pathMTU)
+	if clamped <= 0 {
+		return c.PathMTU()
+	}
+	return PathMTUFromMaxOuter(c.setMaxOuter(MaxOuterBytesForPathMTU(clamped), true))
+}
+
+// AdaptOnMsgSize снижает рабочий MTU при ошибке EMSGSIZE от сокета и сообщает, был ли лимит уменьшен.
+func (c *Client) AdaptOnMsgSize(failedWireLen int, err error) (int, bool) {
+	if c == nil || !isMsgSizeError(err) {
+		return c.PathMTU(), false
+	}
+	before := c.EffectiveMaxOuterUDP()
+	candidate := before - pmtuFallbackStep
+	if failedWireLen > 0 && failedWireLen-pmtuFallbackStep < candidate {
+		candidate = failedWireLen - pmtuFallbackStep
+	}
+	if kMTU, ok := queryKernelConnMTU(c.conn); ok {
+		kOuter := kMTU - IPv4UDPOverhead
+		if kOuter < candidate || candidate <= 0 {
+			candidate = kOuter
+		}
+	}
+	after := c.setMaxOuter(candidate, false)
+	return PathMTUFromMaxOuter(after), after < before
+}
+
+func (c *Client) buildPMTUProbePacket(targetOuter int) ([]byte, int, error) {
+	minOuter := OverheadV5 + 16
+	if c.protocolVersion == ProtocolVersionV4 {
+		minOuter = OverheadV4 + 16
+	}
+	maxOuter := c.EffectiveMaxOuterUDP()
+	if c.maxOuterUDP > maxOuter {
+		maxOuter = c.maxOuterUDP
+	}
+	if targetOuter < minOuter {
+		targetOuter = minOuter
+	}
+	if maxOuter > 0 && targetOuter > maxOuter {
+		targetOuter = maxOuter
+	}
+	payload := []byte(fmt.Sprintf("%s%d", KeepalivePMTUProbePrefix, targetOuter))
+	opts := SealOptions{
+		Version:       c.protocolVersion,
+		MaxOuterBytes: targetOuter,
+	}
+	if c.protocolVersion == ProtocolVersionV5 {
+		padLen, err := ExactPadLenForOuter(len(payload), targetOuter, ProtocolVersionV5)
+		if err != nil {
+			return nil, 0, err
+		}
+		opts.UseFixedPad = true
+		opts.FixedPadding = padLen
+	} else {
+		if padLen := targetOuter - OverheadV4 - len(payload); padLen > 0 {
+			payload = append(payload, bytes.Repeat([]byte(" "), padLen)...)
+		}
+	}
+	pkt, err := SealPacketWithOptions(FrameTypeKeepalive, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), payload, opts)
+	return pkt, targetOuter, err
+}
+
+// DiscoverPathMTU автоматически подбирает оптимальный path_mtu после Connect (до старта цикла чтения).
+func (c *Client) DiscoverPathMTU(ctx context.Context) (int, error) {
+	if c == nil || c.conn == nil {
+		return 0, net.ErrClosed
+	}
+	_ = setUDPSocketDFConn(c.conn)
+	defer func() {
+		_ = c.conn.SetReadDeadline(time.Time{})
+	}()
+
+	upperOuter := c.EffectiveMaxOuterUDP()
+	if ifaceMTU := OutgoingInterfaceMTUForAddr(c.config.Server); ifaceMTU >= MinPathMTU {
+		if ifaceOuter := ifaceMTU - IPv4UDPOverhead; ifaceOuter < upperOuter {
+			upperOuter = ifaceOuter
+			c.setMaxOuter(upperOuter, false)
+		}
+	}
+	floorOuter := MinPathMTU - IPv4UDPOverhead
+	if upperOuter <= floorOuter {
+		c.setMaxOuter(floorOuter, false)
+		return c.PathMTU(), nil
+	}
+
+	readBuf := make([]byte, 65535)
+	probeOnce := func(targetOuter int) (acked int, msgSizeCap int, limitCap int, legacyPong bool, ok bool) {
+		pkt, actualOuter, err := c.buildPMTUProbePacket(targetOuter)
+		if err != nil {
+			return 0, 0, 0, false, false
+		}
+		if _, werr := c.conn.Write(pkt); werr != nil {
+			if isMsgSizeError(werr) {
+				if kMTU, kok := queryKernelConnMTU(c.conn); kok {
+					return 0, kMTU - IPv4UDPOverhead, 0, false, false
+				}
+				return 0, actualOuter - pmtuFallbackStep, 0, false, false
+			}
+			return 0, 0, 0, false, false
+		}
+		c.tracker.Touch()
+
+		wait := 180 * time.Millisecond
+		if c.shaper == nil && c.timing.HandshakeInitialTimeout > 0 && c.timing.HandshakeInitialTimeout/2 < wait {
+			wait = c.timing.HandshakeInitialTimeout / 2
+		}
+		if wait < 80*time.Millisecond {
+			wait = 80 * time.Millisecond
+		}
+		deadline := time.Now().Add(wait)
+		if ctxDeadline, has := ctx.Deadline(); has && ctxDeadline.Before(deadline) {
+			deadline = ctxDeadline
+		}
+		_ = c.conn.SetReadDeadline(deadline)
+		for {
+			if ctx.Err() != nil {
+				return 0, 0, 0, false, false
+			}
+			n, rerr := c.conn.Read(readBuf)
+			if rerr != nil {
+				return 0, 0, 0, false, false
+			}
+			ver, _, salt, _, seq, _, perr := ParseAndVerifyHeader(readBuf[:n], c.psk)
+			if perr != nil || ver != c.protocolVersion || !bytes.Equal(salt, c.salt[:]) || !c.replay.Check(seq) {
+				continue
+			}
+			opened, oerr := OpenPacketWithOptions(readBuf[:n], c.psk, c.s2cKey, OpenOptions{
+				ExpectedVersion: c.protocolVersion,
+				MaxOuterBytes:   c.maxOuterUDP,
+			})
+			if oerr != nil || !c.replay.Accept(opened.Seq) {
+				continue
+			}
+			switch opened.FrameType {
+			case FrameTypeKeepalive:
+				if string(opened.Plaintext) == KeepalivePongPayload {
+					return 0, 0, 0, true, false
+				}
+				if kind, val, pok := ParseKeepalivePMTUCommand(opened.Plaintext); pok {
+					switch kind {
+					case "ack":
+						if val > n {
+							val = n
+						}
+						return val, 0, 0, false, true
+					case "limit":
+						c.ClampMaxOuterUDP(val)
+						return 0, 0, val, false, false
+					}
+				}
+			case FrameTypeData:
+				pktCopy := append([]byte(nil), opened.Plaintext...)
+				c.readMu.Lock()
+				c.pendingRead = append(c.pendingRead, pktCopy)
+				c.readMu.Unlock()
+			}
+		}
+	}
+
+	if acked, msgCap, limCap, legacy, ok := probeOnce(upperOuter); ok {
+		if acked > 0 && acked < upperOuter {
+			c.setMaxOuter(acked, false)
+		}
+		return c.PathMTU(), nil
+	} else if legacy {
+		return c.PathMTU(), nil
+	} else {
+		hi := upperOuter - 1
+		if msgCap > 0 && msgCap < hi {
+			hi = msgCap
+		}
+		if limCap > 0 && limCap < hi {
+			hi = limCap
+		}
+		if hi <= floorOuter {
+			if ackLo, _, _, legacyLo, loOK := probeOnce(floorOuter); loOK {
+				if ackLo > 0 {
+					c.setMaxOuter(ackLo, false)
+				} else {
+					c.setMaxOuter(floorOuter, false)
+				}
+				return c.PathMTU(), nil
+			} else if legacyLo {
+				return c.PathMTU(), nil
+			}
+			return 0, fmt.Errorf("PLPMTUD: нет подтверждения доставки ни при %d Б, ни при %d Б", upperOuter, floorOuter)
+		}
+		// Убеждаемся, что минимальный базовый размер действительно проходит до подбора максимума.
+		ackLo, msgLo, limLo, legacyLo, loOK := probeOnce(floorOuter)
+		if !loOK {
+			if legacyLo {
+				return c.PathMTU(), nil
+			}
+			if msgLo > 0 {
+				c.ClampMaxOuterUDP(msgLo)
+				return c.PathMTU(), nil
+			}
+			if limLo > 0 {
+				c.ClampMaxOuterUDP(limLo)
+				return c.PathMTU(), nil
+			}
+			return 0, fmt.Errorf("PLPMTUD: нет подтверждения доставки ни при %d Б, ни при %d Б", upperOuter, floorOuter)
+		}
+		lo := floorOuter
+		best := floorOuter
+		if ackLo > best {
+			best = ackLo
+		}
+		for steps := 0; steps < 14 && lo < hi; steps++ {
+			var mid int
+			if hi-lo > 16 {
+				mid = (((lo + hi + 1) / 2) / 4) * 4
+				if mid <= lo {
+					mid = lo + 1
+				}
+			} else {
+				mid = (lo + hi + 1) / 2
+			}
+			if mid <= lo || mid > hi {
+				break
+			}
+			if acked, msgCap2, limCap2, _, ok := probeOnce(mid); ok {
+				if acked > best {
+					best = acked
+				} else if mid > best {
+					best = mid
+				}
+				lo = mid
+			} else {
+				hi = mid - 1
+				if msgCap2 > 0 && msgCap2 < hi {
+					hi = msgCap2
+				}
+				if limCap2 > 0 && limCap2 < hi {
+					hi = limCap2
+				}
+			}
+		}
+		c.setMaxOuter(best, false)
+		log.Printf("[argon4-client] оптимальный MTU подобран: path_mtu=%d (внешн.=%d)", c.PathMTU(), c.EffectiveMaxOuterUDP())
+		return c.PathMTU(), nil
+	}
+}
+
+// ProbeLivePMTU отправляет одиночный контрольный зонд во время активного цикла чтения ReadPacket().
+func (c *Client) ProbeLivePMTU(ctx context.Context, targetOuter int) (int, bool) {
+	if c == nil || c.conn == nil || c.probeCh == nil {
+		return 0, false
+	}
+	for {
+		select {
+		case <-c.probeCh:
+		default:
+			goto drained
+		}
+	}
+drained:
+	pkt, _, err := c.buildPMTUProbePacket(targetOuter)
+	if err != nil {
+		return 0, false
+	}
+	if _, err := c.conn.Write(pkt); err != nil {
+		if isMsgSizeError(err) {
+			c.AdaptOnMsgSize(len(pkt), err)
+		}
+		return 0, false
+	}
+	c.tracker.Touch()
+	timeout := 350 * time.Millisecond
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return 0, false
+	case acked := <-c.probeCh:
+		return acked, acked > 0
+	case <-timer.C:
+		return 0, false
+	}
+}
+
+// RunPLPMTUDMonitor периодически проверяет текущий внешний MTU во время активной сессии,
+// снижает MTU при blackhole (меньший зонд проходит, текущий — нет) и аккуратно восстанавливает вверх.
+func (c *Client) RunPLPMTUDMonitor(ctx context.Context) {
+	if c == nil || c.conn == nil || c.probeCh == nil {
+		return
+	}
+	ceilingOuter := c.EffectiveMaxOuterUDP()
+	if ceilingOuter <= 0 {
+		return
+	}
+	consecutiveMisses := 0
+	lastRaiseAttempt := time.Now()
+	initialDelay := time.NewTimer(12 * time.Second)
+	defer initialDelay.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-initialDelay.C:
+	}
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		curOuter := c.EffectiveMaxOuterUDP()
+		if curOuter > ceilingOuter {
+			ceilingOuter = curOuter
+		}
+		if _, ok := c.ProbeLivePMTU(ctx, curOuter); ok {
+			consecutiveMisses = 0
+			if curOuter < ceilingOuter && time.Since(lastRaiseAttempt) >= 60*time.Second {
+				lastRaiseAttempt = time.Now()
+				candidate := curOuter + 64
+				if candidate > ceilingOuter {
+					candidate = ceilingOuter
+				}
+				if candidate > curOuter {
+					if acked, raised := c.ProbeLivePMTU(ctx, candidate); raised && acked > curOuter {
+						c.setMaxOuter(acked, true)
+					}
+				}
+			}
+		} else if ctx.Err() == nil {
+			consecutiveMisses++
+			if consecutiveMisses >= 2 {
+				minOuter := MinPathMTU - IPv4UDPOverhead
+				fallbackOuter := curOuter - 64
+				if safe1280 := 1280 - IPv4UDPOverhead; fallbackOuter > safe1280 {
+					fallbackOuter = safe1280
+				}
+				if fallbackOuter < minOuter {
+					fallbackOuter = minOuter
+				}
+				if fallbackOuter < curOuter {
+					if acked, okSmall := c.ProbeLivePMTU(ctx, fallbackOuter); okSmall && acked > 0 {
+						// Убеждаемся, что текущий размер всё ещё блокируется, прежде чем снижать MTU.
+						if _, okCur := c.ProbeLivePMTU(ctx, curOuter); !okCur {
+							c.setMaxOuter(acked, true)
+						}
+					}
+				}
+				consecutiveMisses = 0
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 // WritePacket шифрует один исходящий пакет (IPv4 или L4-транзит) ключом c2s.
 func (c *Client) WritePacket(plaintext []byte) error {
 	if c.conn == nil {
@@ -417,19 +910,35 @@ func (c *Client) WritePacket(plaintext []byte) error {
 		}
 		return err
 	}
+	pad, maxOuter := c.currentPaddingSnapshot()
 	packet, err := SealPacketWithOptions(FrameTypeData, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), plaintext, SealOptions{
 		Version:       c.protocolVersion,
-		Padding:       c.padding,
-		MaxOuterBytes: c.maxOuterUDP,
+		Padding:       pad,
+		MaxOuterBytes: maxOuter,
 	})
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.Write(packet)
-	if err == nil {
-		c.tracker.Touch()
+	if _, err = c.conn.Write(packet); err != nil {
+		if isMsgSizeError(err) {
+			if _, adapted := c.AdaptOnMsgSize(len(packet), err); adapted {
+				retryPad, retryOuter := c.currentPaddingSnapshot()
+				if retryPkt, serr := SealPacketWithOptions(FrameTypeData, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), plaintext, SealOptions{
+					Version:       c.protocolVersion,
+					Padding:       retryPad,
+					MaxOuterBytes: retryOuter,
+				}); serr == nil {
+					if _, werr := c.conn.Write(retryPkt); werr == nil {
+						c.tracker.Touch()
+						return nil
+					}
+				}
+			}
+		}
+		return err
 	}
-	return err
+	c.tracker.Touch()
+	return nil
 }
 
 // Profile возвращает активный поведенческий профиль клиентской сессии.
@@ -491,16 +1000,22 @@ func (c *Client) WriteKeepalive() error {
 	if c.shaper != nil {
 		return c.shaper.RequestControl(KeepalivePingPayload)
 	}
+	pad, maxOuter := c.currentPaddingSnapshot()
 	packet, err := SealPacketWithOptions(FrameTypeKeepalive, c.salt[:], c.psk, c.c2sKey, c.seq.Add(1), []byte("ping"), SealOptions{
 		Version:       c.protocolVersion,
-		Padding:       c.padding,
-		MaxOuterBytes: c.maxOuterUDP,
+		Padding:       pad,
+		MaxOuterBytes: maxOuter,
 	})
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.Write(packet)
-	return err
+	if _, err = c.conn.Write(packet); err != nil {
+		if isMsgSizeError(err) {
+			c.AdaptOnMsgSize(len(packet), err)
+		}
+		return err
+	}
+	return nil
 }
 
 // ReadPacket возвращает следующий подлинный входящий IPv4-пакет. Мусор, чужие сессии,
@@ -543,6 +1058,21 @@ func (c *Client) ReadPacket() ([]byte, error) {
 		if opened.FrameType == FrameTypeKeepalive {
 			if c.shaper != nil && string(opened.Plaintext) == KeepalivePingPayload {
 				_ = c.shaper.RequestControl(KeepalivePongPayload)
+			} else if kind, val, ok := ParseKeepalivePMTUCommand(opened.Plaintext); ok {
+				switch kind {
+				case "ack":
+					if val > n {
+						val = n
+					}
+					if c.probeCh != nil {
+						select {
+						case c.probeCh <- val:
+						default:
+						}
+					}
+				case "limit":
+					c.ClampMaxOuterUDP(val)
+				}
 			}
 			continue
 		}

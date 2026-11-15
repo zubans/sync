@@ -9,6 +9,7 @@ public enum Tool: String, CaseIterable, Sendable {
     case awg
     case sstpc
     case cepArgon4 = "cep-argon4"
+    case cepCli = "cep-cli"
 
     public var installHint: String {
         switch self {
@@ -19,6 +20,7 @@ public enum Tool: String, CaseIterable, Sendable {
         case .amneziawgGo, .awg: "scripts/install-deps.sh (сборка из исходников amnezia-vpn)"
         case .sstpc: "brew install sstp-client"
         case .cepArgon4: "./scripts/build-app.sh (сборка встроенного Argon4-помощника)"
+        case .cepCli: "cd cep/argon4 && go build ./cmd/cep-cli"
         }
     }
 

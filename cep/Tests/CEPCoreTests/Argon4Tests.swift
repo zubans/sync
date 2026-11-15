@@ -1,4 +1,6 @@
 @testable import CEPCore
+import Darwin
+import Foundation
 import XCTest
 
 final class Argon4Tests: XCTestCase {
@@ -227,5 +229,120 @@ final class Argon4Tests: XCTestCase {
         var udpChain = Chain(name: "udp")
         udpChain.hops = [transit.id, udpNext.id]
         XCTAssertTrue(ChainValidation.problems(Plan(chain: udpChain, profiles: [transit, udpNext])).isEmpty)
+    }
+
+    func testBlindToAuthTransitAndDoubleBlindChainValidation() throws {
+        var blind1 = Profile(name: "Blind1", proto: .transit)
+        blind1.server = "1.1.1.1:51820"
+
+        var blind2 = Profile(name: "Blind2", proto: .transit)
+        blind2.server = "2.2.2.2:51820"
+
+        var auth = Profile(name: "Auth", proto: .transit)
+        auth.server = "3.3.3.3:51820"
+        auth.password = "outer-pass"
+
+        var argon = Profile(name: "Exit", proto: .argon4)
+        argon.server = "4.4.4.4:51820"
+        argon.password = "exit-pass"
+
+        var blindToAuth = Chain(name: "blind-auth-argon")
+        blindToAuth.hops = [blind1.id, auth.id, argon.id]
+        XCTAssertEqual(ChainValidation.problems(Plan(chain: blindToAuth, profiles: [blind1, auth, argon])), [])
+
+        var doubleBlind = Chain(name: "double-blind-argon")
+        doubleBlind.hops = [blind1.id, blind2.id, argon.id]
+        XCTAssertEqual(ChainValidation.problems(Plan(chain: doubleBlind, profiles: [blind1, blind2, argon])), [])
+    }
+
+    func testMTUProbeChainBudgetAndReadyDecoding() throws {
+        // Проверка декодирования path_mtu / inner_mtu из ready JSON демона cep-argon4.
+        let readyJSON = """
+        {
+          "tun": "utun9",
+          "ip": "10.66.0.2/24",
+          "mtu": 1286,
+          "path_mtu": 1350,
+          "inner_mtu": 1222
+        }
+        """
+        let ready = try JSONDecoder().decode(Argon4Ready.self, from: Data(readyJSON.utf8))
+        XCTAssertEqual(ready.mtu, 1286)
+        XCTAssertEqual(ready.pathMTU, 1350)
+        XCTAssertEqual(ready.innerMTU, 1222)
+
+        // Проверка проброса вычисленного MTU в конфиг sing-box.
+        let singBox = SingBoxConfig.make(
+            tunAddress: "172.19.0.1/30",
+            outbound: ["type": "direct", "tag": "proxy"],
+            mtu: 1222
+        )
+        let inbounds = try XCTUnwrap(singBox["inbounds"] as? [[String: Any]])
+        XCTAssertEqual(inbounds.first?["mtu"] as? Int, 1222)
+
+        // Расчёт доступного MTU бюджета от предыдущих узлов цепочки.
+        var hop1 = Profile(name: "Transit 1", proto: .transit)
+        hop1.server = "198.51.100.10"
+        hop1.argonPathMTU = 1350
+
+        var hop2 = Profile(name: "Transit 2", proto: .transit)
+        hop2.server = "198.51.100.15"
+        hop2.argonPathMTU = 1400
+
+        var hop3 = Profile(name: "VLESS Exit", proto: .vless)
+        hop3.server = "198.51.100.20"
+
+        var chain = Chain(name: "chain-mtu")
+        chain.hops = [hop1.id, hop2.id, hop3.id]
+
+        XCTAssertEqual(MTUProbe.precedingBudget(for: hop1.id, chain: chain, profiles: [hop1, hop2, hop3]), 0)
+        XCTAssertEqual(MTUProbe.precedingBudget(for: hop2.id, chain: chain, profiles: [hop1, hop2, hop3]), 1350)
+        let budgetForHop3 = MTUProbe.precedingBudget(for: hop3.id, chain: chain, profiles: [hop1, hop2, hop3])
+        XCTAssertEqual(budgetForHop3, 1286)
+
+        // Живой loopback-зонд TCP MTU без моков через Darwin POSIX сокет.
+        let listenFD = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(listenFD, 0)
+        defer { Darwin.close(listenFD) }
+
+        var opt: Int32 = 1
+        Darwin.setsockopt(listenFD, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let bindRes = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listenFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bindRes, 0)
+        XCTAssertEqual(Darwin.listen(listenFD, 4), 0)
+
+        var boundAddr = sockaddr_in()
+        var boundLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameRes = withUnsafeMutablePointer(to: &boundAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(listenFD, $0, &boundLen)
+            }
+        }
+        XCTAssertEqual(nameRes, 0)
+        let port = Int(UInt16(bigEndian: boundAddr.sin_port))
+
+        let probe = MTUProbe.probeEndpointSync(
+            host: "127.0.0.1",
+            port: port,
+            proto: "vless",
+            transport: "tcp",
+            precedingBudget: 1286,
+            timeoutMs: 2000
+        )
+        XCTAssertTrue(probe.ok, probe.error ?? "")
+        XCTAssertGreaterThanOrEqual(probe.optimalPathMTU, 576)
+        XCTAssertLessThanOrEqual(probe.optimalPathMTU, 1286)
+        XCTAssertGreaterThan(probe.innerTunMTU, 500)
     }
 }

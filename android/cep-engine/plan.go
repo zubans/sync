@@ -1,6 +1,7 @@
 package cepcore
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -8,6 +9,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"contactsync/cep-engine/argon4"
 )
 
 // Profile и Plan — те же поля, что в profiles.json приложения для macOS.
@@ -204,7 +208,7 @@ func Validate(planJSON string) string {
 				problems = append(problems, fmt.Sprintf("«%s»: транзитный шлюз не может быть последним узлом цепочки", hop.Name))
 			} else if strings.TrimSpace(hop.Password) == "" {
 				next := plan.Hops[i+1]
-				if next.Proto != "argon4" && !next.UseArgon {
+				if next.Proto != "argon4" && !next.UseArgon && next.Proto != "transit" {
 					problems = append(problems, fmt.Sprintf("«%s»: слепой транзит без пароля поддерживает только следующий узел Argon4", hop.Name))
 				}
 			}
@@ -292,7 +296,32 @@ func hopClientID(hop *Profile) string {
 	return hop.ID
 }
 
-func argon4BaseOptions(hop *Profile, serverAddr, password, clientID string) map[string]any {
+func clampNestedPathMTU(configured, budget int) int {
+	if budget <= 0 {
+		return configured
+	}
+	if configured <= 0 || configured > budget {
+		return budget
+	}
+	return configured
+}
+
+func nextNestedUDPBudget(configured, currentBudget int) int {
+	outer := configured
+	if outer <= 0 {
+		outer = argon4.DefaultPathMTU
+	}
+	if currentBudget > 0 && currentBudget < outer {
+		outer = currentBudget
+	}
+	next := outer - 64
+	if next < argon4.MinPathMTU {
+		return argon4.MinPathMTU
+	}
+	return next
+}
+
+func argon4BaseOptions(hop *Profile, serverAddr, password, clientID string, nestedPathMTUBudget int) map[string]any {
 	opts := map[string]any{
 		"type":          argon4Type,
 		"server":        serverAddr,
@@ -309,8 +338,8 @@ func argon4BaseOptions(hop *Profile, serverAddr, password, clientID string) map[
 	if hop.ArgonFirstPacketProfile != "" {
 		opts["first_packet_profile"] = hop.ArgonFirstPacketProfile
 	}
-	if hop.ArgonPathMTU != 0 {
-		opts["path_mtu"] = hop.ArgonPathMTU
+	if pathMTU := clampNestedPathMTU(hop.ArgonPathMTU, nestedPathMTUBudget); pathMTU != 0 {
+		opts["path_mtu"] = pathMTU
 	}
 	if hop.ArgonHandshakeMaxAttempts != 0 {
 		opts["handshake_max_attempts"] = hop.ArgonHandshakeMaxAttempts
@@ -389,6 +418,7 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 	previousIsProxy := false
 	previousUsesTransit := false
 	blindRelayAddr := ""
+	nestedUDPBudget := 0
 
 	appendHop := func(opts map[string]any, tag string, isEndpoint bool) {
 		if previousTag != "" {
@@ -429,6 +459,9 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 			}
 			if strings.TrimSpace(hop.Password) == "" {
 				blindRelayAddr = serverAddr
+				if hop.ArgonPathMTU > 0 {
+					nestedUDPBudget = nextNestedUDPBudget(hop.ArgonPathMTU, nestedUDPBudget)
+				}
 				continue
 			}
 			if i+1 >= len(plan.Hops) {
@@ -443,13 +476,18 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 					return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, targetErr)
 				}
 			}
-			transitOpts := argon4BaseOptions(hop, serverAddr, hop.Password, hopClientID(hop))
+			transitOpts := argon4BaseOptions(hop, serverAddr, hop.Password, hopClientID(hop), nestedUDPBudget)
 			transitOpts["tag"] = tag
 			transitOpts["mode"] = "transit"
 			transitOpts["target"] = net.JoinHostPort(serverIPs[i+1], nextPort)
 			transitOpts["proto"] = nextProto
 			appendHop(transitOpts, tag, true)
 			previousUsesTransit = true
+			if nextProto == "udp" {
+				nestedUDPBudget = nextNestedUDPBudget(hop.ArgonPathMTU, nestedUDPBudget)
+			} else {
+				nestedUDPBudget = 0
+			}
 			continue
 		}
 
@@ -467,18 +505,33 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 				blindRelayAddr = ""
 			}
 			underlayTag := tag + "-argon"
-			underlayOpts := argon4BaseOptions(hop, argonAddr, hop.ArgonPassword, hopClientID(hop)+"-underlay")
+			underlayOpts := argon4BaseOptions(hop, argonAddr, hop.ArgonPassword, hopClientID(hop)+"-underlay", nestedUDPBudget)
 			underlayOpts["tag"] = underlayTag
 			underlayOpts["mode"] = "auto"
 			underlayOpts["target"] = net.JoinHostPort(serverIPs[i], hopPort)
 			underlayOpts["proto"] = hopProto
 			appendHop(underlayOpts, underlayTag, true)
 			previousUsesTransit = true
+			if hopProto == "udp" {
+				nestedUDPBudget = nextNestedUDPBudget(hop.ArgonPathMTU, nestedUDPBudget)
+			}
 		}
 
 		opts, err := hopOptions(hop, tag, serverIPs[i])
 		if err != nil {
 			return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
+		}
+		if hop.Proto == "argon4" && nestedUDPBudget > 0 {
+			if existing, _ := opts["path_mtu"].(int); existing == 0 || existing > nestedUDPBudget {
+				opts["path_mtu"] = nestedUDPBudget
+			}
+		}
+		finalPathCap := 0
+		if hop.ArgonPathMTU > 0 {
+			finalPathCap = hop.ArgonPathMTU
+		}
+		if nestedUDPBudget > 0 && (finalPathCap == 0 || nestedUDPBudget < finalPathCap) {
+			finalPathCap = nestedUDPBudget
 		}
 		isEndpoint := opts["type"] == "openconnect" || opts["type"] == "openvpn-client" || opts["type"] == argon4Type
 		if opts["type"] == argon4Type && blindRelayAddr != "" {
@@ -487,6 +540,16 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 		}
 		appendHop(opts, tag, isEndpoint)
 		previousUsesTransit = false
+		if i == len(plan.Hops)-1 && finalPathCap > 0 {
+			innerCap := finalPathCap - 64
+			if innerCap < argon4.MinPathMTU {
+				innerCap = argon4.MinPathMTU
+			}
+			if tunIn, ok := inbounds[0].(map[string]any); ok && innerCap < tunMTU {
+				tunIn["mtu"] = innerCap
+			}
+		}
+		nestedUDPBudget = 0
 
 		routes, err := parseRoutes(hop.Routes)
 		if err != nil {
@@ -565,7 +628,7 @@ func argon4HopOptions(hop *Profile, resolvedIP string) (map[string]any, error) {
 	if resolvedIP != "" {
 		host = resolvedIP
 	}
-	return argon4BaseOptions(hop, net.JoinHostPort(host, port), hop.Password, hopClientID(hop)), nil
+	return argon4BaseOptions(hop, net.JoinHostPort(host, port), hop.Password, hopClientID(hop), 0), nil
 }
 
 func openConnectOptions(hop *Profile, server string) (map[string]any, error) {
@@ -631,4 +694,261 @@ func certFingerprint(s string) (string, error) {
 		return "", fmt.Errorf("пустой отпечаток сертификата")
 	}
 	return s, nil
+}
+
+func profileToProbeRequest(p Profile, resolvedIP string, transitProto string, precedingMTU int, timeoutMs int) argon4.ProbeNodeMTURequest {
+	server := p.Server
+	if resolvedIP != "" && p.Proto == "transit" {
+		if _, port, err := parseArgon4Server(p.Server); err == nil {
+			server = net.JoinHostPort(resolvedIP, port)
+		}
+	}
+	req := argon4.ProbeNodeMTURequest{
+		Proto:                   p.Proto,
+		Server:                  server,
+		Password:                p.Password,
+		ClientID:                hopClientID(&p),
+		ClientSecret:            p.ClientSecret,
+		TransitProto:            transitProto,
+		Link:                    p.URI,
+		ProtocolVersion:         p.ArgonProtocolVersion,
+		PaddingProfile:          p.ArgonPaddingProfile,
+		FirstPacketProfile:      p.ArgonFirstPacketProfile,
+		UseArgon:                p.UseArgon,
+		ArgonPassword:           p.ArgonPassword,
+		ArgonProtocolVersion:    p.ArgonProtocolVersion,
+		ArgonPaddingProfile:     p.ArgonPaddingProfile,
+		ArgonFirstPacketProfile: p.ArgonFirstPacketProfile,
+		PrecedingMTU:            precedingMTU,
+		TimeoutMs:               timeoutMs,
+	}
+	if p.Proto == "openvpn" {
+		req.OpenVPNConfig = p.Config
+	}
+	if p.Proto == "amneziawg" {
+		req.WireGuardConfig = p.Config
+	}
+	if strings.EqualFold(p.Proto, "transit") {
+		req.TransitProto = argon4.ProtoUDP
+		if strings.TrimSpace(p.Password) != "" {
+			req.Mode = argon4.ModeTransit
+		}
+	}
+	return req
+}
+
+func parseChainHops(chainJSON string) []Profile {
+	raw := strings.TrimSpace(chainJSON)
+	if raw == "" {
+		return nil
+	}
+	var hops []Profile
+	var p Plan
+	if err := json.Unmarshal([]byte(raw), &p); err == nil && len(p.Hops) > 0 {
+		return p.Hops
+	}
+	if err := json.Unmarshal([]byte(raw), &hops); err != nil {
+		return nil
+	}
+	return hops
+}
+
+func computePrecedingMTUBudget(chainJSON, targetID string) int {
+	hops := parseChainHops(chainJSON)
+	if len(hops) == 0 {
+		return 0
+	}
+	prev := 0
+	for i := range hops {
+		hop := &hops[i]
+		if hop.ID == targetID && targetID != "" {
+			return prev
+		}
+		if hop.Proto == "transit" || i < len(hops)-1 {
+			outer := hop.ArgonPathMTU
+			if outer <= 0 {
+				outer = argon4.DefaultPathMTU
+			}
+			if prev > 0 {
+				prev = nextNestedUDPBudget(outer, prev)
+			} else {
+				prev = outer
+			}
+		} else {
+			prev = 0
+		}
+	}
+	return 0
+}
+
+func hopTargetAddress(hop *Profile) string {
+	if hop == nil {
+		return ""
+	}
+	if hop.UseArgon && hop.Proto != "argon4" && hop.Proto != "transit" {
+		if h, p, err := parseArgon4Server(hop.Server); err == nil && h != "" {
+			return net.JoinHostPort(h, p)
+		}
+	}
+	switch hop.Proto {
+	case "vless", "hysteria2", "hysteria":
+		if l, err := parseLink(hop.URI); err == nil && l.Host != "" {
+			port := strconv.Itoa(l.Port)
+			if hop.UseArgon {
+				port = "51820"
+			}
+			return net.JoinHostPort(l.Host, port)
+		}
+	case "openconnect":
+		if u, err := openConnectURL(hop.Server); err == nil && u.Hostname() != "" {
+			port := portOr(u.Port(), "443")
+			if hop.UseArgon {
+				port = "51820"
+			}
+			return net.JoinHostPort(u.Hostname(), port)
+		}
+	case "openvpn":
+		if ovpn, err := parseOVPN(hop.Config); err == nil && ovpn.remoteHost != "" {
+			port := strconv.Itoa(ovpn.remotePort)
+			if hop.UseArgon {
+				port = "51820"
+			}
+			return net.JoinHostPort(ovpn.remoteHost, port)
+		}
+	case "argon4", "transit":
+		if h, p, err := parseArgon4Server(hop.Server); err == nil && h != "" {
+			return net.JoinHostPort(h, p)
+		}
+	case "amneziawg":
+		for _, rawLine := range strings.Split(hop.Config, "\n") {
+			line := strings.TrimSpace(rawLine)
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(parts[0]), "Endpoint") {
+				if h, p, err := parseArgon4Server(parts[1]); err == nil && h != "" {
+					return net.JoinHostPort(h, p)
+				}
+			}
+		}
+		if h, p, err := parseArgon4Server(hop.Server); err == nil && h != "" {
+			return net.JoinHostPort(h, p)
+		}
+	}
+	if hop.Server != "" {
+		if h, p, err := parseArgon4Server(hop.Server); err == nil && h != "" {
+			return net.JoinHostPort(h, p)
+		}
+	}
+	return ""
+}
+
+func nextTargetInChain(chainJSON, targetID string) string {
+	if strings.TrimSpace(targetID) == "" {
+		return ""
+	}
+	hops := parseChainHops(chainJSON)
+	for i := range hops {
+		if hops[i].ID == targetID && i+1 < len(hops) {
+			return hopTargetAddress(&hops[i+1])
+		}
+	}
+	return ""
+}
+
+// ProbeProfileMTU подбирает оптимальный внешний MTU для узла (вызывается из Android Kotlin через gomobile).
+func ProbeProfileMTU(profileJSON, chainJSON string) string {
+	var p Profile
+	if err := json.Unmarshal([]byte(profileJSON), &p); err != nil {
+		out, _ := json.Marshal(argon4.ProbeNodeMTUResult{
+			OK:    false,
+			Error: fmt.Sprintf("некорректный JSON профиля: %v", err),
+		})
+		return string(out)
+	}
+	preceding := computePrecedingMTUBudget(chainJSON, p.ID)
+	transitProto := ""
+	if p.Proto == "transit" {
+		transitProto = argon4.ProtoUDP
+	}
+	req := profileToProbeRequest(p, "", transitProto, preceding, 7000)
+	if p.Proto == "transit" {
+		if nextTarget := nextTargetInChain(chainJSON, p.ID); nextTarget != "" {
+			req.Target = nextTarget
+		}
+		if strings.TrimSpace(p.Password) != "" {
+			req.Mode = argon4.ModeTransit
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	res := argon4.ProbeNodeMTU(ctx, req)
+	out, _ := json.Marshal(res)
+	return string(out)
+}
+
+func autoProbeTransitInitialMTU(plan *Plan, ips []string, logf func(string)) {
+	if plan == nil || len(plan.Hops) == 0 {
+		return
+	}
+	// До первого туннелирующего узла (слепой или первый прямой транзит) сокет ещё идёт напрямую.
+	directPath := true
+	for i := range plan.Hops {
+		hop := &plan.Hops[i]
+		if !directPath {
+			break
+		}
+		if hop.Proto != "transit" {
+			directPath = false
+			continue
+		}
+		if hop.ArgonPathMTU > 0 {
+			if strings.TrimSpace(hop.Password) != "" {
+				directPath = false
+			}
+			continue
+		}
+		if strings.TrimSpace(hop.Password) != "" {
+			// Для первого аутентифицированного транзита автоподбор выполнит connectTransitUDP при старте,
+			// но быстрый замер перед buildConfig задаст вложенный бюджет для следующих не-Argon узлов.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			target := ""
+			if i+1 < len(plan.Hops) {
+				nextPort := "51820"
+				if !plan.Hops[i+1].UseArgon {
+					if pt, _, err := hopTargetPortAndProto(&plan.Hops[i+1]); err == nil {
+						nextPort = pt
+					}
+				} else if _, pt, err := parseArgon4Server(plan.Hops[i+1].Server); err == nil {
+					nextPort = pt
+				}
+				target = net.JoinHostPort(ips[i+1], nextPort)
+			}
+			req := profileToProbeRequest(*hop, ips[i], argon4.ProtoUDP, 0, 1500)
+			req.Mode = argon4.ModeTransit
+			req.TransitProto = argon4.ProtoUDP
+			req.Target = target
+			res := argon4.ProbeNodeMTU(ctx, req)
+			cancel()
+			if res.OK && res.OptimalPathMTU > 0 && res.OptimalPathMTU < argon4.DefaultPathMTU {
+				hop.ArgonPathMTU = res.OptimalPathMTU
+				if logf != nil {
+					logf(fmt.Sprintf("автоподбор MTU транзита «%s»: path_mtu=%d", hop.Name, hop.ArgonPathMTU))
+				}
+			}
+			directPath = false
+			continue
+		}
+		// Слепой транзит: подбираем path MTU по DF/NIC, не ожидая рукопожатия.
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		res := argon4.ProbeNodeMTU(ctx, profileToProbeRequest(*hop, ips[i], argon4.ProtoUDP, 0, 1200))
+		cancel()
+		if res.OK && res.OptimalPathMTU > 0 && res.OptimalPathMTU < argon4.DefaultPathMTU {
+			hop.ArgonPathMTU = res.OptimalPathMTU
+			if logf != nil {
+				logf(fmt.Sprintf("автоподбор MTU слепого транзита «%s»: path_mtu=%d", hop.Name, hop.ArgonPathMTU))
+			}
+		}
+	}
 }

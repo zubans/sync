@@ -52,25 +52,27 @@ type HandshakeRequest struct {
 	PaddingProfile  string   `json:"paddingProfile,omitempty"`
 	BehaviorProfile string   `json:"behaviorProfile,omitempty"`
 	ProfileVersion  int      `json:"profileVersion,omitempty"`
+	AutoMTU         bool     `json:"autoMtu,omitempty"`
 }
 
 // HandshakeResponse возвращается сервером зашифрованным внутри кадра FrameTypeHandshakeResp.
 type HandshakeResponse struct {
-	AssignedIP      string   `json:"assignedIp,omitempty"`
-	ServerIP        string   `json:"serverIp,omitempty"`
-	SubnetCidr      int      `json:"subnetCidr,omitempty"`
-	MTU             int      `json:"mtu,omitempty"`
-	DNS             []string `json:"dns,omitempty"`
-	Routes          []string `json:"routes,omitempty"`
-	ServerTime      int64    `json:"serverTime"`
-	ServerPub       string   `json:"serverPub"`
-	Mode            string   `json:"mode,omitempty"`
-	Target          string   `json:"target,omitempty"`
-	ProtocolVersion int      `json:"protocolVersion,omitempty"`
-	Capabilities    []string `json:"capabilities,omitempty"`
-	PaddingProfile  string   `json:"paddingProfile,omitempty"`
-	BehaviorProfile string   `json:"behaviorProfile,omitempty"`
-	ProfileVersion  int      `json:"profileVersion,omitempty"`
+	AssignedIP       string   `json:"assignedIp,omitempty"`
+	ServerIP         string   `json:"serverIp,omitempty"`
+	SubnetCidr       int      `json:"subnetCidr,omitempty"`
+	MTU              int      `json:"mtu,omitempty"`
+	EffectivePathMTU int      `json:"effectivePathMtu,omitempty"`
+	DNS              []string `json:"dns,omitempty"`
+	Routes           []string `json:"routes,omitempty"`
+	ServerTime       int64    `json:"serverTime"`
+	ServerPub        string   `json:"serverPub"`
+	Mode             string   `json:"mode,omitempty"`
+	Target           string   `json:"target,omitempty"`
+	ProtocolVersion  int      `json:"protocolVersion,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	PaddingProfile   string   `json:"paddingProfile,omitempty"`
+	BehaviorProfile  string   `json:"behaviorProfile,omitempty"`
+	ProfileVersion   int      `json:"profileVersion,omitempty"`
 }
 
 // ReplayWindow реализует 64-пакетное скользящее окно защиты от повтора (anti-replay) по принципу RFC 6479 / WireGuard.

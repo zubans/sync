@@ -85,4 +85,32 @@ func TestValidatePlanTransitRulesAndUseArgonWithoutServer(t *testing.T) {
 	if err := validatePlan(useArgonOnTransit); err == nil {
 		t.Fatal("ожидалась ошибка: UseArgon на transit запрещён")
 	}
+
+	blindToAuthTransit := &Plan{Hops: []Profile{
+		{Name: "Blind", Proto: "transit", Server: "blind.example.com:51820"},
+		{Name: "Auth", Proto: "transit", Server: "auth.example.com:51820", Password: "p1"},
+		{Name: "Exit", Proto: "argon4", Server: "exit.example.com:51820", Password: "p2"},
+	}}
+	if err := validatePlan(blindToAuthTransit); err != nil {
+		t.Fatalf("ожидался успех цепочки Blind -> Auth Transit -> Argon4: %v", err)
+	}
+}
+
+func TestNestedUDPPathMTUBudget(t *testing.T) {
+	budget1 := nextNestedUDPBudget(0, 0)
+	if budget1 != 1436 {
+		t.Fatalf("ожидался бюджет 1436 (DefaultPathMTU-64) после первого UDP-транзита, получено %d", budget1)
+	}
+	budget2 := nextNestedUDPBudget(1350, budget1)
+	if budget2 != 1286 {
+		t.Fatalf("ожидался бюджет 1286 после вложенного UDP-транзита с path_mtu=1350, получено %d", budget2)
+	}
+	exit := withNestedUDPBudget(Profile{Proto: "argon4", ArgonPathMTU: 1420}, budget2)
+	if exit.ArgonPathMTU != 1286 {
+		t.Fatalf("ожидалось ограничение ArgonPathMTU=1286, получено %d", exit.ArgonPathMTU)
+	}
+	lowFloor := nextNestedUDPBudget(580, 0)
+	if lowFloor != 576 {
+		t.Fatalf("ожидался нижний порог MinPathMTU=576, получено %d", lowFloor)
+	}
 }

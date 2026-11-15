@@ -31,8 +31,38 @@ func run(args []string) error {
 	chain := flags.String("chain", "", "имя или UUID цепочки")
 	runDir := flags.String("run-dir", "/run/cep-linux", "каталог журналов и временных конфигов")
 	output := flags.String("output", "", "файл для результата команды select")
+	nodeID := flags.String("id", "", "ID или имя узла для команды probe-mtu")
+	applyMTU := flags.Bool("apply", false, "сохранить подобранный MTU в profiles.json (для probe-mtu)")
+	jsonOut := flags.Bool("json", false, "выводить результат probe-mtu в JSON")
+	probeReqJSON := flags.String("req-json", "", "JSON-запрос для probe-mtu без profiles.json")
+	probeProto := flags.String("proto", "", "протокол узла для probe-mtu без profiles.json")
+	probeServer := flags.String("server", "", "адрес узла для probe-mtu без profiles.json")
+	probeLink := flags.String("link", "", "ссылка VLESS/Hysteria для probe-mtu без profiles.json")
+	probePassword := flags.String("password", "", "пароль для probe-mtu без profiles.json")
+	probeTransitProto := flags.String("transit-proto", "", "транспорт транзита (udp/tcp) для probe-mtu")
+	probeTarget := flags.String("target", "", "адрес следующего узла (host:port) для transit probe-mtu")
+	probePrecedingMTU := flags.Int("preceding-mtu", 0, "внешний MTU предыдущего узла для probe-mtu")
 	if err := flags.Parse(rest); err != nil {
 		return err
+	}
+	if command == "probe-mtu" {
+		if *profiles == "" && *probeReqJSON == "" && *probeProto == "" {
+			return fmt.Errorf("укажите -profiles FILE -id NODE или -proto ... / -req-json")
+		}
+		_, store, changed, err := runProbeMTUCommand(
+			*profiles, *chain, *nodeID, *probeReqJSON,
+			*probeProto, *probeServer, *probeLink, *probePassword, *probeTransitProto, *probeTarget,
+			*probePrecedingMTU, *applyMTU, *jsonOut, os.Stdout,
+		)
+		if err != nil {
+			return err
+		}
+		if changed && store != nil && *profiles != "" {
+			if err := saveStore(*profiles, store); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if *profiles == "" {
 		return fmt.Errorf("укажите -profiles /путь/к/profiles.json")
@@ -172,6 +202,7 @@ func printUsage() {
   cep-cli list -profiles FILE
   cep-cli validate -profiles FILE -chain "Имя цепочки"
   cep-cli check -profiles FILE -chain "Имя цепочки"
+  cep-cli probe-mtu -profiles FILE -id "Имя/UUID" [-chain "Цепочка"] [-apply] [-json]
   cep-cli select -profiles FILE -output FILE
   sudo cep-cli up -profiles FILE -chain "Имя цепочки"
 

@@ -7,11 +7,15 @@
 
 ## Сборка и запуск
 
+Из каталога `cep/`:
+
 ```bash
 ./scripts/install-deps.sh      # brew-пакеты + сборка amneziawg-go/awg
 ./scripts/build-app.sh         # Swift + Go Argon4-помощник → build/CEP.app
 open build/CEP.app
 ```
+
+Из корня репозитория эти же шаги обёрнуты в блок VPN `Makefile`: `make vpn-cep-mac-deps`, `make vpn-cep-mac-build`, `make vpn-cep-mac-dmg`, `make vpn-cep-mac-test`.
 
 Нужны macOS 14+, Swift 5.10+ и Go 1.25+ (`install-deps.sh` устанавливает Go, если его нет). Тесты: `swift test` и `cd argon4 && go test -race ./...`.
 

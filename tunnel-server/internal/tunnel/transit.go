@@ -74,9 +74,11 @@ func ResolveInterfaceTCPAddr(ifName, listenAddr string, fallbackPort int) (*net.
 }
 
 type blindUDPPeer struct {
-	clientAddr *net.UDPAddr
-	targetConn *net.UDPConn
-	lastActive atomic.Int64
+	clientAddr    *net.UDPAddr
+	targetConn    *net.UDPConn
+	lastActive    atomic.Int64
+	maxOuter      atomic.Int64
+	lastMTUAdjLog atomic.Int64
 }
 
 // StartTransit запускает UDP- и TCP-слушатели для L4-транзита на одном порту.
@@ -372,6 +374,7 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 			s.logDrop(remoteAddr, "transit dial udp", err)
 			return nil
 		}
+		setUDPSocketDFConn(conn)
 		targetConn = conn
 	}
 
@@ -383,17 +386,31 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 		s.logDrop(remoteAddr, "transit register", err)
 		return nil
 	}
+	if targetConn != nil {
+		if outIfaceMTU := InterfaceMTUByLocalAddr(targetConn.LocalAddr()); outIfaceMTU >= MinPathMTU {
+			overhead := OverheadV5
+			if headerVersion == ProtocolVersionV4 {
+				overhead = OverheadV4
+			}
+			innerOuter := (outIfaceMTU - IPv4UDPOverhead) + overhead
+			if s.maxOuterUDP <= 0 || innerOuter < s.maxOuterUDP {
+				peer.SetRuntimeMaxOuter(innerOuter)
+			}
+		}
+	}
 	if proto == ProtoUDP {
 		s.attachSessionShaper(peer)
 	}
 
-	respMTU := EffectiveProfileTunMTU(s.cfg.MTU, sessionPad.PathMTU, headerVersion, sessionProfile)
+	effPathMTU := PathMTUFromMaxOuter(peer.EffectiveMaxOuter(s.maxOuterUDP))
+	respMTU := EffectiveProfileTunMTU(s.cfg.MTU, effPathMTU, headerVersion, sessionProfile)
 	resp := HandshakeResponse{
-		MTU:        respMTU,
-		ServerTime: now.Unix(),
-		ServerPub:  hex.EncodeToString(srvPub),
-		Mode:       ModeTransit,
-		Target:     target,
+		MTU:              respMTU,
+		EffectivePathMTU: effPathMTU,
+		ServerTime:       now.Unix(),
+		ServerPub:        hex.EncodeToString(srvPub),
+		Mode:             ModeTransit,
+		Target:           target,
 	}
 	applyProtocolResponseFields(&resp, headerVersion, sessionPad, sessionProfile)
 	respBytes, _ := json.Marshal(resp)
@@ -401,7 +418,7 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 		Version:       headerVersion,
 		Padding:       sessionPad,
 		SamplePad:     sessionProfile.SamplePaddingLen,
-		MaxOuterBytes: s.maxOuterUDP,
+		MaxOuterBytes: peer.EffectiveMaxOuter(s.maxOuterUDP),
 	})
 	if err != nil {
 		s.sessions.RemoveSession(salt)
@@ -411,8 +428,8 @@ func (s *Server) handleTransitHandshake(pkt, psk, salt, hsKey, clientAuth, srvPu
 	if targetConn != nil {
 		go s.udpTransitReturnLoop(peer)
 	}
-	log.Printf("[argon4-server] транзитное рукопожатие ОК: клиент=%q v%d профиль=%q адрес=%s proto=%s цель=%s",
-		req.ClientID, headerVersion, sessionProfile.Name, remoteAddr, proto, target)
+	log.Printf("[argon4-server] транзитное рукопожатие ОК: клиент=%q v%d профиль=%q адрес=%s proto=%s цель=%s path_mtu=%d",
+		req.ClientID, headerVersion, sessionProfile.Name, remoteAddr, proto, target, effPathMTU)
 	return wireResp
 }
 
@@ -422,7 +439,6 @@ func (s *Server) udpTransitReturnLoop(sess *PeerSession) {
 	}
 	buf := make([]byte, 65535)
 	psk := s.sessions.PSK()
-	opts := sess.sealOptions(s.maxOuterUDP)
 	idleTimeout := s.sessions.IdleTimeout()
 	for {
 		_ = sess.TargetConn.SetReadDeadline(time.Now().Add(idleTimeout))
@@ -438,12 +454,17 @@ func (s *Server) udpTransitReturnLoop(sess *PeerSession) {
 			_ = sess.Shaper.EnqueueReal(buf[:n])
 			continue
 		}
+		opts := sess.sealOptions(s.maxOuterUDP)
 		wirePkt, err := SealPacketWithOptions(FrameTypeData, sess.Salt[:], psk, sess.S2CKey, sess.NextS2CSeq(), buf[:n], opts)
 		if err != nil {
 			continue
 		}
 		if addr := sess.RemoteAddr(); addr != nil && s.udpConn != nil {
-			_, _ = s.udpConn.WriteToUDP(wirePkt, addr)
+			if _, werr := s.udpConn.WriteToUDP(wirePkt, addr); werr != nil && isMsgSizeError(werr) {
+				if newMax := sess.DownshiftMaxOuter(len(wirePkt), 0); newMax > 0 {
+					s.sendPMTULimit(sess, newMax)
+				}
+			}
 		}
 	}
 }
@@ -657,6 +678,35 @@ func (s *Server) handleTCPConn(clientConn *net.TCPConn) {
 	<-errCh
 }
 
+func (p *blindUDPPeer) noteMsgSize(failedLen int, kernelMTU int, targetDesc string) {
+	floor := int64(MinPathMTU - IPv4UDPOverhead)
+	cand := int64(failedLen - pmtuFallbackStep)
+	if kernelMTU >= MinPathMTU {
+		kOuter := int64(kernelMTU - IPv4UDPOverhead)
+		if cand <= 0 || kOuter < cand {
+			cand = kOuter
+		}
+	}
+	if cand < floor {
+		cand = floor
+	}
+	for {
+		cur := p.maxOuter.Load()
+		if cur > 0 && cur <= cand {
+			break
+		}
+		if p.maxOuter.CompareAndSwap(cur, cand) {
+			now := time.Now().UnixNano()
+			prev := p.lastMTUAdjLog.Load()
+			if now-prev >= int64(5*time.Second) && p.lastMTUAdjLog.CompareAndSwap(prev, now) {
+				log.Printf("[argon4-blind-transit] автоподстройка MTU для %s (%s): %d -> %d байт",
+					p.clientAddr, targetDesc, cur, cand+IPv4UDPOverhead)
+			}
+			break
+		}
+	}
+}
+
 func (s *Server) handleBlindUDP(pkt []byte, clientAddr *net.UDPAddr) {
 	if clientAddr == nil || len(pkt) == 0 {
 		return
@@ -668,6 +718,11 @@ func (s *Server) handleBlindUDP(pkt []byte, clientAddr *net.UDPAddr) {
 	}
 	peer.lastActive.Store(s.now().UnixNano())
 	if _, err := peer.targetConn.Write(pkt); err != nil {
+		if isMsgSizeError(err) {
+			kMTU, _ := queryKernelConnMTU(peer.targetConn)
+			peer.noteMsgSize(len(pkt), kMTU, s.cfg.TransitTarget)
+			return
+		}
 		// Если сокет успел закрыться параллельно при истечении простоя, удаляем запись и открываем новую один раз.
 		s.blindMu.Lock()
 		if cur, ok := s.blindUDP[clientAddr.String()]; ok && cur == peer {
@@ -676,7 +731,10 @@ func (s *Server) handleBlindUDP(pkt []byte, clientAddr *net.UDPAddr) {
 		s.blindMu.Unlock()
 		if retryPeer, rerr := s.getOrCreateBlindUDPPeer(clientAddr); rerr == nil {
 			retryPeer.lastActive.Store(s.now().UnixNano())
-			_, _ = retryPeer.targetConn.Write(pkt)
+			if _, werr := retryPeer.targetConn.Write(pkt); werr != nil && isMsgSizeError(werr) {
+				kMTU, _ := queryKernelConnMTU(retryPeer.targetConn)
+				retryPeer.noteMsgSize(len(pkt), kMTU, s.cfg.TransitTarget)
+			}
 		}
 	}
 }
@@ -698,11 +756,22 @@ func (s *Server) getOrCreateBlindUDPPeer(clientAddr *net.UDPAddr) (*blindUDPPeer
 	if err != nil {
 		return nil, err
 	}
+	setUDPSocketDFConn(targetConn)
 
 	peer := &blindUDPPeer{
 		clientAddr: cloneUDPAddr(clientAddr),
 		targetConn: targetConn,
 	}
+	initialOuter := s.maxOuterUDP
+	if initialOuter <= 0 {
+		initialOuter = DefaultMaxOuterUDPSize
+	}
+	if outMTU := InterfaceMTUByLocalAddr(targetConn.LocalAddr()); outMTU >= MinPathMTU {
+		if outOuter := outMTU - IPv4UDPOverhead; outOuter < initialOuter {
+			initialOuter = outOuter
+		}
+	}
+	peer.maxOuter.Store(int64(initialOuter))
 	peer.lastActive.Store(s.now().UnixNano())
 
 	s.blindMu.Lock()
@@ -758,7 +827,9 @@ func (s *Server) blindUDPReturnLoop(key string, peer *blindUDPPeer) {
 		peer.lastActive.Store(s.now().UnixNano())
 		waitTimeout = idleTimeout
 		if s.udpConn != nil {
-			_, _ = s.udpConn.WriteToUDP(buf[:n], peer.clientAddr)
+			if _, werr := s.udpConn.WriteToUDP(buf[:n], peer.clientAddr); werr != nil && isMsgSizeError(werr) {
+				peer.noteMsgSize(n, 0, s.cfg.TransitTarget)
+			}
 		}
 	}
 }
