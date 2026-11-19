@@ -75,7 +75,17 @@ func (o *deadlineOutbound) DialContext(ctx context.Context, network string, dest
 	if err != nil {
 		return nil, err
 	}
-	return &deadlineConn{Conn: conn}, nil
+	return newDeadlineConn(conn, destination), nil
+}
+
+// newDeadlineConn запоминает адрес назначения: у SOCKS-выхода к встроенному xray RemoteAddr — 127.0.0.1,
+// а OpenConnect по RemoteAddr открывает второе соединение (туннель CSTP) и ушёл бы на локальный адрес.
+func newDeadlineConn(conn net.Conn, destination M.Socksaddr) *deadlineConn {
+	c := &deadlineConn{Conn: conn}
+	if destination.IsIP() {
+		c.remote = destination.TCPAddr()
+	}
+	return c
 }
 
 func (o *deadlineOutbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -90,8 +100,16 @@ func (o *deadlineOutbound) ListenPacket(ctx context.Context, destination M.Socks
 // эмулируется таймером, который закрывает соединение. Нулевое время снимает таймер.
 type deadlineConn struct {
 	net.Conn
+	remote net.Addr
 	access sync.Mutex
 	timer  *time.Timer
+}
+
+func (c *deadlineConn) RemoteAddr() net.Addr {
+	if c.remote != nil {
+		return c.remote
+	}
+	return c.Conn.RemoteAddr()
 }
 
 func (c *deadlineConn) SetDeadline(t time.Time) error      { return c.set(t, c.Conn.SetDeadline) }

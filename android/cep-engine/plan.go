@@ -53,6 +53,11 @@ type Plan struct {
 	Hops      []Profile `json:"hops"`
 	DNS       []string  `json:"dns"`
 	BlockIPv6 bool      `json:"blockIPv6"`
+	// Bypass — сети и адреса мимо цепочки: «192.168.0.0/16, 203.0.113.7».
+	Bypass string `json:"bypass"`
+	// ServerIPs — адреса серверов с прошлого подключения (по узлам). Передаются при переподключении
+	// под kill switch: DNS устройства тогда идёт в VPN, который никто не читает, и разрешить имена нельзя.
+	ServerIPs []string `json:"serverIPs,omitempty"`
 }
 
 func parsePlan(planJSON string) (*Plan, error) {
@@ -196,6 +201,9 @@ func Validate(planJSON string) string {
 		return mustJSON([]string{err.Error()})
 	}
 	problems := []string{}
+	if _, err := parseRoutes(plan.Bypass); err != nil {
+		problems = append(problems, "Исключения: "+err.Error())
+	}
 	for i, hop := range plan.Hops {
 		if reason := Supported(hop.Proto); reason != "" {
 			problems = append(problems, fmt.Sprintf("«%s»: %s", hop.Name, reason))
@@ -263,6 +271,11 @@ func resolveAll(plan *Plan, log func(string)) ([]string, error) {
 		}
 		if ip, err := netip.ParseAddr(host); err == nil {
 			ips[i] = ip.String()
+			continue
+		}
+		if i < len(plan.ServerIPs) && plan.ServerIPs[i] != "" {
+			ips[i] = plan.ServerIPs[i]
+			log(fmt.Sprintf("%s: %s → %s (с прошлого подключения)", plan.Hops[i].Name, host, ips[i]))
 			continue
 		}
 		addrs, err := net.LookupIP(host)

@@ -20,8 +20,12 @@ import android.system.OsConstants
 import com.example.contactsync.R
 import kotlinx.serialization.Serializable
 import java.io.File
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.NetworkInterface
+import kotlin.random.Random
 import kotlin.concurrent.thread
 
 /**
@@ -39,6 +43,8 @@ class CepVpnService : VpnService(), cepcore.Platform {
         val mtu: Int,
         val dns: List<String>,
         val blockIPv6: Boolean,
+        /** Что заворачивать в VPN: 0.0.0.0/0 без исключений цепочки. */
+        val routes: List<String> = listOf("0.0.0.0/0"),
     )
 
     /** Сетевой интерфейс для движка: Go на Android не может прочитать их сам через netlink. */
@@ -56,7 +62,9 @@ class CepVpnService : VpnService(), cepcore.Platform {
 
     private var engine: cepcore.Service? = null
     private var tun: ParcelFileDescriptor? = null
-    private var stopping = false
+    @Volatile private var stopping = false
+    /** Адреса серверов с последнего удачного подключения: под kill switch DNS устройства недоступен. */
+    @Volatile private var serverIPs: List<String>? = null
     private var defaultNetwork: Network? = null
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
 
@@ -90,26 +98,140 @@ class CepVpnService : VpnService(), cepcore.Platform {
         CepEngine.log("подключение «${plan.chainName}»: ${plan.hops.joinToString(" → ") { it.name }}")
         watchDefaultNetwork()
         synchronized(this) { stopping = false }
-        val planJson = CepLogic.json.encodeToString(CepPlan.serializer(), plan)
-        thread(name = "cep-start") {
+        serverIPs = null
+        thread(name = "cep-chain") { runChain(plan) }
+    }
+
+    /**
+     * Поднимает цепочку и держит её. После разрыва уже работавшей цепочки закрывает движок и поднимает его
+     * заново с нарастающей паузой, пока не нажмут «Отключить». Если не удалось первое подключение, повтора нет:
+     * это почти всегда настройки, и пользователь как раз смотрит на экран.
+     */
+    private fun runChain(plan: CepPlan) {
+        var wasConnected = false
+        var attempt = 0
+        while (!stopping) {
             try {
-                val started = cepcore.Cepcore.start(planJson, filesDir.absolutePath, this)
+                val cached = serverIPs
+                val p = if (attempt > 0 && plan.killSwitch && cached != null) plan.copy(serverIPs = cached) else plan
+                val started = cepcore.Cepcore.start(CepLogic.json.encodeToString(CepPlan.serializer(), p), filesDir.absolutePath, this)
                 synchronized(this) {
                     // «Отключить» нажали, пока цепочка поднималась
                     if (stopping) {
                         started.close()
-                        return@thread
+                        tun?.close()
+                        tun = null
+                        return
                     }
                     engine = started
                 }
-                CepEngine.set { it.copy(phase = CepPhase.CONNECTED, error = null) }
-                CepEngine.log("цепочка запущена")
+                serverIPs = started.serverIPs().split(',').filter { it.isNotEmpty() }
+                defaultNetwork?.let { report(connectivity.getLinkProperties(it)) }
+                val reconnected = attempt > 0
+                wasConnected = true
+                attempt = 0
+                CepEngine.set {
+                    it.copy(
+                        phase = CepPhase.CONNECTED, error = null, reconnectAttempt = null, nextAttemptAt = null,
+                        killSwitch = false, reconnects = it.reconnects + if (reconnected) 1 else 0,
+                    )
+                }
+                CepEngine.log(if (reconnected) "цепочка поднята заново" else "цепочка запущена")
+                if (!plan.autoReconnect) return
+                val broken = watch(plan) ?: return
+                throw IllegalStateException(broken)
             } catch (e: Exception) {
+                if (stopping) return
                 CepEngine.log("ошибка: ${e.message}")
-                shutdown()
-                CepEngine.set { it.copy(phase = CepPhase.FAILED, error = e.message) }
-                stopSelf()
+                if (!wasConnected || !plan.autoReconnect) {
+                    shutdown()
+                    CepEngine.set { it.copy(phase = CepPhase.FAILED, error = e.message, killSwitch = false) }
+                    stopSelf()
+                    return
+                }
+                closeEngine(keepTun = plan.killSwitch)
+                attempt++
+                val delay = CepLogic.reconnectDelayMs(attempt)
+                CepEngine.set {
+                    it.copy(
+                        phase = CepPhase.RECONNECTING, error = e.message, reconnectAttempt = attempt,
+                        nextAttemptAt = System.currentTimeMillis() + delay, killSwitch = plan.killSwitch,
+                    )
+                }
+                CepEngine.log(
+                    "переподключение: попытка $attempt через ${delay / 1000} с" +
+                        if (plan.killSwitch) " (kill switch: трафик мимо цепочки заблокирован)" else "",
+                )
+                if (!pause(delay)) return
             }
+        }
+    }
+
+    /**
+     * Следит за живостью цепочки: каждые 15 с (первый раз через 30 с) шлёт через VPN DNS-запрос к DNS цепочки.
+     * Три неудачи подряд — разрыв, возвращает причину; null — пришла команда остановки.
+     * Проверка по UDP: TCP sing-box принимает сам, ещё до выхода в сеть.
+     */
+    private fun watch(plan: CepPlan): String? {
+        val bypass = CepLogic.parseCidrs(plan.bypass).getOrDefault(emptyList())
+        val targets = CepLogic.healthTargets(plan.dns, bypass)
+        if (targets.isEmpty()) CepEngine.log("проверка связи выключена: DNS цепочки только в локальной сети или исключениях")
+        var failures = 0
+        if (!pause(30_000)) return null
+        while (!stopping) {
+            if (targets.isNotEmpty()) {
+                if (targets.any(::dnsAnswers)) {
+                    failures = 0
+                } else {
+                    failures++
+                    CepEngine.log("нет ответа через цепочку от ${targets.joinToString(", ")} ($failures/3)")
+                    if (failures >= 3) return "цепочка не отвечает: нет ответа DNS от ${targets.joinToString(", ")} за 45 с"
+                }
+            }
+            if (!pause(15_000)) return null
+        }
+        return null
+    }
+
+    /** Сокет не защищён через protect, поэтому запрос идёт через VPN, то есть через всю цепочку. */
+    private fun dnsAnswers(server: String): Boolean = runCatching {
+        DatagramSocket().use { socket ->
+            socket.soTimeout = 2000
+            val id = Random.nextInt(1, 0xFFFF)
+            val query = CepLogic.dnsProbeQuery(id)
+            socket.send(DatagramPacket(query, query.size, InetAddress.getByName(server), 53))
+            val buf = ByteArray(1500)
+            val deadline = System.currentTimeMillis() + 2000
+            while (System.currentTimeMillis() < deadline) {
+                val packet = DatagramPacket(buf, buf.size)
+                socket.receive(packet)
+                if (CepLogic.isDnsProbeAnswer(id, buf, packet.length)) return@use true
+            }
+            false
+        }
+    }.getOrDefault(false)
+
+    /** Пауза с проверкой «Отключить»; false — цепочку отключают. */
+    private fun pause(ms: Long): Boolean {
+        val deadline = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < deadline) {
+            if (stopping) return false
+            Thread.sleep(250)
+        }
+        return !stopping
+    }
+
+    /**
+     * Закрывает движок перед новой попыткой. keepTun — kill switch: VPN остаётся поднятым, но читать его
+     * некому, и трафик мимо цепочки не уходит; исключения в VPN не попадают и работают.
+     */
+    @Synchronized
+    private fun closeEngine(keepTun: Boolean) {
+        engine?.close()
+        engine = null
+        if (!keepTun) {
+            tun?.close()
+            tun = null
         }
     }
 
@@ -118,7 +240,7 @@ class CepVpnService : VpnService(), cepcore.Platform {
         CepEngine.set { it.copy(phase = CepPhase.STOPPING) }
         thread(name = "cep-stop") {
             shutdown()
-            CepEngine.set { it.copy(phase = CepPhase.STOPPED) }
+            CepEngine.set { it.copy(phase = CepPhase.STOPPED, reconnectAttempt = null, nextAttemptAt = null, killSwitch = false) }
             CepEngine.log("остановлено")
             stopSelf()
         }
@@ -139,16 +261,18 @@ class CepVpnService : VpnService(), cepcore.Platform {
     override fun protect(fd: Int): Boolean = super.protect(fd)
 
     override fun openTun(settingsJSON: String): Int {
+        if (stopping) throw IllegalStateException("цепочку отключают")
         if (prepare(this) != null) throw IllegalStateException("нет разрешения на VPN — откройте CEP")
         val s = CepLogic.json.decodeFromString(TunSettings.serializer(), settingsJSON)
         val builder = Builder()
             .setSession(CepEngine.state.value.chainName)
             .setMtu(s.mtu)
             .addAddress(s.address, s.prefix)
-            .addRoute("0.0.0.0", 0)
             .setConfigureIntent(
                 PendingIntent.getActivity(this, 0, Intent(this, CepActivity::class.java), PendingIntent.FLAG_IMMUTABLE),
             )
+        // Исключения цепочки в маршруты VPN не входят — их трафик идёт напрямую через сеть устройства.
+        s.routes.forEach { builder.addRoute(it.substringBefore('/'), it.substringAfter('/').toInt()) }
         s.dns.forEach { builder.addDnsServer(it) }
         // Без адреса и маршрутов IPv6 Android блокирует IPv6 целиком — это и есть «блокировать IPv6».
         if (!s.blockIPv6) builder.allowFamily(OsConstants.AF_INET6)
@@ -156,7 +280,7 @@ class CepVpnService : VpnService(), cepcore.Platform {
         val pfd = builder.establish() ?: throw IllegalStateException("VPN не поднят: нет разрешения")
         tun?.close()
         tun = pfd
-        CepEngine.log("VPN: ${s.address}/${s.prefix}, MTU ${s.mtu}, DNS ${s.dns.joinToString(", ")}")
+        CepEngine.log("VPN: ${s.address}/${s.prefix}, MTU ${s.mtu}, DNS ${s.dns.joinToString(", ")}, маршрутов ${s.routes.size}")
         return pfd.fd
     }
 

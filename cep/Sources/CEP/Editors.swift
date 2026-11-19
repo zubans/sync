@@ -26,6 +26,7 @@ struct ProfileEditor: View {
                 TextField("Название", text: p.name)
                 LabeledContent("Протокол", value: p.wrappedValue.proto.title)
             }
+            SubscriptionServerSection(profile: p.wrappedValue)
             switch p.wrappedValue.proto {
             case .vless, .hysteria2, .hysteria:
                 Section("Ссылка") {
@@ -325,6 +326,20 @@ struct ChainEditor: View {
                     set: { binding.wrappedValue.dns = $0.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init) }
                 ), prompt: Text("1.1.1.1, 8.8.8.8 — пусто, чтобы не менять"))
                 Toggle("Блокировать IPv6 (защита от утечки мимо цепочки)", isOn: c.blockIPv6)
+                Toggle("Переподключать автоматически при разрыве", isOn: c.autoReconnect)
+                Toggle("Kill switch: пока переподключается, не выпускать трафик мимо цепочки", isOn: c.killSwitch)
+                    .disabled(!c.wrappedValue.autoReconnect)
+            }
+            Section {
+                TextField("Сети и адреса", text: c.bypass, prompt: Text("192.168.0.0/16, 203.0.113.7"), axis: .vertical)
+                    .lineLimit(1...6)
+                if let error = Result(catching: { try RouteList.parse(c.wrappedValue.bypass) }).failureMessage {
+                    Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                }
+            } header: {
+                Text("Мимо цепочки")
+            } footer: {
+                Text("Эти сети и адреса пойдут напрямую, через исходный шлюз Mac, а не через VPN. Через запятую, пробел или с новой строки; адрес без маски — один хост (/32). Только IPv4. Если исключение совпадает с сетью узла из «Сети через этот узел», побеждает исключение.")
             }
             if !problems.isEmpty || !missing.isEmpty {
                 Section("Нужно исправить") {

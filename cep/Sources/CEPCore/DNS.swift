@@ -5,14 +5,21 @@ import Foundation
 public final class DNSOverride {
     private static let scutil = "/usr/sbin/scutil"
     private let key: String
+    private let service: String
     private let original: ScutilDict?
     private let servers: [String]
+
+    /// Основной сетевой сервис сменился (другой Wi-Fi, кабель): подмена осталась на старом.
+    public var isStale: Bool {
+        ScutilDict.parse(Self.show("State:/Network/Global/IPv4")).scalars["PrimaryService"] != service
+    }
 
     public init?(servers: [String]) {
         guard !servers.isEmpty,
               let service = ScutilDict.parse(Self.show("State:/Network/Global/IPv4")).scalars["PrimaryService"]
         else { return nil }
         key = "State:/Network/Service/\(service)/DNS"
+        self.service = service
         let current = ScutilDict.parse(Self.show(key))
         original = current.isEmpty ? nil : current
         self.servers = servers

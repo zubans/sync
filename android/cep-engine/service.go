@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -38,6 +39,8 @@ type TunSettings struct {
 	MTU       int      `json:"mtu"`
 	DNS       []string `json:"dns"`
 	BlockIPv6 bool     `json:"blockIPv6"`
+	// Routes — что заворачивать в VPN: 0.0.0.0/0 без исключений цепочки.
+	Routes []string `json:"routes"`
 }
 
 // Service — запущенная цепочка.
@@ -45,6 +48,8 @@ type Service struct {
 	instance *box.Box
 	cancel   context.CancelFunc
 	platform *platform
+	ips      []string
+	xray     io.Closer
 	closed   sync.Once
 }
 
@@ -79,6 +84,14 @@ func Start(planJSON, workDir string, p Platform) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	bypass, err := parseRoutes(plan.Bypass)
+	if err != nil {
+		return nil, fmt.Errorf("исключения: %w", err)
+	}
+	routes := vpnRoutes(bypass)
+	if len(bypass) > 0 {
+		logf("мимо цепочки: " + strings.Join(bypass, ", "))
+	}
 	autoProbeTransitInitialMTU(plan, ips, logf)
 	config, err := buildConfig(plan, ips)
 	if err != nil {
@@ -92,14 +105,35 @@ func Start(planJSON, workDir string, p Platform) (*Service, error) {
 			}
 		}
 	}
+	xrayConfig, err := moveVLESSToXray(config, plan)
+	if err != nil {
+		return nil, err
+	}
 	pretty, _ := json.MarshalIndent(redact(config), "", "  ")
 	logf("конфиг sing-box:\n" + string(pretty))
+	var xrayInstance io.Closer
+	if xrayConfig != nil {
+		prettyX, _ := json.MarshalIndent(redact(xrayConfig), "", "  ")
+		logf("конфиг xray:\n" + string(prettyX))
+		setXrayProtect(p.Protect)
+		instance, err := startXray(xrayConfig, p)
+		if err != nil {
+			return nil, err
+		}
+		xrayInstance = instance
+	}
+	closeXray := func() {
+		if xrayInstance != nil {
+			xrayInstance.Close()
+		}
+	}
 
 	raw, _ := json.Marshal(config)
 	ctx, cancel := context.WithCancel(engineContext(context.Background()))
 	options, err := sjson.UnmarshalExtendedContext[option.Options](ctx, raw)
 	if err != nil {
 		cancel()
+		closeXray()
 		return nil, fmt.Errorf("конфиг sing-box: %w", err)
 	}
 	dns := plan.DNS
@@ -112,6 +146,7 @@ func Start(planJSON, workDir string, p Platform) (*Service, error) {
 		MTU:       effectiveTunMTU,
 		DNS:       dns,
 		BlockIPv6: plan.BlockIPv6,
+		Routes:    routes,
 	}}
 	service.MustRegister[adapter.PlatformInterface](ctx, pl)
 	instance, err := box.New(box.Options{
@@ -121,14 +156,21 @@ func Start(planJSON, workDir string, p Platform) (*Service, error) {
 	})
 	if err != nil {
 		cancel()
+		closeXray()
 		return nil, err
 	}
 	if err := instance.Start(); err != nil {
 		instance.Close()
 		cancel()
+		closeXray()
 		return nil, err
 	}
-	return &Service{instance: instance, cancel: cancel, platform: pl}, nil
+	return &Service{instance: instance, cancel: cancel, platform: pl, ips: ips, xray: xrayInstance}, nil
+}
+
+// ServerIPs — адреса серверов узлов через запятую, по порядку: Kotlin запоминает их для переподключения.
+func (s *Service) ServerIPs() string {
+	return strings.Join(s.ips, ",")
 }
 
 // UpdateDefaultInterface — Kotlin сообщает о смене сети (Wi-Fi ↔ мобильная); index -1 — сети нет.
@@ -140,6 +182,9 @@ func (s *Service) Close() {
 	s.closed.Do(func() {
 		s.instance.Close()
 		s.cancel()
+		if s.xray != nil {
+			s.xray.Close()
+		}
 	})
 }
 
@@ -166,7 +211,8 @@ func redact(v any) any {
 		out := map[string]any{}
 		for k, val := range t {
 			switch k {
-			case "password", "argonPassword", "uuid", "client_key", "client_secret", "key", "auth_str", "public_key", "short_id":
+			case "password", "argonPassword", "uuid", "client_key", "client_secret", "key", "auth_str", "public_key", "short_id",
+				"id", "publicKey", "shortId", "mldsa65Verify":
 				out[k] = "***"
 			default:
 				out[k] = redact(val)

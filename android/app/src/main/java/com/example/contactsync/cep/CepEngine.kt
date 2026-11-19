@@ -12,6 +12,7 @@ enum class CepPhase(val title: String) {
     STOPPED("Отключено"),
     CONNECTING("Подключение…"),
     CONNECTED("Подключено"),
+    RECONNECTING("Переподключение…"),
     STOPPING("Отключение…"),
     FAILED("Ошибка"),
 }
@@ -22,8 +23,17 @@ data class CepEngineState(
     /** Узлы поднятой цепочки по порядку. */
     val hops: List<CepProfile> = emptyList(),
     val error: String? = null,
+    /** Номер попытки переподключения и когда она начнётся (мс, System.currentTimeMillis). */
+    val reconnectAttempt: Int? = null,
+    val nextAttemptAt: Long? = null,
+    /** Сколько раз цепочку уже поднимали заново после разрыва. */
+    val reconnects: Int = 0,
+    /** Пока цепочка переподключается, трафик мимо неё заблокирован. */
+    val killSwitch: Boolean = false,
 ) {
-    val isActive: Boolean get() = phase == CepPhase.CONNECTING || phase == CepPhase.CONNECTED || phase == CepPhase.STOPPING
+    val isActive: Boolean
+        get() = phase == CepPhase.CONNECTING || phase == CepPhase.CONNECTED ||
+            phase == CepPhase.RECONNECTING || phase == CepPhase.STOPPING
 }
 
 /** Состояние движка и журнал: пишет CepVpnService, читает экран CEP. Журнал — только в памяти. */

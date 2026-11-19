@@ -70,6 +70,9 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
     public var proto: VPNProtocol
     /// Ссылка vless:// hysteria2:// hy2:// hysteria://
     public var uri = ""
+    /// Профиль из подписки: какой подписки и какой её сервер (имя). Ссылку uri берёт при обновлении подписки.
+    public var subscriptionID: UUID? = nil
+    public var subscriptionServer = ""
     /// Текст .ovpn или .conf AmneziaWG.
     public var config = ""
     /// host или host:port для Argon4, OpenConnect, SSTP.
@@ -129,6 +132,8 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
         name = try c.decode(String.self, forKey: .name)
         proto = try c.decode(VPNProtocol.self, forKey: .proto)
         uri = try c.decodeIfPresent(String.self, forKey: .uri) ?? ""
+        subscriptionID = try c.decodeIfPresent(UUID.self, forKey: .subscriptionID)
+        subscriptionServer = try c.decodeIfPresent(String.self, forKey: .subscriptionServer) ?? ""
         config = try c.decodeIfPresent(String.self, forKey: .config) ?? ""
         server = try c.decodeIfPresent(String.self, forKey: .server) ?? ""
         username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
@@ -164,6 +169,12 @@ public struct Chain: Codable, Identifiable, Hashable, Sendable {
     public var hops: [UUID] = []
     public var dns: [String] = ["1.1.1.1", "8.8.8.8"]
     public var blockIPv6 = true
+    /// Сети и адреса мимо цепочки, через исходный шлюз Mac: «192.168.0.0/16, 203.0.113.7».
+    public var bypass = ""
+    /// После разрыва поднимать цепочку заново, пока пользователь не отключит её сам.
+    public var autoReconnect = true
+    /// Пока цепочка переподключается, блокировать трафик мимо неё (кроме локальной сети и исключений).
+    public var killSwitch = true
 
     public init(name: String) {
         self.name = name
@@ -176,6 +187,9 @@ public struct Chain: Codable, Identifiable, Hashable, Sendable {
         hops = try c.decodeIfPresent([UUID].self, forKey: .hops) ?? []
         dns = try c.decodeIfPresent([String].self, forKey: .dns) ?? ["1.1.1.1", "8.8.8.8"]
         blockIPv6 = try c.decodeIfPresent(Bool.self, forKey: .blockIPv6) ?? true
+        bypass = try c.decodeIfPresent(String.self, forKey: .bypass) ?? ""
+        autoReconnect = try c.decodeIfPresent(Bool.self, forKey: .autoReconnect) ?? true
+        killSwitch = try c.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? true
     }
 }
 
@@ -185,12 +199,18 @@ public struct Plan: Codable, Sendable {
     public var hops: [Profile]
     public var dns: [String]
     public var blockIPv6: Bool
+    public var bypass: String
+    public var autoReconnect: Bool
+    public var killSwitch: Bool
 
     public init(chain: Chain, profiles: [Profile]) {
         chainName = chain.name
         hops = chain.hops.compactMap { id in profiles.first { $0.id == id } }
         dns = chain.dns
         blockIPv6 = chain.blockIPv6
+        bypass = chain.bypass
+        autoReconnect = chain.autoReconnect
+        killSwitch = chain.killSwitch
     }
 }
 
@@ -200,6 +220,11 @@ public enum ChainValidation {
         var result: [String] = []
         if plan.hops.isEmpty {
             result.append("В цепочке нет ни одного узла")
+        }
+        do {
+            _ = try RouteList.parse(plan.bypass)
+        } catch {
+            result.append("Исключения: \(error.localizedDescription)")
         }
         for (index, hop) in plan.hops.enumerated() {
             do {

@@ -123,6 +123,44 @@ final class ChainTests: XCTestCase {
         XCTAssertTrue(ChainValidation.problems(plan).isEmpty)
     }
 
+    func testBypassIsPassedToPlanAndValidated() {
+        var proxy = Profile(name: "hy", proto: .hysteria2)
+        proxy.uri = "hy2://pw@1.2.3.4:443"
+        var chain = Chain(name: "c")
+        chain.hops = [proxy.id]
+        chain.bypass = "192.168.0.0/16, 203.0.113.7"
+        let plan = Plan(chain: chain, profiles: [proxy])
+        XCTAssertEqual(try RouteList.parse(plan.bypass), ["192.168.0.0/16", "203.0.113.7/32"])
+        XCTAssertTrue(ChainValidation.problems(plan).isEmpty)
+
+        chain.bypass = "10.0.0.0/33"
+        XCTAssertTrue(ChainValidation.problems(Plan(chain: chain, profiles: [proxy])).contains { $0.hasPrefix("Исключения:") })
+    }
+
+    func testChainDecodesWithoutBypass() throws {
+        let json = #"{"id":"\#(UUID().uuidString)","name":"c"}"#
+        let chain = try JSONDecoder().decode(Chain.self, from: Data(json.utf8))
+        XCTAssertEqual(chain.bypass, "")
+        XCTAssertTrue(chain.autoReconnect)
+        XCTAssertTrue(chain.killSwitch)
+    }
+
+    func testReconnectDelayGrowsAndCapsAtMinute() {
+        XCTAssertEqual((1...7).map { Reconnect.delay(attempt: $0) }, [2, 5, 10, 20, 30, 60, 60])
+    }
+
+    func testHealthTargetsSkipLocalAndBypassedServers() {
+        XCTAssertEqual(Reconnect.healthTargets(dns: ["192.168.1.1", "9.9.9.9", "1.1.1.1"], bypass: ["1.1.1.1/32"]), ["9.9.9.9"])
+        XCTAssertEqual(Reconnect.healthTargets(dns: [], bypass: []), ["1.1.1.1", "8.8.8.8"])
+        XCTAssertEqual(Reconnect.healthTargets(dns: ["10.0.0.1"], bypass: []), [])
+    }
+
+    func testCIDRContains() {
+        XCTAssertTrue(RouteList.contains("172.16.0.0/12", "172.31.255.1"))
+        XCTAssertFalse(RouteList.contains("172.16.0.0/12", "172.32.0.1"))
+        XCTAssertTrue(RouteList.contains("203.0.113.7/32", "203.0.113.7"))
+    }
+
     func testProfileDecodesWithMissingFields() throws {
         let json = #"{"id":"\#(UUID().uuidString)","name":"x","proto":"sstp"}"#
         let p = try JSONDecoder().decode(Profile.self, from: Data(json.utf8))

@@ -51,10 +51,11 @@ func TestVLESSRealityVision(t *testing.T) {
 	}
 }
 
-func TestXHTTPRejected(t *testing.T) {
+// xhttp sing-box не умеет, но узел VLESS целиком уходит во встроенный xray (xray_test.go), поэтому набросок не отклоняется.
+func TestXHTTPAcceptedForXray(t *testing.T) {
 	l, _ := parseLink("vless://u@example.com:443?type=xhttp&security=tls")
-	if _, err := singBoxOutbound(l, "1.2.3.4"); err == nil || !strings.Contains(err.Error(), "xhttp") {
-		t.Fatalf("ожидалась ошибка xhttp, получено %v", err)
+	if _, err := singBoxOutbound(l, "1.2.3.4"); err != nil {
+		t.Fatalf("xhttp должен проходить в xray: %v", err)
 	}
 }
 

@@ -71,6 +71,7 @@ private sealed interface Screen {
     data class Tab(val index: Int) : Screen
     data class EditChain(val id: String) : Screen
     data class EditProfile(val id: String) : Screen
+    data class EditSubscription(val id: String) : Screen
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,6 +99,7 @@ fun CepApp(model: CepViewModel, connect: (CepChain) -> Unit) {
                 is Screen.Tab -> listOf("Подключение", "Цепочки", "Профили")[s.index]
                 is Screen.EditChain -> "Цепочка"
                 is Screen.EditProfile -> "Профиль"
+                is Screen.EditSubscription -> "Подписка"
             }
             TopAppBar(
                 title = { Text(title) },
@@ -134,10 +136,18 @@ fun CepApp(model: CepViewModel, connect: (CepChain) -> Unit) {
             is Screen.Tab -> when (s.index) {
                 0 -> StatusScreen(model, connect, modifier)
                 1 -> ChainsScreen(model, onOpen = { screen = Screen.EditChain(it) }, modifier)
-                else -> ProfilesScreen(model, onOpen = { screen = Screen.EditProfile(it) }, modifier)
+                else -> ProfilesScreen(
+                    model, onOpen = { screen = Screen.EditProfile(it) },
+                    onOpenSubscription = { screen = Screen.EditSubscription(it) }, modifier,
+                )
             }
             is Screen.EditChain -> ChainEditor(model, s.id, connect, onClose = back, modifier)
-            is Screen.EditProfile -> ProfileEditor(model, s.id, onClose = back, modifier)
+            is Screen.EditProfile -> ProfileEditor(
+                model, s.id, onClose = back, modifier, onOpenSubscription = { screen = Screen.EditSubscription(it) },
+            )
+            is Screen.EditSubscription -> SubscriptionEditor(
+                model, s.id, onClose = back, onOpenProfile = { screen = Screen.EditProfile(it) }, modifier,
+            )
         }
     }
 
@@ -168,6 +178,15 @@ private fun StatusScreen(model: CepViewModel, connect: (CepChain) -> Unit, modif
                 )
                 state.hops.forEachIndexed { i, hop ->
                     Text("${i + 1}. ${hop.name} — ${hop.protocol?.title ?: hop.proto}")
+                }
+                if (state.phase == CepPhase.RECONNECTING) {
+                    ReconnectCountdown(state)
+                }
+                if (state.killSwitch && state.isActive) {
+                    Text("Kill switch: интернет мимо цепочки заблокирован до восстановления", style = MaterialTheme.typography.bodySmall)
+                }
+                if (state.reconnects > 0 && state.phase == CepPhase.CONNECTED) {
+                    Text("Переподключений после разрыва: ${state.reconnects}", style = MaterialTheme.typography.bodySmall)
                 }
                 state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (state.isActive) {
@@ -201,8 +220,26 @@ private fun StatusScreen(model: CepViewModel, connect: (CepChain) -> Unit, modif
 }
 
 @Composable
+private fun ReconnectCountdown(state: CepEngineState) {
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(state.nextAttemptAt) {
+        while (true) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    val left = state.nextAttemptAt?.let { ((it - now + 999) / 1000).coerceAtLeast(0) } ?: 0
+    val attempt = state.reconnectAttempt ?: 0
+    Text(
+        if (left > 0) "Разрыв — переподключение через $left с (попытка $attempt)" else "Переподключение: попытка $attempt…",
+        color = Color(0xFFEF6C00),
+    )
+}
+
+@Composable
 private fun phaseColor(phase: CepPhase): Color = when (phase) {
     CepPhase.CONNECTED -> Color(0xFF2E7D32)
+    CepPhase.RECONNECTING -> Color(0xFFEF6C00)
     CepPhase.FAILED -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurface
 }
@@ -239,6 +276,7 @@ private fun ChainEditor(model: CepViewModel, id: String, connect: (CepChain) -> 
     val store by model.store.collectAsStateWithLifecycle()
     val chain = store.chains.firstOrNull { it.id == id } ?: return
     var dns by remember(id) { mutableStateOf(chain.dns.joinToString(", ")) }
+    var bypass by remember(id) { mutableStateOf(chain.bypass) }
     var addOpen by remember { mutableStateOf(false) }
 
     LazyColumn(modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -291,6 +329,33 @@ private fun ChainEditor(model: CepViewModel, id: String, connect: (CepChain) -> 
             LabeledSwitch("Блокировать IPv6", chain.blockIPv6) { model.saveChain(chain.copy(blockIPv6 = it)) }
         }
         item {
+            val error = CepLogic.parseCidrs(bypass).exceptionOrNull()?.message
+            OutlinedTextField(
+                value = bypass,
+                onValueChange = {
+                    bypass = it
+                    model.saveChain(chain.copy(bypass = it))
+                },
+                label = { Text("Мимо цепочки") },
+                placeholder = { Text("192.168.0.0/16, 203.0.113.7") },
+                isError = error != null,
+                supportingText = {
+                    Text(error ?: "Сети и адреса через запятую — пойдут напрямую через сеть телефона, а не через VPN. Адрес без маски — один хост. Только IPv4.")
+                },
+                minLines = 1,
+                maxLines = 6,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        item {
+            LabeledSwitch("Переподключать автоматически при разрыве", chain.autoReconnect) { model.saveChain(chain.copy(autoReconnect = it)) }
+        }
+        item {
+            LabeledSwitch("Kill switch: пока переподключается, не выпускать трафик мимо цепочки", chain.killSwitch && chain.autoReconnect) {
+                if (chain.autoReconnect) model.saveChain(chain.copy(killSwitch = it))
+            }
+        }
+        item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 12.dp)) {
                 Button(onClick = { connect(chain) }) { Text("Подключить") }
                 OutlinedButton(onClick = { model.deleteChain(id); onClose() }) { Text("Удалить") }
@@ -304,11 +369,12 @@ private fun <T> List<T>.swap(i: Int, j: Int): List<T> = toMutableList().also { v
 // Профили
 
 @Composable
-private fun ProfilesScreen(model: CepViewModel, onOpen: (String) -> Unit, modifier: Modifier) {
+private fun ProfilesScreen(model: CepViewModel, onOpen: (String) -> Unit, onOpenSubscription: (String) -> Unit, modifier: Modifier) {
     val store by model.store.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     var protoMenu by remember { mutableStateOf(false) }
     var linkDialog by remember { mutableStateOf(false) }
+    var subscriptionDialog by remember { mutableStateOf(false) }
     val importFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(model::importStore)
     }
@@ -318,10 +384,25 @@ private fun ProfilesScreen(model: CepViewModel, onOpen: (String) -> Unit, modifi
 
     Box(modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize()) {
+            if (store.subscriptions.isNotEmpty()) {
+                item { Text("Подписки", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp)) }
+                items(store.subscriptions, key = { "sub-" + it.id }) { s ->
+                    ListItem(
+                        headlineContent = { Text(s.name) },
+                        supportingContent = { Text("серверов: ${s.servers.size}" + (s.info?.let { " · $it" } ?: "")) },
+                        modifier = Modifier.clickable { onOpenSubscription(s.id) },
+                    )
+                    HorizontalDivider()
+                }
+                item { Text("Профили", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp, 12.dp, 16.dp, 4.dp)) }
+            }
             items(store.profiles, key = { it.id }) { p ->
                 ListItem(
                     headlineContent = { Text(p.name) },
-                    supportingContent = { Text(p.protocol?.unsupportedReason ?: p.protocol?.title ?: p.proto) },
+                    supportingContent = {
+                        val sub = p.subscriptionID?.let { model.subscription(it)?.name }
+                        Text((p.protocol?.unsupportedReason ?: p.protocol?.title ?: p.proto) + (sub?.let { " · из подписки «$it»" } ?: ""))
+                    },
                     modifier = Modifier.clickable { onOpen(p.id) },
                 )
                 HorizontalDivider()
@@ -331,6 +412,7 @@ private fun ProfilesScreen(model: CepViewModel, onOpen: (String) -> Unit, modifi
             ExtendedFloatingActionButton(onClick = { menu = true }, icon = { Icon(Icons.Filled.Add, null) }, text = { Text("Добавить") })
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("Профиль из ссылки…") }, onClick = { menu = false; linkDialog = true })
+                DropdownMenuItem(text = { Text("Подписка…") }, onClick = { menu = false; subscriptionDialog = true })
                 DropdownMenuItem(text = { Text("Новый профиль…") }, onClick = { menu = false; protoMenu = true })
                 DropdownMenuItem(text = { Text("Загрузить profiles.json с Mac…") }, onClick = { menu = false; importFile.launch(arrayOf("*/*")) })
                 DropdownMenuItem(text = { Text("Сохранить profiles.json…") }, onClick = { menu = false; exportFile.launch("profiles.json") })
@@ -362,10 +444,123 @@ private fun ProfilesScreen(model: CepViewModel, onOpen: (String) -> Unit, modifi
             dismissButton = { TextButton(onClick = { linkDialog = false }) { Text("Отмена") } },
         )
     }
+
+    if (subscriptionDialog) {
+        var url by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { subscriptionDialog = false },
+            title = { Text("Подписка") },
+            text = {
+                OutlinedTextField(
+                    value = url, onValueChange = { url = it }, singleLine = true,
+                    label = { Text("Адрес подписки https://…") },
+                    supportingText = {
+                        Text("Панели с лимитом устройств получают HWID телефона — он займёт место в лимите, если не указать HWID зарегистрированного устройства в настройках подписки.")
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    subscriptionDialog = false
+                    model.addSubscription(url)?.let { onOpenSubscription(it.id) }
+                }) { Text("Добавить") }
+            },
+            dismissButton = { TextButton(onClick = { subscriptionDialog = false }) { Text("Отмена") } },
+        )
+    }
 }
 
 @Composable
-private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, modifier: Modifier) {
+private fun SubscriptionEditor(model: CepViewModel, id: String, onClose: () -> Unit, onOpenProfile: (String) -> Unit, modifier: Modifier) {
+    val store by model.store.collectAsStateWithLifecycle()
+    val refreshing by model.refreshing.collectAsStateWithLifecycle()
+    val s = store.subscriptions.firstOrNull { it.id == id } ?: return
+    val busy = id in refreshing
+
+    LazyColumn(modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { Field("Название", s.name) { model.saveSubscription(s.copy(name = it)) } }
+        item { Field("Адрес", s.url, mono = true) { model.saveSubscription(s.copy(url = it.trim())) } }
+        item {
+            Field(
+                "HWID", s.hwid, mono = true,
+                hint = "Пусто — свой HWID телефона (${model.deviceHwid}), новое место в лимите устройств. Чтобы не занимать место, впишите HWID уже зарегистрированного устройства.",
+            ) { model.saveSubscription(s.copy(hwid = it.trim())) }
+        }
+        s.info?.let { item { Text("Трафик: $it", style = MaterialTheme.typography.bodySmall) } }
+        item {
+            val updated = s.updatedAt?.let {
+                java.text.SimpleDateFormat("dd.MM.yyyy HH:mm", java.util.Locale.ROOT).format(java.util.Date(((it + CepLogic.APPLE_EPOCH) * 1000).toLong()))
+            } ?: "ещё нет"
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Обновлена: $updated", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                OutlinedButton(onClick = { model.refreshSubscription(id) }, enabled = !busy) {
+                    if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Text("Обновить")
+                }
+            }
+        }
+        item { Text("Серверы", style = MaterialTheme.typography.titleSmall) }
+        if (s.servers.isEmpty()) item { Text("Серверов пока нет — обновите подписку.") }
+        items(s.servers, key = { it.name }) { server ->
+            val linked = store.profiles.firstOrNull { it.subscriptionID == id && it.subscriptionServer == server.name }
+            val reason = CepLogic.serverUnsupportedReason(server)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(server.name)
+                    Text(
+                        reason ?: (server.protocol?.title.orEmpty() + (CepLogic.linkAddress(server.uri)?.let { " · $it" } ?: "")),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (reason != null) MaterialTheme.colorScheme.error else Color.Unspecified,
+                    )
+                    linked?.let {
+                        TextButton(onClick = { onOpenProfile(it.id) }) { Text("Профиль «${it.name}»") }
+                    }
+                }
+                TextButton(enabled = server.protocol != null, onClick = {
+                    model.addProfile(server, id)?.let { onOpenProfile(it.id) }
+                }) { Text("В профили") }
+            }
+            HorizontalDivider()
+        }
+        item {
+            Text(
+                "Профиль хранит выбор сервера: при обновлении подписки его ссылка заменяется свежей.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        item {
+            OutlinedButton(onClick = { model.deleteSubscription(id); onClose() }, modifier = Modifier.padding(vertical = 12.dp)) { Text("Удалить подписку") }
+        }
+    }
+}
+
+/** Профиль из подписки: какой сервер выбран и смена на другой сервер той же подписки. */
+@Composable
+private fun SubscriptionServerPicker(model: CepViewModel, p: CepProfile, onOpenSubscription: (String) -> Unit) {
+    val s = p.subscriptionID?.let { model.subscription(it) } ?: return
+    var open by remember { mutableStateOf(false) }
+    Column {
+        Text("Из подписки «${s.name}»", style = MaterialTheme.typography.titleSmall)
+        Box {
+            OutlinedButton(onClick = { open = true }) {
+                Text("Сервер: ${p.subscriptionServer}" + if (s.servers.none { it.name == p.subscriptionServer }) " — нет в подписке" else "")
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                s.servers.filter { it.protocol != null }.forEach { server ->
+                    val reason = CepLogic.serverUnsupportedReason(server)
+                    DropdownMenuItem(
+                        text = { Text(server.name + (reason?.let { " — $it" } ?: "")) },
+                        onClick = { open = false; model.selectServer(p.id, server) },
+                    )
+                }
+            }
+        }
+        TextButton(onClick = { onOpenSubscription(s.id) }) { Text("Открыть подписку") }
+        Text("Ссылка ниже обновляется вместе с подпиской; ручные правки перезапишет следующее обновление.", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, modifier: Modifier, onOpenSubscription: (String) -> Unit) {
     val store by model.store.collectAsStateWithLifecycle()
     val p = store.profiles.firstOrNull { it.id == id } ?: return
     val proto = p.protocol ?: return
@@ -374,8 +569,8 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
         uri?.let(model::readConfigFile)?.let { save(p.copy(config = it)) }
     }
     val scope = rememberCoroutineScope()
-    var argonPortText by remember(id) { mutableStateOf(p.argonPort?.toString().orEmpty()) }
     var mtuText by remember(id) { mutableStateOf(p.argonPathMTU?.toString().orEmpty()) }
+    var argonPortText by remember(id) { mutableStateOf(p.argonPort?.toString().orEmpty()) }
     var probingMtu by remember(id) { mutableStateOf(false) }
     var probeResult by remember(id) { mutableStateOf<MtuProbeResult?>(null) }
 
@@ -385,6 +580,7 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
             item { Text("$reason. Профиль хранится и переносится обратно на Mac, но в цепочке на телефоне не запустится.", color = MaterialTheme.colorScheme.error) }
         }
         item { Field("Название", p.name) { save(p.copy(name = it)) } }
+        if (p.subscriptionID != null) item { SubscriptionServerPicker(model, p, onOpenSubscription) }
         when {
             proto.isLink -> item {
                 Field("Ссылка", p.uri, minLines = 3) { save(p.copy(uri = it.trim())) }
