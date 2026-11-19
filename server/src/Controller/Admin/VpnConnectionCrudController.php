@@ -10,6 +10,9 @@ use App\Service\FeatureManager;
 use App\Service\MtuProbeService;
 use App\Service\NodeRuntimeExporter;
 use App\Service\VpnChainValidator;
+use App\Service\VpnSubscriptionService;
+use App\Repository\VpnSubscriptionRepository;
+use App\Vpn\SubscriptionParser;
 use App\Vpn\VpnProtocol;
 use Doctrine\ORM\EntityManagerInterface;
 use EasyCorp\Bundle\EasyAdminBundle\Attribute\AdminRoute;
@@ -51,6 +54,8 @@ final class VpnConnectionCrudController extends AbstractCrudController
         private readonly CepExportService $cepExport,
         private readonly MtuProbeService $mtuProbe,
         private readonly CsrfTokenManagerInterface $csrf,
+        private readonly VpnSubscriptionRepository $subscriptionRepository,
+        private readonly VpnSubscriptionService $subscriptions,
     ) {
     }
 
@@ -129,6 +134,30 @@ final class VpnConnectionCrudController extends AbstractCrudController
             ->hideOnIndex();
         yield BooleanField::new('enabled', 'Включено');
         yield TextField::new('targetSummary', 'Адрес / источник')->onlyOnIndex();
+
+        $subscriptions = $this->subscriptionRepository->findOrdered();
+        if ($subscriptions !== [] || $pageName === Crud::PAGE_DETAIL) {
+            $subscriptionChoices = [];
+            $serverChoices = [];
+            foreach ($subscriptions as $s) {
+                $subscriptionChoices[(string) $s] = $s->getExternalId();
+                foreach ($s->getServers() as $server) {
+                    if (SubscriptionParser::protocolOf($server['uri']) !== null) {
+                        $serverChoices[(string) $s][$server['name']] = $server['name'];
+                    }
+                }
+            }
+            yield FormField::addFieldset('Сервер из подписки')
+                ->setHelp('Выберите подписку и сервер — ссылка и протокол подставятся из подписки и будут обновляться вместе с ней (ручные правки URI перезапишет следующее обновление). Пусто — обычное подключение.');
+            yield ChoiceField::new('subscriptionId', 'Подписка')
+                ->setChoices($subscriptionChoices)
+                ->setRequired(false)
+                ->hideOnIndex();
+            yield ChoiceField::new('subscriptionServer', 'Сервер подписки')
+                ->setChoices($serverChoices)
+                ->setRequired(false)
+                ->hideOnIndex();
+        }
         yield TextField::new('externalId', 'UUID профиля')->onlyOnDetail();
 
         yield FormField::addFieldset('Параметры подключения')
@@ -262,8 +291,33 @@ final class VpnConnectionCrudController extends AbstractCrudController
     protected function validateCrudEntity(object $entity): array
     {
         \assert($entity instanceof VpnConnection);
+        $subscriptionError = $this->applySubscriptionServer($entity);
+        if ($subscriptionError !== null) {
+            return [$subscriptionError];
+        }
 
         return $this->validator->validateConnection($entity);
+    }
+
+    /** Подключение из подписки получает ссылку и протокол выбранного сервера до проверки и сохранения. */
+    private function applySubscriptionServer(VpnConnection $conn): ?string
+    {
+        $subscription = $this->subscriptionRepository->findOneByExternalId($conn->getSubscriptionId());
+        if ($conn->getSubscriptionId() === null) {
+            return null;
+        }
+        if ($subscription === null) {
+            return 'Подписка не найдена — выберите другую или очистите поле «Подписка».';
+        }
+        $server = $conn->getSubscriptionServer();
+        if ($server === null) {
+            return 'Выберите сервер подписки.';
+        }
+        if (!$this->subscriptions->applyServer($conn, $subscription, $server)) {
+            return sprintf('Сервера «%s» нет в подписке «%s» — обновите подписку или выберите другой сервер.', $server, $subscription);
+        }
+
+        return null;
     }
 
     #[AdminRoute('/{id}/probe-mtu', name: 'probe_mtu', options: ['methods' => ['POST']])]

@@ -1,0 +1,49 @@
+{% extends '@EasyAdmin/crud/detail.html.twig' %}
+
+{% block main %}
+    {{ parent() }}
+
+    {% set subscription = entity.instance %}
+    <div class="mt-4">
+        <h3 class="h5">Серверы подписки</h3>
+        {% if subscription.servers is empty %}
+            <p class="text-muted">Серверов пока нет — нажмите «Обновить».</p>
+        {% else %}
+            <table class="table datagrid">
+                <thead>
+                    <tr><th>Сервер</th><th>Протокол и адрес</th><th>Подключения</th><th></th></tr>
+                </thead>
+                <tbody>
+                {% for server in subscription.servers %}
+                    {% set proto = subscription_server_protocol(server.uri) %}
+                    <tr>
+                        <td>{{ server.name }}</td>
+                        <td>
+                            {% if proto %}
+                                {{ proto }} · {{ subscription_server_address(server.uri) ?? '—' }}
+                            {% else %}
+                                <span class="text-danger">{{ server.uri|split(':')|first }}:// — CEP этот протокол не поддерживает</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% for conn in subscription_connections(subscription, server.name) %}
+                                <a href="{{ ea_url().unsetAll().setController('App\\Controller\\Admin\\VpnConnectionCrudController').setAction('edit').setEntityId(conn.id) }}">{{ conn.name }}</a>{% if not loop.last %}, {% endif %}
+                            {% endfor %}
+                        </td>
+                        <td class="text-end">
+                            {% if proto %}
+                                <form method="post" action="{{ path('admin_vpn_subscription_create_connection', {id: subscription.id}) }}">
+                                    <input type="hidden" name="_token" value="{{ csrf_token('subscription_connection_' ~ subscription.id) }}">
+                                    <input type="hidden" name="server" value="{{ server.name }}">
+                                    <button class="btn btn-sm btn-primary" type="submit">Создать подключение</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            <p class="text-muted small">Подключение хранит выбор сервера: при обновлении подписки его ссылка заменяется свежей. Сервер меняется в настройках подключения.</p>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -116,6 +116,7 @@ final class DashboardController extends AbstractDashboardController
             // Клиентская часть есть в любой роли: узел может и сам выходить в интернет через цепочку.
             yield MenuItem::linkTo(VpnConnectionCrudController::class, 'Подключения (все типы)', 'fa fa-plug');
             yield MenuItem::linkTo(VpnChainCrudController::class, 'Цепочки узлов', 'fa fa-link');
+            yield MenuItem::linkTo(VpnSubscriptionCrudController::class, 'Подписки провайдеров', 'fa fa-list-ul');
 
             if ($node->canRelay()) {
                 yield MenuItem::section('Узел на цепочке');

@@ -6,6 +6,9 @@ use App\Entity\NodeSettings;
 use App\Entity\VpnChain;
 use App\Entity\VpnConnection;
 use App\Entity\VpnServerService;
+use App\Entity\VpnSubscription;
+use App\Repository\VpnSubscriptionRepository;
+use App\Vpn\SubscriptionParser;
 use App\Entity\VpnUser;
 use App\Vpn\VpnProtocol;
 
@@ -15,6 +18,10 @@ use App\Vpn\VpnProtocol;
  */
 final class CepExportService
 {
+    public function __construct(private readonly ?VpnSubscriptionRepository $subscriptions = null)
+    {
+    }
+
     /**
      * @param list<VpnConnection> $connections
      * @param list<VpnChain>      $chains
@@ -59,10 +66,36 @@ final class CepExportService
         return [
             'profiles' => $profilesJson,
             'chains' => $chainsJson,
+            'subscriptions' => array_map($this->serializeSubscription(...), $this->subscriptions?->findOrdered() ?? []),
             'activeChain' => $activeChain?->getExternalId(),
             'blockIPv6' => $settings->isBlockIpv6(),
             'dns' => $settings->getDnsServers(),
         ];
+    }
+
+    /**
+     * Подписка в формате клиентов CEP. Дата — в секундах от 01.01.2001 (так её пишет JSONEncoder на macOS),
+     * иначе клиент не прочитает файл; с ней клиенты не перекачивают подписку сразу после импорта.
+     *
+     * @return array<string, mixed>
+     */
+    public function serializeSubscription(VpnSubscription $s): array
+    {
+        $data = [
+            'id' => $s->getExternalId(),
+            'name' => $s->getName(),
+            'url' => $s->getUrl(),
+            'hwid' => $s->getHwid() ?? '',
+            'servers' => $s->getServers(),
+        ];
+        if ($s->getRefreshedAt() !== null) {
+            $data['updatedAt'] = (float) ($s->getRefreshedAt()->getTimestamp() - SubscriptionParser::APPLE_EPOCH);
+        }
+        if ($s->getInfo() !== null) {
+            $data['info'] = $s->getInfo();
+        }
+
+        return $data;
     }
 
     /** @return array<string, mixed> */
@@ -93,6 +126,8 @@ final class CepExportService
             'serverCert' => $conn->getServerCert(),
             'authGroup' => $conn->getAuthGroup(),
             'routes' => $conn->getRoutes(),
+            'subscriptionID' => $conn->getSubscriptionId(),
+            'subscriptionServer' => $conn->getSubscriptionServer(),
         ];
         if ($usesUnderlay) {
             $optionalStrings['argonPassword'] = $conn->getArgonPassword();
