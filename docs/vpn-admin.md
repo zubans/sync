@@ -2,19 +2,39 @@
 
 Каждый узел разворачивает собственный экземпляр Symfony-админки (`/admin`) и управляет своей конфигурацией через раздел **«Узел VPN / CEP»** (`/admin/vpn-node`).
 
-## Режимы узла («Клиент» / «VPN-сервер»)
+## Роли узла: «Клиент», «Узел на цепочке», «VPN-сервер»
 
-Настройки узла хранятся в `NodeSettings` (`/admin/vpn-node`) и определяют доступные разделы панели:
+Роль хранится в `NodeSettings.mode` и выбирается карточками на странице `/admin/vpn-node`. От роли зависят разделы меню, что узел слушает снаружи и что выгружается на хост.
 
-- **`Клиент` (`client`)** — настройка клиентских подключений, многохоповых цепочек, выбор активной цепочки устройства и экспорт `profiles.json` для приложений CEP (macOS / Android). Серверные разделы скрыты из бокового меню и защищены атрибутом `#[RequiresServerMode]` (`ServerModeGuardSubscriber`, HTTP 403).
-- **`VPN-сервер` (`server`)** — в дополнение к клиентской части открываются разделы управления серверными службами VPN, правилами проброса портов и пользователями VPN / системы.
+| Роль | Что делает узел | Разделы | Порты снаружи |
+|---|---|---|---|
+| **Клиент** (`client`) | Сам выходит в интернет через цепочку узлов, ничего не принимает | Подключения, Цепочки | нет |
+| **Узел на цепочке** (`relay`) | Принимает трафик на своём порту и передаёт следующему узлу, **не расшифровывая** | + Пропуск трафика | входные порты пропусков |
+| **VPN-сервер** (`server`) | Поднимает службы, расшифровывает трафик и выпускает в интернет; может одновременно пропускать трафик дальше | + Пропуск трафика, Серверные службы, Проброс портов, Пользователи | порты служб, обёрток Argon4, пропусков и пробросов |
+
+Серверные разделы защищены `#[RequiresServerMode]`, пропуск трафика — `#[RequiresRelayMode]` (роли `relay` и `server`); обе проверки делает `ServerModeGuardSubscriber` (HTTP 403). Клиентские разделы доступны в любой роли: узел может и сам выходить через цепочку.
+
+На странице узла для каждой роли показаны шаги настройки со ссылками, таблица «Порты узла» и путь трафика активной цепочки.
+
+### Где обфусцируется трафик
+
+- **Клиент.** У подключения Argon4 или Transit обфускация — сам протокол. У остальных протоколов включается «Обернуть в Argon4» (`useArgon`) с портом обёртки узла `argonPort` (пусто — `51820`) и паролем обёртки. На карточке цепочки («Показать») блок «Путь трафика и обфускация» (`VpnChainRouteDescriber`) показывает по участкам: куда идёт подключение (`host:port/транспорт`), что видно на проводе (Argon4 или протокол без обфускации) и на каком узле Argon4 расшифровывается. В списке цепочек колонка «Обфускация» предупреждает об участках без Argon4.
+  Правило: узел N поднимается внутри туннеля узла N-1, поэтому на участке «N-1 → N» в открытой сети виден протокол узла N; слепой транзит ничего не расшифровывает, и на участках до и после него виден протокол следующего узла.
+- **Сервер.** У службы (VLESS, Hysteria, OpenConnect, OpenVPN, AmneziaWG, SSTP) блок «Приём обфусцированного трафика (обёртка Argon4)»: `argonWrapEnabled`, `argonWrapPort` (UDP+TCP, пусто — `51820`), `argonWrapPassword`. Узел поднимает отдельный процесс `argon-tunnel-server` в режиме L4-транзита, пригвождённый к `127.0.0.1:<порт службы>`: он принимает Argon4, расшифровывает и отдаёт поток службе как обычное подключение. Служба при этом остаётся доступной и напрямую; Listen IP службы должен быть `0.0.0.0` или `127.0.0.1`. «Создать клиентский профиль» у такой службы сразу включает у подключения `useArgon`, `argonPort` и пароль обёртки. Поля формы службы сгруппированы по назначению и показываются только для выбранного протокола.
+- **Узел на цепочке.** Раздел «Пропуск трафика» (`/admin/relay-route`, `RelayRoute`): входной порт узла → адрес и порт следующего узла. Способы:
+  - **слепой Argon4-транзит** — процесс `argon-tunnel-server -mode transit -transit-blind`, слушает UDP и TCP на одном порту, пароля не знает, поддерживает PLPMTUD; для следующего узла с Argon4 или обёрткой Argon4 (порт цели — порт Argon4 или обёртки на нём). На клиенте такой узел добавляется подключением «Argon4 Transit» без пароля;
+  - **DNAT** — правило iptables (`port-forward.sh`, всегда с MASQUERADE), любой протокол, цель — только IPv4, можно ограничить источник `sourceCidr`.
+
+### Порты узла
+
+`NodePortPlan` — единый план портов: службы и их обёртки, пропуски и пробросы, которые действуют в текущей роли. По нему строятся таблица «Порты узла» (порт, кто слушает, куда уходит трафик, обфускация), раздел `ports` в `desired-state.json` и проверка конфликтов при сохранении службы, обёртки, пропуска или проброса (`PortForwardValidator`: «Порт N/UDP уже занят: …»). Пробросы на разных явно заданных интерфейсах друг другу не мешают.
 
 > **Включение/выключение блока VPN:** весь блок VPN/CEP и серверные контейнеры (`tunnel`, `ocserv`) также могут быть включены или выключены целиком на странице [Модули и функции ИИ](modules-and-ai.md) (`/admin/modules`, флаг `vpnEnabled`). При выключенном модуле пункты VPN скрываются из меню, прямые URL админки возвращают HTTP `503`, а `FeatureSettingsController` синхронно вызывает `NodeRuntimeExporter::sync(applyNow: true)`: выгружается пустой `profiles.json`, удаляются `.env`/конфиги серверных служб, очищается `port-forward.sh`, в `desired-state.json` записываются `vpnModuleEnabled: false` и `server.enabled: false`, и выполняется `VPN_RUNTIME_APPLY_CMD` для остановки туннелей и правил на хосте.
 
 ## Разделы админки
 
 1. **Узел VPN / CEP (`/admin/vpn-node`)** (`VpnNodeController`):
-   - переключение роли узла (`Клиент` / `VPN-сервер`), выбор внешнего хоста, WAN-интерфейса (`eth0`), подсети VPN (`10.44.0.0/24`), DNS, блокировки IPv6 и активной клиентской цепочки (`POST /admin/vpn-node/settings`);
+   - переключение роли узла (`Клиент` / `Узел на цепочке` / `VPN-сервер`), таблица «Порты узла», путь трафика активной цепочки, выбор внешнего хоста, WAN-интерфейса (`eth0`), подсети VPN (`10.44.0.0/24`), DNS, блокировки IPv6 и активной клиентской цепочки (`POST /admin/vpn-node/settings`);
    - мастер **«Сделать этот узел VPN-сервером»** (`POST /admin/vpn-node/provision`, `VpnServerProvisioner`): переводит узел в режим `server`, поднимает декларативные конфигурации выбранных служб (по умолчанию `argon4` и др.), генерирует для них клиентские профили подключений и создаёт учётную запись `admin-vpn`;
    - принудительная синхронизация runtime-артефактов (`POST /admin/vpn-node/sync`) и скачивание `profiles.json` (`/admin/vpn-node/export/profiles.json`), `desired-state.json` (`/admin/vpn-node/export/desired-state.json`) и `port-forward.sh` (`/admin/vpn-node/export/port-forward.sh`).
 
@@ -30,28 +50,40 @@
    - виртуальный столбец **«MTU и бюджет цепочки»** (`MtuProbeService::analyzeChainMtu`) показывает узкое место внешнего MTU и расчётный выходной TUN MTU или режим автоподбора;
    - действие **«Сделать активной»** (`/admin/vpn-chain/{id}/activate`) назначает цепочку активной на узле и включает её в `profiles.json`.
 
-4. **Серверные службы VPN (`/admin/vpn-server-service`)** *(только режим `VPN-сервер`)*:
+4. **Пропуск трафика (`/admin/relay-route`)** *(роли «Узел на цепочке» и «VPN-сервер»)* — см. «Где обфусцируется трафик».
+
+5. **Серверные службы VPN (`/admin/vpn-server-service`)** *(только режим `VPN-сервер`)*:
    - описание сервисов, которые должны работать на текущем сервере (протокол, `listenHost`, `listenPort`, `transportProto` UDP/TCP/оба, `publicHostOverride`, параметры Argon4 / OpenConnect / VLESS / AmneziaWG / Hysteria2 и др., включая `argonPathMtu = 0` для автоподбора оптимального MTU);
    - криптографические пары ключей VLESS Reality и AmneziaWG генерируются и валидируются по X25519 (RFC 7748 clamping, `sodium_crypto_scalarmult_base`): публичные ключи (`pbk=` и `[Peer] PublicKey`) всегда детерминированно соответствуют приватным;
    - профили Hysteria2 экспортируются в формате `hysteria2://<username>:<password>@...` (и `default:<masterPassword>` при отсутствии привязанного пользователя), совпадающем с секцией `auth.userpass` в `hysteria2.yaml`;
    - действие **«Создать клиентский профиль»** сразу генерирует готовое подключение в `/admin/vpn-connection`.
 
-5. **Проброс портов (`/admin/port-forward`)** *(только режим `VPN-сервер`)*:
+6. **Проброс портов (`/admin/port-forward`)** *(только режим `VPN-сервер`)*:
    - правила DNAT / MASQUERADE: протокол (`tcp`, `udp`, `both`), входной интерфейс (или WAN узла), входной порт или диапазон `listenPort..listenPortEnd`, `targetIp`, `targetPort`, ограничение `sourceCidr` и флаг `enableMasquerade`;
    - `PortForwardValidator` проверяет корректность портов, диапазонов 1:1 и блокирует конфликты с другими правилами и активными серверными службами VPN.
 
-6. **Пользователи VPN / системы (`/admin/vpn-user`)** *(только режим `VPN-сервер`)*:
+7. **Пользователи VPN / системы (`/admin/vpn-user`)** *(только режим `VPN-сервер`)*:
    - учётные записи пользователей VPN с автогенерацией `clientId`, `clientSecret`, `vlessUuid`, `tunnelPassword`, опциональным статическим VPN IP и ограничением доступных служб;
    - кнопка **«Личный profiles.json»** отдаёт персональный профиль CEP с учётными данными выбранного пользователя;
    - флаг **«Разрешить вход в веб-панель»** (`grantSystemAccess`) через `VpnUserManager` синхронизирует связанную системную учётную запись `User` для входа в админку (с проверкой уникальности `username`, `clientId`, `systemEmail`). При снятии `grantSystemAccess`, выключении `VpnUser`/`User` или удалении `VpnUser` учётная запись блокируется (`enabled = false`, роли очищаются, пароль при отзыве сбрасывается, все `ApiToken` немедленно отзываются, а `UserChecker`/`ApiTokenHandler` и `AuthController::login` отклоняют доступ).
 
-## Экспорт runtime и интеграция с хостом
+## Экспорт runtime и применение на хосте
 
-При сохранении настроек, подключений, цепочек, служб, правил проброса или пользователей `NodeRuntimeExporter` пересобирает декларативный каталог `VPN_RUNTIME_DIR` (по умолчанию `server/var/vpn-runtime`):
+При сохранении настроек, подключений, цепочек, служб, пропусков, правил проброса или пользователей `NodeRuntimeExporter` пересобирает каталог `VPN_RUNTIME_DIR` (по умолчанию `server/var/vpn-runtime`; в Docker Compose он смонтирован на хост в `./var/vpn-runtime`, путь меняется переменной `VPN_RUNTIME_HOST_DIR`):
 
-- `desired-state.json` — полное целевое состояние узла, служб, правил и пользователей;
-- `profiles.json` — конфигурация в формате CEP (`CepExportService`);
-- `port-forward.sh` — идемпотентный bash-скрипт правил `iptables` (`SYNC_DNAT`, `SYNC_POST`, `SYNC_FWD`) и `sysctl`;
-- `.env`-конфиги для `argon-tunnel-server` (`ARGON_LISTEN_ADDR`, `ARGON_SUBNET`, `ARGON_OUT_INTERFACE`, `ARGON_ENABLE_NAT`, `ARGON_MODE`, `ARGON_MASTER_PASSWORD`, `ARGON_TRANSIT_BLIND`, `ARGON_TRANSIT_TARGET`, `ARGON_TRANSIT_ALLOW`, `ARGON_PROTOCOL_VERSION`, `ARGON_ALLOW_V4`, `ARGON_PADDING_PROFILE`, `ARGON_PATH_MTU`, `ARGON_BEHAVIOR_PROFILE`, `ARGON_ALLOW_VIDEO_CALL`, `ARGON_DNS`, `ARGON_CLIENTS_JSON`) и `ocserv` (`OCSERV_TCP_PORT`, `OCSERV_UDP_PORT`, `OCSERV_CN`, `OCSERV_SERVER_IP`, `OCSERV_SUBNET`, `OCSERV_NETMASK`, `OCSERV_OUT_INTERFACE`, `OCSERV_DNS`, `OCSERV_USERS`).
+- `desired-state.json` (`schemaVersion: 2`) — целевое состояние узла: роль, службы (с `argonWrapPort`), пропуски (`relay.routes`), пробросы, пользователи и `ports` — всё, что узел слушает снаружи;
+- `profiles.json` — конфигурация в формате CEP (`CepExportService`; `argonPort` пишется, только если отличается от `51820`);
+- `port-forward.sh` — идемпотентный bash-скрипт правил `iptables` (`SYNC_DNAT`, `SYNC_POST`, `SYNC_FWD`) для пробросов и DNAT-пропусков;
+- по одному `.env` на каждый процесс `argon-tunnel-server`: `argon-server.env` (основная служба Argon4, TUN `argon0`), `services/argon-<id>.env` (другие службы Argon4, TUN `argon<id>`), `services/argon-transit-<id>.env`, `services/argon-wrap-<id>.env` (обёртки Argon4 служб), `services/argon-relay-<id>.env` (слепые пропуски);
+- конфиги остальных служб: `xray-config.json`, `hysteria2.yaml`, `ocserv.env` и т. д.
 
-Панель не выполняет `iptables` или `systemctl` от `root` напрямую из PHP-процесса. Применение изменений на Linux-хосте выполняется внешним скриптом-хуком, заданным в `VPN_RUNTIME_APPLY_CMD` (вызывается при включённом `autoApplyRuntime` или нажатии «Синхронизировать сейчас»).
+Панель не выполняет `iptables` или `systemctl` от `root` из PHP. Конфигурацию применяет скрипт `tunnel-server/ubuntu/apply-runtime.sh` (на хосте — `/usr/local/sbin/sync-vpn-apply`):
+
+1. на каждый `argon-*.env` поднимает экземпляр `argon-tunnel@<имя>.service`, перезапускает только изменившиеся, лишние останавливает;
+2. выполняет `port-forward.sh`;
+3. открывает в цепочке iptables `SYNC_IN` все порты из `ports`;
+4. пишет `runtime-status.json` — его статус показан на странице узла («Применение на хосте»).
+
+Установка: `sudo SYNC_VPN_RUNTIME_DIR=<репозиторий>/var/vpn-runtime ./tunnel-server/ubuntu/install-ubuntu.sh`. Установщик ставит бинарник, шаблон `argon-tunnel@.service`, скрипт и юнит `sync-vpn-apply.path`, который запускает применение при каждом изменении `desired-state.json`, и отключает одиночный `argon-tunnel.service`. Если узел за роутером, те же порты нужно пробросить на роутере. Если панель работает прямо на хосте под `root`, скрипт можно указать в `VPN_RUNTIME_APPLY_CMD` (вызывается при `autoApplyRuntime` или по кнопке «Синхронизировать и применить»).
+
+Docker-сервис `tunnel` из `compose.yaml` настроек админки не видит и публикует только `ARGON_UDP_PORT` — для узла, которым управляет админка, используйте скрипт применения.

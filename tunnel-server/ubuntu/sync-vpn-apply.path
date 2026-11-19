@@ -1,0 +1,9 @@
+[Unit]
+Description=Применять конфигурацию VPN-узла sync при изменении desired-state.json
+
+[Path]
+PathChanged=@VPN_RUNTIME_DIR@/desired-state.json
+Unit=sync-vpn-apply.service
+
+[Install]
+WantedBy=multi-user.target

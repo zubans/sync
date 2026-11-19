@@ -30,6 +30,7 @@ type Profile struct {
 	IgnoreCertErrors               bool   `json:"ignoreCertErrors"`
 	Routes                         string `json:"routes"`
 	UseArgon                       bool   `json:"useArgon"`
+	ArgonPort                      int    `json:"argonPort,omitempty"`
 	ArgonPassword                  string `json:"argonPassword"`
 	ArgonProtocolVersion           int    `json:"argonProtocolVersion,omitempty"`
 	ArgonPaddingProfile            string `json:"argonPaddingProfile,omitempty"`
@@ -183,4 +184,12 @@ func validatePlan(plan *Plan) error {
 		}
 	}
 	return nil
+}
+
+// argonUnderlayPort — порт обёртки Argon4 на узле (useArgon): из профиля или 51820 по умолчанию.
+func argonUnderlayPort(profile Profile) int {
+	if profile.ArgonPort > 0 && profile.ArgonPort <= 65535 {
+		return profile.ArgonPort
+	}
+	return 51820
 }

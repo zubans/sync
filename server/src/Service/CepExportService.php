@@ -113,6 +113,10 @@ final class CepExportService
         }
         if ($usesUnderlay) {
             $data['useArgon'] = true;
+            // Порт по умолчанию не пишем: старые клиенты без поля argonPort и так идут на 51820.
+            if ($conn->getArgonPort() !== null && $conn->getArgonPort() !== VpnProtocol::ARGON_DEFAULT_PORT) {
+                $data['argonPort'] = $conn->getArgonPort();
+            }
         }
 
         $pathMtu = $conn->getArgonPathMtu();
@@ -321,6 +325,16 @@ final class CepExportService
                     $port,
                 ));
                 break;
+        }
+
+        if ($service->hasArgonWrap()) {
+            // Клиент ходит в службу через обёртку Argon4: порт и пароль обёртки, параметры Argon4 — от службы.
+            $conn->setUseArgon(true);
+            $conn->setArgonPort($service->getArgonWrapPort() ?? VpnProtocol::ARGON_DEFAULT_PORT);
+            $conn->setArgonPassword($service->getArgonWrapPassword());
+            $conn->setArgonProtocolVersion($service->getArgonProtocolVersion());
+            $conn->setArgonPaddingProfile($service->getArgonPaddingProfile());
+            $conn->setArgonBehaviorProfile($service->getArgonBehaviorProfile());
         }
 
         return $conn;

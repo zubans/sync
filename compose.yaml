@@ -49,6 +49,10 @@ services:
       - agents_data:/app/var/agents
       - caddy_data:/data
       - caddy_config:/config
+      # Конфигурация VPN-узла из админки (desired-state.json, .env процессов Argon4, port-forward.sh):
+      # на хосте её применяет sync-vpn-apply (tunnel-server/ubuntu/install-ubuntu.sh с
+      # SYNC_VPN_RUNTIME_DIR=<путь к репозиторию>/var/vpn-runtime).
+      - ${VPN_RUNTIME_HOST_DIR:-./var/vpn-runtime}:/app/var/vpn-runtime
     restart: unless-stopped
 
   # Блок «Новости и рынок акций» (`--profile news`): сбор новостей раз в 5 минут, полные тексты,

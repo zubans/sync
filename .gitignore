@@ -2,3 +2,4 @@
 .idea/
 # Секреты docker compose (make init)
 /.env
+/var/

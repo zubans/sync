@@ -1,0 +1,7 @@
+[Unit]
+Description=Применение конфигурации VPN-узла sync (процессы Argon4, DNAT, firewall)
+
+[Service]
+Type=oneshot
+Environment=VPN_RUNTIME_DIR=@VPN_RUNTIME_DIR@
+ExecStart=/usr/local/sbin/sync-vpn-apply

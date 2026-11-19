@@ -2,7 +2,7 @@
 
 `CepActivity` (пакет `cep`) — отдельная иконка «CEP» (`taskAffinity` `com.example.contactsync.cep`). Это Android-версия CEP для macOS: цепочка из нескольких VPN-узлов, телефон → узел 1 → узел 2 → … → интернет. Сервер каждого следующего узла доступен только через туннель предыдущего, весь остальной трафик уходит в последний узел. Root не нужен.
 
-Протоколы: Argon4, Транзитный шлюз (`transit`, в том числе слепой passthrough без пароля и аутентифицированный L4 TCP/UDP транзит), надстройка `useArgon` (`mode="auto"` поверх порта 51820 узла или предшествующего `transit`), VLESS (Reality, Vision, gRPC, WebSocket, HTTPUpgrade), Hysteria 2, Hysteria v1, OpenConnect (AnyConnect/ocserv, GlobalProtect, Pulse, Juniper, Fortinet), OpenVPN.
+Протоколы: Argon4, Транзитный шлюз (`transit`, в том числе слепой passthrough без пароля и аутентифицированный L4 TCP/UDP транзит), надстройка `useArgon` (`mode="auto"` поверх порта обёртки Argon4 узла `argonPort`, по умолчанию 51820, или предшествующего `transit`), VLESS (Reality, Vision, gRPC, WebSocket, HTTPUpgrade), Hysteria 2, Hysteria v1, OpenConnect (AnyConnect/ocserv, GlobalProtect, Pulse, Juniper, Fortinet), OpenVPN.
 
 ## Как пользоваться
 

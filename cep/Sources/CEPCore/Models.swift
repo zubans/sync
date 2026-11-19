@@ -87,8 +87,10 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
     public var ignoreCertErrors = false
     /// Сети, которые идут через этот узел, а не дальше по цепочке и не в локальную сеть: «192.168.1.119, 10.0.0.0/8».
     public var routes = ""
-    /// Оборачивать подключение к серверу узла в туннель/транзит Argon4 (порт 51820 или предыдущий транзитный шлюз).
+    /// Оборачивать подключение к серверу узла в туннель/транзит Argon4 (порт обёртки узла или предыдущий транзитный шлюз).
     public var useArgon: Bool = false
+    /// Порт обёртки Argon4 на узле при useArgon; nil — 51820.
+    public var argonPort: Int? = nil
     /// Мастер-пароль Argon2id.
     public var argonPassword: String = ""
     /// Явная версия протокола Argon4 (по умолчанию nil -> v5).
@@ -139,6 +141,7 @@ public struct Profile: Codable, Identifiable, Hashable, Sendable {
         ignoreCertErrors = try c.decodeIfPresent(Bool.self, forKey: .ignoreCertErrors) ?? false
         routes = try c.decodeIfPresent(String.self, forKey: .routes) ?? ""
         useArgon = try c.decodeIfPresent(Bool.self, forKey: .useArgon) ?? false
+        argonPort = try c.decodeIfPresent(Int.self, forKey: .argonPort)
         argonPassword = try c.decodeIfPresent(String.self, forKey: .argonPassword) ?? ""
         argonProtocolVersion = try c.decodeIfPresent(Int.self, forKey: .argonProtocolVersion)
         argonPaddingProfile = try c.decodeIfPresent(String.self, forKey: .argonPaddingProfile)
@@ -246,5 +249,13 @@ public enum ChainValidation {
             }
         }
         return result
+    }
+}
+
+extension Profile {
+    /// Порт, на котором узел принимает трафик, обёрнутый в Argon4 (useArgon).
+    public var argonUnderlayPort: Int {
+        if let argonPort, (1...65535).contains(argonPort) { return argonPort }
+        return 51820
     }
 }

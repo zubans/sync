@@ -1,154 +1,263 @@
 {% extends '@EasyAdmin/page/content.html.twig' %}
 
-{% block content_title 'Узел и режим работы (Клиент / VPN-сервер)' %}
+{% block content_title 'Узел: роль, порты и конфигурация' %}
 
 {% block main %}
-    <div class="row g-3 mb-4">
-        <div class="col-lg-7">
-            <div class="card h-100">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <strong>Роль и сетевые параметры устройства</strong>
-                    <span class="badge {{ settings.serverMode ? 'bg-success' : 'bg-info text-dark' }}">
-                        {{ settings.serverMode ? 'Режим: VPN-сервер' : 'Режим: Клиент' }}
-                    </span>
+    {% set mode = settings.mode %}
+
+    {# ── 1. Роль узла ─────────────────────────────────────────────── #}
+    <form method="post" action="{{ path('admin_vpn_node_settings') }}" id="node-settings-form">
+        <input type="hidden" name="_token" value="{{ csrf_token(csrfSettings) }}">
+
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <strong>1. Кем работает это устройство</strong>
+                <span class="badge bg-primary">Сейчас: {{ settings.modeLabel }}</span>
+            </div>
+            <div class="card-body">
+                <div class="row g-3 mb-3">
+                    {% set roleHelp = {
+                        client: {icon: 'fa-laptop', text: 'Само выходит в интернет через цепочку узлов. Ничего не принимает извне, порты открывать не нужно. Здесь вы собираете цепочку и видите, на каких участках трафик обфусцирован.'},
+                        relay: {icon: 'fa-route', text: 'Промежуточный узел цепочки: принимает трафик на своём порту и передаёт следующему узлу, не расшифровывая. Настраиваются только правила пропуска и порты.'},
+                        server: {icon: 'fa-server', text: 'Поднимает службы VPN, расшифровывает трафик и выпускает его в интернет. Любую службу можно открыть и через обфускацию Argon4. Может одновременно пропускать трафик дальше, как узел на цепочке.'},
+                    } %}
+                    {% for value, label in modeLabels %}
+                        <div class="col-md-4">
+                            <label class="card h-100 {{ mode == value ? 'border-primary border-2' : '' }}" for="mode-{{ value }}" style="cursor: pointer;">
+                                <div class="card-body">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="radio" name="mode" id="mode-{{ value }}" value="{{ value }}" {{ mode == value ? 'checked' }}>
+                                        <span class="form-check-label fw-semibold"><i class="fa {{ roleHelp[value].icon }} me-1"></i>{{ label }}</span>
+                                    </div>
+                                    <div class="small text-muted">{{ roleHelp[value].text }}</div>
+                                </div>
+                            </label>
+                        </div>
+                    {% endfor %}
                 </div>
-                <div class="card-body">
-                    <form method="post" action="{{ path('admin_vpn_node_settings') }}">
-                        <input type="hidden" name="_token" value="{{ csrf_token(csrfSettings) }}">
 
-                        <div class="mb-3">
-                            <label class="form-label fw-semibold" for="node-mode">Кем является это устройство</label>
-                            <select id="node-mode" name="mode" class="form-select">
-                                {% for value, label in modes %}
-                                    <option value="{{ value }}" {{ settings.mode == value ? 'selected' }}>{{ label }}</option>
-                                {% endfor %}
-                            </select>
-                            <div class="form-text">
-                                Пользователи VPN/системы, серверные службы и проброс портов доступны только в режиме «VPN-сервер».
-                            </div>
-                        </div>
-
-                        <div class="row g-2 mb-3">
-                            <div class="col-md-6">
-                                <label class="form-label" for="node-name">Имя узла</label>
-                                <input id="node-name" name="node_name" class="form-control" value="{{ settings.nodeName }}" required>
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label" for="public-host">Внешний IP / домен</label>
-                                <input id="public-host" name="public_host" class="form-control" value="{{ settings.publicHost }}" placeholder="vpn.example.com или IP">
-                            </div>
-                        </div>
-
-                        <div class="row g-2 mb-3">
-                            <div class="col-md-4">
-                                <label class="form-label" for="wan-iface">WAN-интерфейс</label>
-                                <input id="wan-iface" name="wan_interface" class="form-control" value="{{ settings.wanInterface }}" required>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label" for="vpn-subnet">Подсеть VPN (CIDR)</label>
-                                <input id="vpn-subnet" name="vpn_subnet_cidr" class="form-control" value="{{ settings.vpnSubnetCidr }}" required>
-                            </div>
-                            <div class="col-md-4">
-                                <label class="form-label" for="dns-servers">DNS (через запятую)</label>
-                                <input id="dns-servers" name="dns_servers" class="form-control" value="{{ settings.dnsServers|join(', ') }}">
-                            </div>
-                        </div>
-
-                        <div class="mb-3">
-                            <label class="form-label" for="active-chain">Активная цепочка клиента</label>
-                            <select id="active-chain" name="active_client_chain_id" class="form-select">
-                                <option value="">Не выбрана</option>
-                                {% for c in chains %}
-                                    <option value="{{ c.id }}" {{ settings.activeClientChainId == c.id ? 'selected' }}>
-                                        {{ c.name }} ({{ c.hopsSummary }})
-                                    </option>
-                                {% endfor %}
-                            </select>
-                        </div>
-
-                        <div class="form-check mb-2">
-                            <input id="block-ipv6" type="checkbox" class="form-check-input" name="block_ipv6" value="1" {{ settings.blockIpv6 ? 'checked' }}>
-                            <label class="form-check-label" for="block-ipv6">Блокировать IPv6 на клиенте (предотвращение утечек)</label>
-                        </div>
-                        <div class="form-check mb-3">
-                            <input id="auto-apply" type="checkbox" class="form-check-input" name="auto_apply_runtime" value="1" {{ settings.autoApplyRuntime ? 'checked' }}>
-                            <label class="form-check-label" for="auto-apply">Автоматически синхронизировать конфиги при изменениях</label>
-                        </div>
-
-                        <button type="submit" class="btn btn-primary">Сохранить настройки узла</button>
-                    </form>
+                <div class="row g-2 mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label" for="node-name">Имя узла</label>
+                        <input id="node-name" name="node_name" class="form-control" value="{{ settings.nodeName }}" required>
+                    </div>
+                    <div class="col-md-4" data-node-modes="relay server">
+                        <label class="form-label" for="public-host">Внешний IP / домен узла</label>
+                        <input id="public-host" name="public_host" class="form-control" value="{{ settings.publicHost }}" placeholder="vpn.example.com или IP">
+                        <div class="form-text">По нему подключаются клиенты и предыдущие узлы цепочки.</div>
+                    </div>
+                    <div class="col-md-4" data-node-modes="relay server">
+                        <label class="form-label" for="wan-iface">WAN-интерфейс</label>
+                        <input id="wan-iface" name="wan_interface" class="form-control" value="{{ settings.wanInterface }}" required>
+                    </div>
                 </div>
+
+                <div class="row g-2 mb-3">
+                    <div class="col-md-4" data-node-modes="server">
+                        <label class="form-label" for="vpn-subnet">Подсеть клиентов VPN (CIDR)</label>
+                        <input id="vpn-subnet" name="vpn_subnet_cidr" class="form-control" value="{{ settings.vpnSubnetCidr }}" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label" for="dns-servers">DNS (через запятую)</label>
+                        <input id="dns-servers" name="dns_servers" class="form-control" value="{{ settings.dnsServers|join(', ') }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label" for="active-chain">Цепочка, через которую выходит само устройство</label>
+                        <select id="active-chain" name="active_client_chain_id" class="form-select">
+                            <option value="">Не выбрана (устройство выходит напрямую)</option>
+                            {% for c in chains %}
+                                <option value="{{ c.id }}" {{ settings.activeClientChainId == c.id ? 'selected' }}>
+                                    {{ c.name }} ({{ c.hopsSummary }})
+                                </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-check mb-2">
+                    <input id="block-ipv6" type="checkbox" class="form-check-input" name="block_ipv6" value="1" {{ settings.blockIpv6 ? 'checked' }}>
+                    <label class="form-check-label" for="block-ipv6">Блокировать IPv6 в цепочке (предотвращение утечек)</label>
+                </div>
+                <div class="form-check mb-3">
+                    <input id="auto-apply" type="checkbox" class="form-check-input" name="auto_apply_runtime" value="1" {{ settings.autoApplyRuntime ? 'checked' }}>
+                    <label class="form-check-label" for="auto-apply">Применять конфигурацию на хосте сразу после изменений</label>
+                </div>
+
+                <button type="submit" class="btn btn-primary">Сохранить роль и настройки узла</button>
             </div>
         </div>
+    </form>
 
-        <div class="col-lg-5">
-            <div class="card h-100 border-primary">
-                <div class="card-header bg-primary text-white">
-                    <strong>Мастер: сделать этот сервер VPN-сервером</strong>
-                </div>
-                <div class="card-body">
-                    <form method="post" action="{{ path('admin_vpn_node_provision') }}">
-                        <input type="hidden" name="_token" value="{{ csrf_token(csrfProvision) }}">
-                        <p class="text-muted small">
-                            Переключает узел в режим «Сервер», поднимает выбранные протоколы со свежими ключами и сразу генерирует конфиги демонов и клиентские подключения CEP.
-                        </p>
-
-                        <div class="row g-2 mb-2">
-                            <div class="col-md-6">
-                                <label class="form-label" for="prov-host">Внешний хост/IP</label>
-                                <input id="prov-host" name="public_host" class="form-control form-control-sm" value="{{ settings.publicHost }}" placeholder="198.51.100.10">
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label" for="prov-iface">WAN-интерфейс</label>
-                                <input id="prov-iface" name="wan_interface" class="form-control form-control-sm" value="{{ settings.wanInterface }}">
-                            </div>
-                        </div>
-
-                        <div class="mb-2">
-                            <label class="form-label" for="prov-subnet">Подсеть VPN</label>
-                            <input id="prov-subnet" name="vpn_subnet_cidr" class="form-control form-control-sm" value="{{ settings.vpnSubnetCidr }}">
-                        </div>
-
-                        <div class="mb-2">
-                            <div class="form-label">Какие протоколы поднять на сервере</div>
-                            <div class="border rounded p-2" style="max-height: 200px; overflow-y: auto;">
-                                {% for label, code in protocols %}
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="checkbox" name="protocols[]" value="{{ code }}" id="prov-{{ code }}" {{ code in ['argon4', 'vless'] ? 'checked' }}>
-                                        <label class="form-check-label small" for="prov-{{ code }}">{{ label }}</label>
-                                    </div>
-                                {% endfor %}
-                            </div>
-                        </div>
-
-                        <div class="mb-2">
-                            <label class="form-label" for="prov-user">Начальный пользователь VPN</label>
-                            <input id="prov-user" name="default_username" class="form-control form-control-sm" value="admin-vpn" placeholder="admin-vpn (или пусто)">
-                        </div>
-                        <div class="form-check mb-3">
-                            <input id="prov-sys" type="checkbox" class="form-check-input" name="grant_system_access" value="1">
-                            <label class="form-check-label small" for="prov-sys">Выдать ему системный вход в панель sync</label>
-                        </div>
-
-                        <button type="submit" class="btn btn-success w-100">
-                            <i class="fa fa-server"></i> Развернуть VPN-сервер на этом узле
-                        </button>
-                    </form>
-                </div>
-            </div>
+    {# ── 2. Что настроить в этой роли ─────────────────────────────── #}
+    <div class="card mb-4">
+        <div class="card-header"><strong>2. Что настроить в роли «{{ settings.modeLabel }}»</strong></div>
+        <div class="card-body">
+            {% if mode == 'client' %}
+                <ol class="mb-0">
+                    <li class="mb-2">
+                        Добавьте узлы, через которые пойдёт трафик, — <a href="{{ path('admin_vpn_connection_index') }}">Подключения</a> ({{ counts.connections }}).
+                        Чтобы трафик к узлу был обфусцирован, используйте протокол Argon4 либо включите у подключения «Обернуть в Argon4» и укажите порт обёртки узла.
+                    </li>
+                    <li class="mb-2">
+                        Соберите из них <a href="{{ path('admin_vpn_chain_index') }}">цепочку</a> ({{ counts.chains }}) — по порядку от устройства к выходу.
+                        Узел на цепочке, который ничего не расшифровывает, добавляется подключением «Argon4 Transit» без пароля.
+                    </li>
+                    <li>Сделайте цепочку активной и скачайте <a href="{{ path('admin_vpn_node_export_profiles') }}">profiles.json</a> для приложения CEP.</li>
+                </ol>
+            {% elseif mode == 'relay' %}
+                <ol class="mb-0">
+                    <li class="mb-2">Укажите выше внешний IP/домен узла — его вписывают в подключение «Argon4 Transit» на клиенте.</li>
+                    <li class="mb-2">
+                        Добавьте <a href="{{ path('admin_relay_route_index') }}">правила пропуска</a> ({{ counts.relays }}): входной порт этого узла → адрес и порт следующего узла.
+                        Слепой Argon4 — если следующий узел принимает Argon4 (служба Argon4 или обёртка Argon4); DNAT — для любого другого протокола.
+                    </li>
+                    <li>Откройте входные порты снаружи — список в разделе «Порты узла» ниже.</li>
+                </ol>
+            {% else %}
+                <ol class="mb-0">
+                    <li class="mb-2">
+                        Поднимите <a href="{{ path('admin_vpn_server_service_index') }}">службы</a> ({{ counts.services }}) — вручную или мастером ниже.
+                        Чтобы служба принимала и обфусцированный трафик, включите у неё «Приём обфусцированного трафика»: узел расшифрует Argon4 и передаст трафик службе как обычный.
+                    </li>
+                    <li class="mb-2">Заведите <a href="{{ path('admin_vpn_user_index') }}">пользователей</a> ({{ counts.users }}) и выдайте им профили («Создать клиентский профиль» у службы или «Личный profiles.json» у пользователя).</li>
+                    <li class="mb-2">
+                        При необходимости — <a href="{{ path('admin_port_forward_index') }}">проброс портов</a> ({{ counts.forwards }}) к клиентам VPN
+                        и <a href="{{ path('admin_relay_route_index') }}">пропуск трафика</a> ({{ counts.relays }}) к следующим узлам.
+                    </li>
+                    <li>Откройте порты снаружи — список в разделе «Порты узла» ниже.</li>
+                </ol>
+            {% endif %}
         </div>
     </div>
 
-    {% if not settings.serverMode %}
-        <div class="alert alert-info mb-4">
-            Сейчас устройство работает в режиме <strong>Клиент</strong>. Создание пользователей системы, серверных служб и правил проброса портов станет доступно после переключения режима на «VPN-сервер» или запуска мастера справа.
+    {# ── 3. Порты узла ─────────────────────────────────────────────── #}
+    {% if mode != 'client' %}
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <strong>3. Порты узла</strong>
+                <span class="small text-muted">то, что должно быть доступно снаружи</span>
+            </div>
+            <div class="card-body">
+                {% for c in portConflicts %}
+                    <div class="alert alert-danger py-2">{{ c }}</div>
+                {% endfor %}
+                {% if ports is empty %}
+                    <p class="text-muted mb-0">Узел пока ничего не слушает. Добавьте {{ mode == 'relay' ? 'правило пропуска' : 'службу или правило пропуска' }}.</p>
+                {% else %}
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Порт</th>
+                                    <th>Что</th>
+                                    <th>Кто слушает</th>
+                                    <th>Куда уходит трафик</th>
+                                    <th>Обфускация</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for p in ports %}
+                                    <tr>
+                                        <td><code>{{ p.start }}{% if p.end != p.start %}-{{ p.end }}{% endif %}/{{ p.transport == 'both' ? 'UDP+TCP' : p.transport|upper }}</code></td>
+                                        <td>
+                                            {% if p.entityId %}
+                                                <a href="{{ path(p.editRoute, {entityId: p.entityId}) }}">{{ p.name }}</a>
+                                            {% else %}
+                                                {{ p.name }}
+                                            {% endif %}
+                                        </td>
+                                        <td class="small">{{ p.listener }}</td>
+                                        <td class="small">{{ p.leadsTo }}</td>
+                                        <td class="small">{{ p.obfuscation }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="small text-muted">
+                        Как открыть: скрипт применения на хосте (<code>tunnel-server/ubuntu/apply-runtime.sh</code>) сам запускает процессы Argon4, правила DNAT и открывает эти порты в firewall хоста.
+                        Если узел стоит за роутером, пробросьте на роутере те же порты на этот хост.
+                        Docker-сервис <code>tunnel</code> из <code>compose.yaml</code> публикует только <code>ARGON_UDP_PORT</code> и настроек админки не видит — для узла, управляемого из админки, используйте скрипт применения.
+                    </div>
+                {% endif %}
+            </div>
         </div>
     {% endif %}
 
+    {# ── Путь трафика активной цепочки ─────────────────────────────── #}
+    {% if activeChain %}
+        <div class="card mb-4">
+            <div class="card-header"><strong>Путь трафика устройства: «{{ activeChain.name }}»</strong></div>
+            <div class="card-body">
+                {% include 'admin/_vpn_chain_route.html.twig' with {segments: activeChainRoute} %}
+            </div>
+        </div>
+    {% endif %}
+
+    {# ── Мастер VPN-сервера ────────────────────────────────────────── #}
+    <details class="card mb-4 border-primary" {{ mode == 'server' and counts.services == 0 ? 'open' }}>
+        <summary class="card-header bg-primary text-white" style="cursor: pointer;">
+            <strong>Мастер: {{ mode == 'server' ? 'добавить службы VPN-сервера' : 'сделать этот узел VPN-сервером' }}</strong>
+        </summary>
+        <div class="card-body">
+            <form method="post" action="{{ path('admin_vpn_node_provision') }}">
+                <input type="hidden" name="_token" value="{{ csrf_token(csrfProvision) }}">
+                <p class="text-muted small">
+                    Переключает узел в роль «VPN-сервер», поднимает выбранные протоколы со свежими ключами и сразу генерирует конфиги служб и клиентские подключения CEP.
+                </p>
+
+                <div class="row g-2 mb-2">
+                    <div class="col-md-4">
+                        <label class="form-label" for="prov-host">Внешний хост/IP</label>
+                        <input id="prov-host" name="public_host" class="form-control form-control-sm" value="{{ settings.publicHost }}" placeholder="198.51.100.10">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label" for="prov-iface">WAN-интерфейс</label>
+                        <input id="prov-iface" name="wan_interface" class="form-control form-control-sm" value="{{ settings.wanInterface }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label" for="prov-subnet">Подсеть VPN</label>
+                        <input id="prov-subnet" name="vpn_subnet_cidr" class="form-control form-control-sm" value="{{ settings.vpnSubnetCidr }}">
+                    </div>
+                </div>
+
+                <div class="mb-2">
+                    <div class="form-label">Какие протоколы поднять</div>
+                    <div class="border rounded p-2 row g-1 mx-0">
+                        {% for label, code in protocols %}
+                            <div class="col-md-6 form-check">
+                                <input class="form-check-input" type="checkbox" name="protocols[]" value="{{ code }}" id="prov-{{ code }}" {{ code in ['argon4', 'vless'] ? 'checked' }}>
+                                <label class="form-check-label small" for="prov-{{ code }}">{{ label }}</label>
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="row g-2 mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label" for="prov-user">Начальный пользователь VPN</label>
+                        <input id="prov-user" name="default_username" class="form-control form-control-sm" value="admin-vpn" placeholder="admin-vpn (или пусто)">
+                    </div>
+                    <div class="col-md-6 d-flex align-items-end">
+                        <div class="form-check">
+                            <input id="prov-sys" type="checkbox" class="form-check-input" name="grant_system_access" value="1">
+                            <label class="form-check-label small" for="prov-sys">Выдать ему вход в панель sync</label>
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-success">
+                    <i class="fa fa-server"></i> Развернуть службы на этом узле
+                </button>
+            </form>
+        </div>
+    </details>
+
+    {# ── Конфигурация на хосте ─────────────────────────────────────── #}
     <div class="card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <strong>Сгенерированная конфигурация и файлы runtime (<code>{{ runtimeDir }}</code>)</strong>
-            <div class="d-flex gap-2">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <strong>Сгенерированная конфигурация (<code>{{ runtimeDir }}</code>)</strong>
+            <div class="d-flex gap-2 flex-wrap">
                 <a class="btn btn-sm btn-outline-secondary" href="{{ path('admin_vpn_node_export_profiles') }}">profiles.json</a>
                 <a class="btn btn-sm btn-outline-secondary" href="{{ path('admin_vpn_node_export_desired_state') }}">desired-state.json</a>
                 <a class="btn btn-sm btn-outline-secondary" href="{{ path('admin_vpn_node_export_port_forward') }}">port-forward.sh</a>
@@ -170,12 +279,23 @@
                     {% if settings.lastRuntimeMessage %}
                         <div class="small text-muted">{{ settings.lastRuntimeMessage }}</div>
                     {% endif %}
+                    <div class="text-muted small mt-2">Применение на хосте (sync-vpn-apply)</div>
+                    {% if runtimeStatus %}
+                        <div>
+                            <strong class="{{ runtimeStatus.status|default('') == 'applied' ? 'text-success' : 'text-danger' }}">{{ runtimeStatus.status|default('—') }}</strong>
+                            {% if runtimeStatus.appliedAt is defined %}({{ runtimeStatus.appliedAt|date('Y-m-d H:i:s') }}){% endif %}
+                        </div>
+                        {% if runtimeStatus.message is defined %}<div class="small text-muted">{{ runtimeStatus.message }}</div>{% endif %}
+                    {% else %}
+                        <div class="small text-warning">Скрипт применения ещё не запускался: порты и процессы на хосте не настроены.</div>
+                    {% endif %}
                 </div>
                 <div class="col-md-8">
                     <div class="text-muted small mb-1">Сводка узла</div>
                     <div class="d-flex flex-wrap gap-3 small">
                         <span>Подключений: <strong>{{ counts.connections }}</strong></span>
                         <span>Цепочек: <strong>{{ counts.chains }}</strong></span>
+                        <span>Пропусков: <strong>{{ counts.relays }}</strong></span>
                         <span>Серверных служб: <strong>{{ counts.services }}</strong></span>
                         <span>Правил проброса: <strong>{{ counts.forwards }}</strong></span>
                         <span>Пользователей VPN: <strong>{{ counts.users }}</strong></span>
@@ -201,4 +321,20 @@
             {% endif %}
         </div>
     </div>
+
+    <script>
+        (function () {
+            // Поля, не относящиеся к выбранной роли, скрываются сразу при переключении.
+            const radios = document.querySelectorAll('#node-settings-form input[name="mode"]');
+            function refresh() {
+                const checked = document.querySelector('#node-settings-form input[name="mode"]:checked');
+                const current = checked ? checked.value : 'client';
+                document.querySelectorAll('[data-node-modes]').forEach(function (el) {
+                    el.style.display = el.dataset.nodeModes.split(' ').includes(current) ? '' : 'none';
+                });
+            }
+            radios.forEach(function (r) { r.addEventListener('change', refresh); });
+            refresh();
+        })();
+    </script>
 {% endblock %}

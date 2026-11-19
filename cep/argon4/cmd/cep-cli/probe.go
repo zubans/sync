@@ -176,6 +176,7 @@ func probeNodeMTUForProfile(ctx context.Context, profile Profile, precedingMTU i
 		PaddingProfile:          profile.ArgonPaddingProfile,
 		FirstPacketProfile:      profile.ArgonFirstPacketProfile,
 		UseArgon:                profile.UseArgon,
+		ArgonPort:               profile.ArgonPort,
 		ArgonPassword:           profile.ArgonPassword,
 		ArgonProtocolVersion:    profile.ArgonProtocolVersion,
 		ArgonPaddingProfile:     profile.ArgonPaddingProfile,

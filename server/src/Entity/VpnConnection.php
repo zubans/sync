@@ -71,6 +71,10 @@ class VpnConnection
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $argonPassword = null;
 
+    /** UDP/TCP-порт обёртки Argon4 на узле; null — порт по умолчанию 51820. */
+    #[ORM\Column(nullable: true)]
+    private ?int $argonPort = null;
+
     #[ORM\Column(nullable: true)]
     private ?int $argonProtocolVersion = 5;
 
@@ -359,6 +363,22 @@ class VpnConnection
     {
         $this->argonFirstPacketProfile = self::cleanNullable($argonFirstPacketProfile);
         $this->touch();
+    }
+
+    public function getArgonPort(): ?int
+    {
+        return $this->argonPort;
+    }
+
+    public function setArgonPort(?int $argonPort): void
+    {
+        $this->argonPort = ($argonPort !== null && $argonPort > 0) ? $argonPort : null;
+        $this->touch();
+    }
+
+    public function getEffectiveArgonPort(): int
+    {
+        return $this->argonPort ?? VpnProtocol::ARGON_DEFAULT_PORT;
     }
 
     public function getArgonPathMtu(): ?int

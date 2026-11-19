@@ -374,6 +374,7 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
         uri?.let(model::readConfigFile)?.let { save(p.copy(config = it)) }
     }
     val scope = rememberCoroutineScope()
+    var argonPortText by remember(id) { mutableStateOf(p.argonPort?.toString().orEmpty()) }
     var mtuText by remember(id) { mutableStateOf(p.argonPathMTU?.toString().orEmpty()) }
     var probingMtu by remember(id) { mutableStateOf(false) }
     var probeResult by remember(id) { mutableStateOf<MtuProbeResult?>(null) }
@@ -433,6 +434,18 @@ private fun ProfileEditor(model: CepViewModel, id: String, onClose: () -> Unit, 
                 LabeledSwitch("Шифровать через Argon4", p.useArgon) { save(p.copy(useArgon = it)) }
             }
             if (p.useArgon) {
+                item {
+                    Field("Порт обёртки Argon4", argonPortText, hint = "Пусто — 51820. Порт обёртки Argon4 у службы на узле") { raw ->
+                        val digits = raw.filter(Char::isDigit).take(5)
+                        argonPortText = digits
+                        val parsed = digits.toIntOrNull()
+                        if (digits.isEmpty()) {
+                            save(p.copy(argonPort = null))
+                        } else if (parsed != null && parsed in 1..65535) {
+                            save(p.copy(argonPort = parsed))
+                        }
+                    }
+                }
                 item { Field("Мастер-пароль Argon4", p.argonPassword, secret = true) { save(p.copy(argonPassword = it)) } }
                 item { Field("ID клиента Argon4", p.clientID, hint = "Если пусто, используется ID профиля") { save(p.copy(clientID = it.trim())) } }
                 item { Field("Секрет клиента Argon4", p.clientSecret, secret = true) { save(p.copy(clientSecret = it)) } }

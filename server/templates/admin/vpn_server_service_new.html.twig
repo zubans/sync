@@ -1,0 +1,6 @@
+{% extends '@EasyAdmin/crud/new.html.twig' %}
+
+{% block body_javascript %}
+    {{ parent() }}
+    {% include 'admin/_vpn_proto_sections.html.twig' %}
+{% endblock %}

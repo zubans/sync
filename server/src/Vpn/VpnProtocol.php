@@ -18,6 +18,9 @@ final class VpnProtocol
     public const AMNEZIAWG = 'amneziawg';
     public const SSTP = 'sstp';
 
+    /** Порт Argon4 по умолчанию: служба Argon4, транзит и обёртка Argon4 у клиентов CEP. */
+    public const ARGON_DEFAULT_PORT = 51820;
+
     /** @var list<string> Все поддерживаемые в разработке типы подключений. */
     public const ALL = [
         self::ARGON4,

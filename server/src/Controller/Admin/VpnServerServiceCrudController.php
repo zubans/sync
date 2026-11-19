@@ -63,7 +63,11 @@ final class VpnServerServiceCrudController extends AbstractCrudController
             ->setEntityLabelInPlural('Серверные службы VPN')
             ->setDefaultSort(['listenPort' => 'ASC'])
             ->setSearchFields(['name', 'proto', 'listenHost'])
-            ->setHelp(Crud::PAGE_INDEX, 'Службы, поднимаемые на этом узле. Кнопка «Создать клиентский профиль» сразу генерирует готовое подключение для CEP.');
+            ->overrideTemplates([
+                'crud/edit' => 'admin/vpn_server_service_edit.html.twig',
+                'crud/new' => 'admin/vpn_server_service_new.html.twig',
+            ])
+            ->setHelp(Crud::PAGE_INDEX, 'Службы, которые узел поднимает и расшифровывает. Любую службу можно сделать доступной и через обфускацию Argon4 — блок «Приём обфусцированного трафика». Кнопка «Создать клиентский профиль» генерирует готовое подключение для CEP.');
     }
 
     public function configureActions(Actions $actions): Actions
@@ -83,42 +87,84 @@ final class VpnServerServiceCrudController extends AbstractCrudController
 
     public function configureFields(string $pageName): iterable
     {
+        $argon = 'js-proto-section js-proto-argon4';
+        $transit = 'js-proto-section js-proto-transit';
+        $wrapped = 'js-proto-section ' . implode(' ', array_map(
+            static fn (string $p): string => 'js-proto-' . $p,
+            array_values(array_filter(VpnProtocol::ALL, VpnProtocol::supportsArgonUnderlay(...))),
+        ));
+
         yield IdField::new('id')->hideOnForm();
 
-        yield FormField::addFieldset('Основное');
+        yield FormField::addFieldset('Служба');
         yield TextField::new('name', 'Название');
         yield ChoiceField::new('proto', 'Протокол')
             ->setChoices(array_flip(VpnProtocol::LABELS))
             ->onlyOnIndex();
-        yield ChoiceField::new('proto', 'Протокол сервиса')
+        yield ChoiceField::new('proto', 'Протокол службы')
             ->setChoices(VpnProtocol::CHOICES)
             ->hideOnIndex();
-        yield BooleanField::new('enabled', 'Включён');
-        yield TextField::new('listenHost', 'Listen IP')->hideOnIndex();
+        yield BooleanField::new('enabled', 'Включена');
+
+        yield FormField::addFieldset('Где служба принимает подключения')
+            ->setHelp('Этот порт нужно открыть снаружи: в firewall хоста и, если узел за роутером, пробросом на роутере. Сводка — «Порты узла» на странице узла.');
+        yield TextField::new('listenHost', 'Listen IP')
+            ->setHelp('0.0.0.0 — на всех интерфейсах.')
+            ->hideOnIndex();
         yield IntegerField::new('listenPort', 'Порт');
         yield ChoiceField::new('transportProto', 'Транспорт')
             ->setChoices(['UDP' => 'udp', 'TCP' => 'tcp', 'TCP и UDP' => 'both']);
-        yield TextField::new('publicHostOverride', 'Внешний хост/IP (переопределение)')
-            ->setRequired(false)
-            ->hideOnIndex();
-        yield TextField::new('subnetCidr', 'Внутренняя подсеть (CIDR)')
-            ->setRequired(false)
-            ->hideOnIndex();
-        yield TextField::new('masterPassword', 'Мастер-пароль (Argon4 / Hysteria)')
+        yield TextField::new('publicHostOverride', 'Внешний хост/IP для клиентов (если не как у узла)')
             ->setRequired(false)
             ->hideOnIndex();
 
-        yield FormField::addFieldset('Промежуточный транзит (если протокол Transit)');
+        yield FormField::addFieldset('Приём обфусцированного трафика (обёртка Argon4)')
+            ->setHelp('Служба остаётся доступной как обычно, а дополнительно узел слушает отдельный порт Argon4: принимает зашифрованный и обфусцированный трафик, расшифровывает его и передаёт в эту службу как обычное подключение. Клиенту нужно включить «Обернуть в Argon4» с тем же портом и паролем — профиль, созданный кнопкой «Создать клиентский профиль», настроится сам.')
+            ->addCssClass($wrapped);
+        yield BooleanField::new('argonWrapEnabled', 'Принимать трафик, обёрнутый в Argon4')
+            ->hideOnIndex();
+        yield IntegerField::new('argonWrapPort', 'Порт обёртки Argon4 (UDP и TCP)')
+            ->setRequired(false)
+            ->setHelp('Пусто — 51820. Должен отличаться от порта службы и от других служб узла.')
+            ->hideOnIndex();
+        yield TextField::new('argonWrapPassword', 'Мастер-пароль обёртки')
+            ->setRequired(false)
+            ->hideOnIndex();
+        yield TextField::new('argonWrapSummary', 'Обёртка Argon4')
+            ->setVirtual(true)
+            ->formatValue(static fn ($value, VpnServerService $s): string => $s->hasArgonWrap()
+                ? sprintf('порт %d', $s->getArgonWrapPort() ?? VpnProtocol::ARGON_DEFAULT_PORT)
+                : '—')
+            ->onlyOnIndex();
+
+        yield FormField::addFieldset('Доступ')
+            ->addCssClass('js-proto-section js-proto-argon4 js-proto-transit js-proto-hysteria2 js-proto-hysteria');
+        yield TextField::new('masterPassword', 'Мастер-пароль (Argon4, L4-транзит, Hysteria)')
+            ->setRequired(false)
+            ->hideOnIndex();
+
+        yield FormField::addFieldset('Туннель Argon4 (расшифровка и выход в интернет)')
+            ->addCssClass($argon);
+        yield TextField::new('subnetCidr', 'Внутренняя подсеть клиентов (CIDR)')
+            ->setRequired(false)
+            ->hideOnIndex();
+
+        yield FormField::addFieldset('Транзит Argon4')
+            ->setHelp('Служба пропускает трафик к другому узлу. Чтобы узел просто пропускал трафик дальше по цепочке без расшифровки, удобнее раздел «Пропуск трафика».')
+            ->addCssClass($transit);
         yield BooleanField::new('transitBlind', 'Слепой транзит (без расшифровки и без пароля)')
             ->hideOnIndex();
-        yield TextField::new('transitTarget', 'Фиксированная цель транзита (host:port)')
+        yield TextField::new('transitTarget', 'Фиксированная цель (host:port)')
             ->setRequired(false)
             ->hideOnIndex();
-        yield TextField::new('transitAllow', 'Разрешённые цели транзита (CIDR / host:port через запятую)')
+        yield TextField::new('transitAllow', 'Разрешённые цели L4-транзита (CIDR / host:port через запятую)')
             ->setRequired(false)
             ->hideOnIndex();
 
-        yield FormField::addFieldset('Argon4 v4/v5');
+        yield FormField::addFieldset('Параметры Argon4 v4/v5')
+            ->setHelp('Действуют на службу Argon4, транзит и обёртку Argon4.')
+            ->addCssClass('js-proto-section js-proto-argon4 js-proto-transit js-proto-wrap')
+            ->collapsible();
         yield ChoiceField::new('argonProtocolVersion', 'Версия Argon4')
             ->setChoices(['v5' => 5, 'v4' => 4])
             ->hideOnIndex();
@@ -135,7 +181,8 @@ final class VpnServerServiceCrudController extends AbstractCrudController
             ->setHelp('0 — автоматический подбор оптимального MTU при запуске службы; 576..9000 — фиксированный лимит.')
             ->hideOnIndex();
 
-        yield FormField::addFieldset('VLESS Reality / TLS / Salamander');
+        yield FormField::addFieldset('VLESS Reality / TLS')
+            ->addCssClass('js-proto-section js-proto-vless js-proto-hysteria2');
         yield TextField::new('tlsDomain', 'SNI / TLS домен')
             ->setRequired(false)
             ->hideOnIndex();
@@ -148,7 +195,10 @@ final class VpnServerServiceCrudController extends AbstractCrudController
         yield TextField::new('realityShortId', 'VLESS Reality Short ID')
             ->setRequired(false)
             ->hideOnIndex();
-        yield TextField::new('obfsPassword', 'Hysteria2 Salamander пароль')
+
+        yield FormField::addFieldset('Hysteria 2')
+            ->addCssClass('js-proto-section js-proto-hysteria2');
+        yield TextField::new('obfsPassword', 'Пароль Salamander')
             ->setRequired(false)
             ->hideOnIndex();
 

@@ -4,6 +4,11 @@ set -euo pipefail
 # Установщик серверной части Argon4 Tunnel на Ubuntu.
 # Собирает бинарник (или копирует готовый), создаёт конфиг /etc/argon-tunnel/server.env
 # и регистрирует systemd-сервис argon-tunnel.service.
+#
+# Если задан SYNC_VPN_RUNTIME_DIR (каталог runtime панели sync на этом хосте, например
+# /opt/sync/server/var/vpn-runtime), дополнительно ставит скрипт применения sync-vpn-apply,
+# шаблон argon-tunnel@.service и юнит sync-vpn-apply.path: узел будет сам поднимать процессы
+# Argon4, DNAT и открывать порты при каждом сохранении в админке.
 
 if [[ "${EUID}" -ne 0 ]]; then
     echo "Запустите скрипт с правами root: sudo $0" >&2
@@ -47,4 +52,21 @@ cp "${SCRIPT_DIR}/ubuntu/argon-tunnel.service" /etc/systemd/system/argon-tunnel.
 systemctl daemon-reload
 systemctl enable argon-tunnel.service
 
+cp "${SCRIPT_DIR}/ubuntu/argon-tunnel@.service" /etc/systemd/system/argon-tunnel@.service
+install -m 0755 "${SCRIPT_DIR}/ubuntu/apply-runtime.sh" /usr/local/sbin/sync-vpn-apply
+
+if [[ -n "${SYNC_VPN_RUNTIME_DIR:-}" ]]; then
+    for unit in sync-vpn-apply.service sync-vpn-apply.path; do
+        sed "s#@VPN_RUNTIME_DIR@#${SYNC_VPN_RUNTIME_DIR}#g" "${SCRIPT_DIR}/ubuntu/${unit}" > "/etc/systemd/system/${unit}"
+    done
+    systemctl daemon-reload
+    # Узлом управляет админка: одиночный argon-tunnel.service не нужен, иначе он займёт порт 51820.
+    systemctl disable --now argon-tunnel.service 2>/dev/null || true
+    systemctl enable --now sync-vpn-apply.path
+    echo "==> Узел управляется панелью sync: изменения из ${SYNC_VPN_RUNTIME_DIR} применяются автоматически."
+    echo "    Применить вручную: sudo VPN_RUNTIME_DIR=${SYNC_VPN_RUNTIME_DIR} sync-vpn-apply"
+    exit 0
+fi
+
+systemctl daemon-reload
 echo "==> Готово. Отредактируйте /etc/argon-tunnel/server.env и запустите: sudo systemctl restart argon-tunnel"

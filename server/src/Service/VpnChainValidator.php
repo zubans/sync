@@ -163,6 +163,10 @@ final class VpnChainValidator
             } elseif ($conn->getArgonPassword() === null) {
                 $errors[] = sprintf('«%s»: включена надстройка Argon4, но не задан её мастер-пароль.', $name);
             }
+            $argonPort = $conn->getArgonPort();
+            if ($argonPort !== null && $argonPort > 65535) {
+                $errors[] = sprintf('«%s»: порт обёртки Argon4 должен быть в диапазоне 1..65535.', $name);
+            }
         }
 
         $isBlindTransit = $proto === VpnProtocol::TRANSIT && $conn->getPassword() === null;

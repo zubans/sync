@@ -1,0 +1,31 @@
+{#
+  Показывает в форме только блоки, относящиеся к выбранному протоколу: блок с классом
+  js-proto-section виден, если у него есть класс js-proto-<протокол>. Блок с классом
+  js-proto-wrap дополнительно виден, когда включена обёртка Argon4 (поле argonWrapEnabled).
+#}
+<script>
+    (function () {
+        const protoSelect = document.querySelector('select[name$="[proto]"]');
+        if (!protoSelect) {
+            return;
+        }
+        const wrapToggle = document.querySelector('input[type="checkbox"][name$="[argonWrapEnabled]"]');
+        const sections = document.querySelectorAll('.js-proto-section');
+
+        function refresh() {
+            const proto = protoSelect.value;
+            const wrapOn = wrapToggle !== null && wrapToggle.checked;
+            sections.forEach(function (section) {
+                const visible = section.classList.contains('js-proto-' + proto)
+                    || (wrapOn && section.classList.contains('js-proto-wrap'));
+                section.style.display = visible ? '' : 'none';
+            });
+        }
+
+        protoSelect.addEventListener('change', refresh);
+        if (wrapToggle !== null) {
+            wrapToggle.addEventListener('change', refresh);
+        }
+        refresh();
+    })();
+</script>

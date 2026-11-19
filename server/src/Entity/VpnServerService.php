@@ -73,6 +73,19 @@ class VpnServerService
     #[ORM\Column(options: ['default' => true])]
     private bool $argonAllowVideoCall = true;
 
+    /**
+     * Обёртка Argon4: служба дополнительно принимает обфусцированный трафик на отдельном UDP/TCP-порту,
+     * узел расшифровывает его и передаёт в эту же службу как обычное подключение.
+     */
+    #[ORM\Column(options: ['default' => false])]
+    private bool $argonWrapEnabled = false;
+
+    #[ORM\Column(nullable: true)]
+    private ?int $argonWrapPort = null;
+
+    #[ORM\Column(length: 255, nullable: true)]
+    private ?string $argonWrapPassword = null;
+
     #[ORM\Column(length: 255, nullable: true)]
     private ?string $tlsDomain = null;
 
@@ -316,6 +329,46 @@ class VpnServerService
     public function setArgonAllowVideoCall(bool $argonAllowVideoCall): void
     {
         $this->argonAllowVideoCall = $argonAllowVideoCall;
+        $this->touch();
+    }
+
+    public function isArgonWrapEnabled(): bool
+    {
+        return $this->argonWrapEnabled;
+    }
+
+    public function setArgonWrapEnabled(bool $argonWrapEnabled): void
+    {
+        $this->argonWrapEnabled = $argonWrapEnabled;
+        $this->touch();
+    }
+
+    /** Обёртка имеет смысл только для «обычных» служб: Argon4 и транзит и так говорят Argon4. */
+    public function hasArgonWrap(): bool
+    {
+        return $this->argonWrapEnabled && VpnProtocol::supportsArgonUnderlay($this->proto);
+    }
+
+    public function getArgonWrapPort(): ?int
+    {
+        return $this->argonWrapPort;
+    }
+
+    public function setArgonWrapPort(?int $argonWrapPort): void
+    {
+        $this->argonWrapPort = ($argonWrapPort !== null && $argonWrapPort > 0) ? $argonWrapPort : null;
+        $this->touch();
+    }
+
+    public function getArgonWrapPassword(): ?string
+    {
+        return $this->argonWrapPassword;
+    }
+
+    public function setArgonWrapPassword(?string $argonWrapPassword): void
+    {
+        $trimmed = $argonWrapPassword !== null ? trim($argonWrapPassword) : '';
+        $this->argonWrapPassword = $trimmed !== '' ? $trimmed : null;
         $this->touch();
     }
 

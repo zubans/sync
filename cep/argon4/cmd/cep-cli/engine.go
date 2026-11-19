@@ -238,7 +238,7 @@ func (e *Engine) connect() error {
 				continue
 			}
 			nextHop := e.plan.Hops[i+1]
-			nextPort := 51820
+			nextPort := argonUnderlayPort(nextHop)
 			targetProto := "udp"
 			if !nextHop.UseArgon {
 				var portErr error
@@ -281,7 +281,7 @@ func (e *Engine) connect() error {
 				return fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
 			}
 			argonIP := serverIPs[i][0]
-			argonPort := 51820
+			argonPort := argonUnderlayPort(hop)
 			usedRelay := false
 			if blindRelay != nil {
 				argonIP, argonPort = blindRelay.ip, blindRelay.port
@@ -407,7 +407,7 @@ func (e *Engine) startArgon(index int, profile Profile, ip string, portOverride 
 	port := portOverride
 	if port <= 0 {
 		if underlay && mode == "auto" {
-			port = 51820
+			port = argonUnderlayPort(profile)
 		} else {
 			endpoint, err := parseArgonEndpoint(profile.Server)
 			if err != nil {

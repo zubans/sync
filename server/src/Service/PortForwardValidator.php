@@ -3,20 +3,19 @@
 namespace App\Service;
 
 use App\Entity\PortForwardRule;
+use App\Entity\RelayRoute;
 use App\Entity\VpnServerService;
-use App\Repository\PortForwardRuleRepository;
-use App\Repository\VpnServerServiceRepository;
 use App\Vpn\VpnProtocol;
 
 /**
- * Валидация правил проброса портов и серверных VPN-сервисов: проверка адресов,
- * диапазонов портов и взаимных конфликтов между правилами и демонами узла.
+ * Валидация всего, что занимает порты узла: серверных служб (и их обёрток Argon4), правил
+ * пропуска трафика и правил проброса портов. Конфликты портов проверяются по общему плану
+ * портов узла (NodePortPlan), поэтому служба, обёртка, пропуск и проброс не могут занять один порт.
  */
 final class PortForwardValidator
 {
     public function __construct(
-        private readonly PortForwardRuleRepository $ruleRepository,
-        private readonly VpnServerServiceRepository $serviceRepository,
+        private readonly NodePortPlan $portPlan,
     ) {
     }
 
@@ -69,38 +68,104 @@ final class PortForwardValidator
             }
         }
 
+        $this->validateArgonWrap($svc, $errors);
+
         if ($errors !== [] || !$svc->isEnabled()) {
             return $errors;
         }
 
-        foreach ($this->serviceRepository->findEnabledOrdered() as $other) {
-            if ($other->getId() !== null && $other->getId() === $svc->getId()) {
-                continue;
-            }
-            if ($other->getListenPort() === $port && self::protocolsOverlap($svc->getTransportProto(), $other->getTransportProto())) {
-                $errors[] = sprintf(
-                    'Конфликт порта %d/%s с другим активным сервисом «%s».',
-                    $port,
-                    strtoupper($svc->getTransportProto()),
-                    $other->getName(),
-                );
-            }
+        $key = NodePortPlan::serviceKey($svc);
+        $transport = $proto === VpnProtocol::TRANSIT ? PortForwardRule::PROTO_BOTH : $svc->getTransportProto();
+        foreach ($this->portPlan->conflictsWith($key, $port, $port, $transport) as $message) {
+            $errors[] = $message;
         }
-
-        foreach ($this->ruleRepository->findEnabledOrdered() as $rule) {
-            if ($port >= $rule->getListenPort() && $port <= $rule->getEffectiveEndPort()
-                && self::protocolsOverlap($rule->getProtocol(), $svc->getTransportProto())) {
-                $errors[] = sprintf(
-                    'Порт %d занят активным правилом проброса портов «%s» (%s/%s).',
-                    $port,
-                    $rule->getName(),
-                    $rule->getPortRangeDisplay(),
-                    strtoupper($rule->getProtocol()),
-                );
+        if ($svc->hasArgonWrap()) {
+            $wrapPort = $svc->getArgonWrapPort() ?? VpnProtocol::ARGON_DEFAULT_PORT;
+            foreach ($this->portPlan->conflictsWith($key, $wrapPort, $wrapPort, PortForwardRule::PROTO_BOTH) as $message) {
+                $errors[] = 'Обёртка Argon4: ' . $message;
             }
         }
 
         return $errors;
+    }
+
+    /** @return list<string> */
+    public function validateRelayRoute(RelayRoute $route): array
+    {
+        $errors = [];
+        if (trim($route->getName()) === '') {
+            $errors[] = 'Укажите название правила пропуска.';
+        }
+
+        $port = $route->getListenPort();
+        if ($port < 1 || $port > 65535) {
+            $errors[] = 'Входной порт должен быть в диапазоне 1..65535.';
+        }
+        $targetPort = $route->getTargetPort();
+        if ($targetPort < 1 || $targetPort > 65535) {
+            $errors[] = 'Порт следующего узла должен быть в диапазоне 1..65535.';
+        }
+
+        $host = $route->getTargetHost();
+        if ($host === '') {
+            $errors[] = 'Укажите адрес следующего узла.';
+        } elseif ($route->isArgonBlind()) {
+            if (filter_var($host, FILTER_VALIDATE_IP) === false && !preg_match('/^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?$/', $host)) {
+                $errors[] = sprintf('Некорректный адрес следующего узла «%s» (ожидается IP или домен).', $host);
+            }
+        } elseif (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            $errors[] = sprintf('Для DNAT адрес следующего узла задаётся IPv4-адресом, а не «%s».', $host);
+        }
+
+        $source = $route->getSourceCidr();
+        if ($source !== null) {
+            if ($route->isArgonBlind()) {
+                $errors[] = 'Ограничение по источнику поддерживается только для DNAT.';
+            } elseif (!VpnNodeSettingsService::isValidIpv4Cidr($source) && filter_var($source, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+                $errors[] = sprintf('Некорректная исходная подсеть/IP «%s».', $source);
+            }
+        }
+
+        $mtu = $route->getArgonPathMtu();
+        if ($route->isArgonBlind() && $mtu !== 0 && ($mtu < 576 || $mtu > 9000)) {
+            $errors[] = 'Внешний MTU должен быть 0 (автоподбор) или от 576 до 9000.';
+        }
+
+        if ($errors !== [] || !$route->isEnabled()) {
+            return $errors;
+        }
+
+        foreach ($this->portPlan->conflictsWith(NodePortPlan::relayKey($route), $port, $port, $route->getEffectiveTransport()) as $message) {
+            $errors[] = $message;
+        }
+
+        return $errors;
+    }
+
+    /** @param list<string> $errors */
+    private function validateArgonWrap(VpnServerService $svc, array &$errors): void
+    {
+        if (!$svc->isArgonWrapEnabled()) {
+            return;
+        }
+        if (!VpnProtocol::supportsArgonUnderlay($svc->getProto())) {
+            $errors[] = 'Обёртка Argon4 не нужна службам Argon4 и Transit: они уже принимают Argon4.';
+
+            return;
+        }
+        if ($svc->getArgonWrapPassword() === null) {
+            $errors[] = 'Для обёртки Argon4 задайте мастер-пароль обёртки.';
+        }
+        // Обёртка отдаёт расшифрованный поток службе на 127.0.0.1, поэтому служба должна слушать loopback.
+        if (!in_array($svc->getListenHost(), ['0.0.0.0', '127.0.0.1', '::'], true)) {
+            $errors[] = sprintf('Обёртка Argon4 передаёт трафик службе на 127.0.0.1, а служба слушает только %s: укажите Listen IP 0.0.0.0.', $svc->getListenHost());
+        }
+        $wrapPort = $svc->getArgonWrapPort() ?? VpnProtocol::ARGON_DEFAULT_PORT;
+        if ($wrapPort < 1 || $wrapPort > 65535) {
+            $errors[] = 'Порт обёртки Argon4 должен быть в диапазоне 1..65535.';
+        } elseif ($wrapPort === $svc->getListenPort()) {
+            $errors[] = sprintf('Порт обёртки Argon4 (%d) совпадает с портом самой службы: обёртке нужен отдельный порт.', $wrapPort);
+        }
     }
 
     /** @return list<string> */
@@ -161,60 +226,14 @@ final class PortForwardValidator
     /** @param list<string> $errors */
     private function checkOverlaps(PortForwardRule $candidate, array &$errors): void
     {
-        $candStart = $candidate->getListenPort();
-        $candEnd = $candidate->getEffectiveEndPort();
-        $candProto = $candidate->getProtocol();
-        $candIface = $candidate->getListenInterface() ?? '*';
-
-        foreach ($this->ruleRepository->findEnabledOrdered() as $other) {
-            if ($other->getId() !== null && $other->getId() === $candidate->getId()) {
-                continue;
-            }
-            $otherIface = $other->getListenInterface() ?? '*';
-            if ($candIface !== '*' && $otherIface !== '*' && $candIface !== $otherIface) {
-                continue;
-            }
-            if (!self::protocolsOverlap($candProto, $other->getProtocol())) {
-                continue;
-            }
-            if ($candStart <= $other->getEffectiveEndPort() && $other->getListenPort() <= $candEnd) {
-                $errors[] = sprintf(
-                    'Конфликт портов %s с правилом «%s» (%s/%s).',
-                    $candidate->getPortRangeDisplay(),
-                    $other->getName(),
-                    $other->getPortRangeDisplay(),
-                    strtoupper($other->getProtocol()),
-                );
-            }
+        foreach ($this->portPlan->conflictsWith(
+            NodePortPlan::forwardKey($candidate),
+            $candidate->getListenPort(),
+            $candidate->getEffectiveEndPort(),
+            $candidate->getProtocol(),
+            iface: $candidate->getListenInterface(),
+        ) as $message) {
+            $errors[] = $message;
         }
-
-        foreach ($this->serviceRepository->findEnabledOrdered() as $svc) {
-            if (!$this->servicePortOverlaps($candidate, $svc)) {
-                continue;
-            }
-            $errors[] = sprintf(
-                'Порт %d занят активным серверным сервисом «%s» (%s).',
-                $svc->getListenPort(),
-                $svc->getName(),
-                strtoupper($svc->getTransportProto()),
-            );
-        }
-    }
-
-    private function servicePortOverlaps(PortForwardRule $rule, VpnServerService $svc): bool
-    {
-        $port = $svc->getListenPort();
-        if ($port < $rule->getListenPort() || $port > $rule->getEffectiveEndPort()) {
-            return false;
-        }
-
-        return self::protocolsOverlap($rule->getProtocol(), $svc->getTransportProto());
-    }
-
-    private static function protocolsOverlap(string $a, string $b): bool
-    {
-        return $a === PortForwardRule::PROTO_BOTH
-            || $b === PortForwardRule::PROTO_BOTH
-            || $a === $b;
     }
 }

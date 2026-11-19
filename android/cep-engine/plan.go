@@ -32,6 +32,7 @@ type Profile struct {
 	IgnoreCertErrors               bool   `json:"ignoreCertErrors"`
 	Routes                         string `json:"routes"`
 	UseArgon                       bool   `json:"useArgon"`
+	ArgonPort                      int    `json:"argonPort,omitempty"`
 	ArgonPassword                  string `json:"argonPassword"`
 	ArgonProtocolVersion           int    `json:"argonProtocolVersion,omitempty"`
 	ArgonPaddingProfile            string `json:"argonPaddingProfile,omitempty"`
@@ -468,7 +469,7 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 				return nil, fmt.Errorf("узел %d «%s»: транзитный шлюз не может быть последним", i+1, hop.Name)
 			}
 			nextHop := &plan.Hops[i+1]
-			nextPort, nextProto := "51820", "udp"
+			nextPort, nextProto := argonUnderlayPort(nextHop), "udp"
 			if !nextHop.UseArgon {
 				var targetErr error
 				nextPort, nextProto, targetErr = hopTargetPortAndProto(nextHop)
@@ -499,7 +500,7 @@ func buildConfig(plan *Plan, serverIPs []string) (map[string]any, error) {
 			if err != nil {
 				return nil, fmt.Errorf("узел %d «%s»: %w", i+1, hop.Name, err)
 			}
-			argonAddr := net.JoinHostPort(serverIPs[i], "51820")
+			argonAddr := net.JoinHostPort(serverIPs[i], argonUnderlayPort(hop))
 			if blindRelayAddr != "" {
 				argonAddr = blindRelayAddr
 				blindRelayAddr = ""
@@ -715,6 +716,7 @@ func profileToProbeRequest(p Profile, resolvedIP string, transitProto string, pr
 		PaddingProfile:          p.ArgonPaddingProfile,
 		FirstPacketProfile:      p.ArgonFirstPacketProfile,
 		UseArgon:                p.UseArgon,
+		ArgonPort:               p.ArgonPort,
 		ArgonPassword:           p.ArgonPassword,
 		ArgonProtocolVersion:    p.ArgonProtocolVersion,
 		ArgonPaddingProfile:     p.ArgonPaddingProfile,
@@ -781,6 +783,14 @@ func computePrecedingMTUBudget(chainJSON, targetID string) int {
 	return 0
 }
 
+// argonUnderlayPort — порт обёртки Argon4 на узле (useArgon): из профиля или 51820 по умолчанию.
+func argonUnderlayPort(hop *Profile) string {
+	if hop != nil && hop.ArgonPort > 0 && hop.ArgonPort <= 65535 {
+		return strconv.Itoa(hop.ArgonPort)
+	}
+	return "51820"
+}
+
 func hopTargetAddress(hop *Profile) string {
 	if hop == nil {
 		return ""
@@ -795,7 +805,7 @@ func hopTargetAddress(hop *Profile) string {
 		if l, err := parseLink(hop.URI); err == nil && l.Host != "" {
 			port := strconv.Itoa(l.Port)
 			if hop.UseArgon {
-				port = "51820"
+				port = argonUnderlayPort(hop)
 			}
 			return net.JoinHostPort(l.Host, port)
 		}
@@ -803,7 +813,7 @@ func hopTargetAddress(hop *Profile) string {
 		if u, err := openConnectURL(hop.Server); err == nil && u.Hostname() != "" {
 			port := portOr(u.Port(), "443")
 			if hop.UseArgon {
-				port = "51820"
+				port = argonUnderlayPort(hop)
 			}
 			return net.JoinHostPort(u.Hostname(), port)
 		}
@@ -811,7 +821,7 @@ func hopTargetAddress(hop *Profile) string {
 		if ovpn, err := parseOVPN(hop.Config); err == nil && ovpn.remoteHost != "" {
 			port := strconv.Itoa(ovpn.remotePort)
 			if hop.UseArgon {
-				port = "51820"
+				port = argonUnderlayPort(hop)
 			}
 			return net.JoinHostPort(ovpn.remoteHost, port)
 		}
@@ -915,7 +925,7 @@ func autoProbeTransitInitialMTU(plan *Plan, ips []string, logf func(string)) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			target := ""
 			if i+1 < len(plan.Hops) {
-				nextPort := "51820"
+				nextPort := argonUnderlayPort(&plan.Hops[i+1])
 				if !plan.Hops[i+1].UseArgon {
 					if pt, _, err := hopTargetPortAndProto(&plan.Hops[i+1]); err == nil {
 						nextPort = pt

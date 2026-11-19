@@ -174,11 +174,17 @@ final class VpnConnectionCrudController extends AbstractCrudController
             ->setRequired(false)
             ->hideOnIndex();
 
-        yield FormField::addFieldset('Argon4 v4/v5 и обфускация трафика');
-        yield BooleanField::new('useArgon', 'Надстройка Argon4 (UDP-оболочка поверх протокола)');
-        yield TextField::new('argonPassword', 'Мастер-пароль надстройки Argon4')
+        yield FormField::addFieldset('Обфускация Argon4')
+            ->setHelp('Для Argon4 и Transit обфускация — сам протокол. Для остальных протоколов включите «Обернуть в Argon4»: клиент шифрует трафик Argon4 и шлёт его на порт обёртки узла, узел расшифровывает и передаёт в службу как обычный. На сервере у службы должна быть включена «Обёртка Argon4» с тем же портом и паролем.');
+        yield BooleanField::new('useArgon', 'Обернуть в Argon4');
+        yield IntegerField::new('argonPort', 'Порт обёртки Argon4 на узле')
+            ->setRequired(false)
+            ->setHelp('Пусто — 51820. Совпадает с портом обёртки у службы на сервере (или с портом пропуска, если перед узлом стоит слепой транзит).')
+            ->hideOnIndex();
+        yield TextField::new('argonPassword', 'Мастер-пароль обёртки Argon4')
             ->setRequired(false)
             ->hideOnIndex();
+        yield FormField::addFieldset('Параметры Argon4 v4/v5')->collapsible();
         yield ChoiceField::new('argonProtocolVersion', 'Версия Argon4')
             ->setChoices([
                 'v5 (переменный padding и профили трафика)' => 5,

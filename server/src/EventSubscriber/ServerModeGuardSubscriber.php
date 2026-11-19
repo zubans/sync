@@ -2,6 +2,7 @@
 
 namespace App\EventSubscriber;
 
+use App\Security\RequiresRelayMode;
 use App\Security\RequiresServerMode;
 use App\Service\VpnNodeSettingsService;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
@@ -9,8 +10,9 @@ use Symfony\Component\HttpKernel\Event\ControllerEvent;
 use Symfony\Component\HttpKernel\KernelEvents;
 
 /**
- * Блокирует доступ к серверным разделам админки (пользователи, службы VPN, проброс портов),
- * пока устройство работает в режиме «Клиент».
+ * Блокирует доступ к разделам админки, недоступным в текущей роли узла: серверные разделы
+ * (пользователи, службы VPN, проброс портов) — вне роли «VPN-сервер», правила пропуска
+ * трафика — в роли «Клиент».
  */
 final class ServerModeGuardSubscriber implements EventSubscriberInterface
 {
@@ -41,18 +43,33 @@ final class ServerModeGuardSubscriber implements EventSubscriberInterface
         }
 
         $refClass = new \ReflectionClass($object);
-        $classAttrs = $refClass->getAttributes(RequiresServerMode::class);
-        $methodAttrs = $refClass->hasMethod($method)
-            ? $refClass->getMethod($method)->getAttributes(RequiresServerMode::class)
-            : [];
 
-        $attr = $methodAttrs[0] ?? $classAttrs[0] ?? null;
-        if ($attr === null) {
+        $server = $this->findAttribute($refClass, $method, RequiresServerMode::class);
+        if ($server instanceof RequiresServerMode) {
+            $this->settingsService->assertServerMode($server->message);
+
             return;
         }
 
-        /** @var RequiresServerMode $instance */
-        $instance = $attr->newInstance();
-        $this->settingsService->assertServerMode($instance->message);
+        $relay = $this->findAttribute($refClass, $method, RequiresRelayMode::class);
+        if ($relay instanceof RequiresRelayMode) {
+            $this->settingsService->assertRelayCapable($relay->message);
+        }
+    }
+
+    /**
+     * @template T of object
+     * @param \ReflectionClass<object> $refClass
+     * @param class-string<T>          $attributeClass
+     * @return T|null
+     */
+    private function findAttribute(\ReflectionClass $refClass, string $method, string $attributeClass): ?object
+    {
+        $methodAttrs = $refClass->hasMethod($method)
+            ? $refClass->getMethod($method)->getAttributes($attributeClass)
+            : [];
+        $attr = $methodAttrs[0] ?? $refClass->getAttributes($attributeClass)[0] ?? null;
+
+        return $attr?->newInstance();
     }
 }

@@ -57,7 +57,7 @@ public struct Argon4Configuration: Codable, Equatable, Sendable {
         if let portOverride {
             server = "\(resolvedIP):\(portOverride)"
         } else if underlay {
-            server = "\(resolvedIP):51820"
+            server = "\(resolvedIP):\(profile.argonUnderlayPort)"
         } else {
             let endpoint = try Endpoint.argon4(profile.server)
             server = "\(resolvedIP):\(endpoint.port ?? 51820)"
