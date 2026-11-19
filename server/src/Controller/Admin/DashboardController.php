@@ -7,6 +7,7 @@ use App\Entity\Device;
 use App\Entity\Family;
 use App\Entity\InstalledApp;
 use App\Entity\PortForwardRule;
+use App\Entity\RelayRoute;
 use App\Entity\User;
 use App\Entity\Vault;
 use App\Entity\VpnChain;
@@ -51,6 +52,9 @@ final class DashboardController extends AbstractDashboardController
                 ['Подключения VPN/CEP', $count(VpnConnection::class), 'admin_vpn_connection_index'],
                 ['Цепочки узлов', $count(VpnChain::class), 'admin_vpn_chain_index'],
             ];
+            if ($settings->canRelay()) {
+                $vpnStats[] = ['Пропуск трафика', $count(RelayRoute::class), 'admin_relay_route_index'];
+            }
             if ($settings->isServerMode()) {
                 $vpnStats[] = ['Серверные службы VPN', $count(VpnServerService::class), 'admin_vpn_server_service_index'];
                 $vpnStats[] = ['Правила проброса портов', $count(PortForwardRule::class), 'admin_port_forward_index'];
@@ -105,12 +109,20 @@ final class DashboardController extends AbstractDashboardController
         yield MenuItem::linkToRoute('Провайдеры ИИ и агенты', 'fa fa-robot', 'admin_ai_providers_index');
 
         if ($effective[FeatureManager::VPN]) {
-            yield MenuItem::section('VPN / CEP — Узел');
-            yield MenuItem::linkToRoute('Узел и роль', 'fa fa-server', 'admin_vpn_node_index');
+            $node = $this->nodeSettings->getSettings();
+            yield MenuItem::section('VPN / CEP — ' . $node->getModeLabel());
+            yield MenuItem::linkToRoute('Узел, роль и порты', 'fa fa-server', 'admin_vpn_node_index');
+
+            // Клиентская часть есть в любой роли: узел может и сам выходить в интернет через цепочку.
             yield MenuItem::linkTo(VpnConnectionCrudController::class, 'Подключения (все типы)', 'fa fa-plug');
             yield MenuItem::linkTo(VpnChainCrudController::class, 'Цепочки узлов', 'fa fa-link');
 
-            if ($this->nodeSettings->isServerMode()) {
+            if ($node->canRelay()) {
+                yield MenuItem::section('Узел на цепочке');
+                yield MenuItem::linkTo(RelayRouteCrudController::class, 'Пропуск трафика', 'fa fa-route');
+            }
+
+            if ($node->isServerMode()) {
                 yield MenuItem::section('VPN-сервер');
                 yield MenuItem::linkTo(VpnServerServiceCrudController::class, 'Серверные службы', 'fa fa-network-wired');
                 yield MenuItem::linkTo(PortForwardRuleCrudController::class, 'Проброс портов', 'fa fa-shuffle');

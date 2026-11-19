@@ -8,7 +8,7 @@ use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\Security\Core\Exception\AccessDeniedException;
 
 /**
- * Управление локальной ролью и сетевыми настройками этого узла (Клиент или VPN-сервер).
+ * Управление локальной ролью и сетевыми настройками этого узла (Клиент, Узел на цепочке или VPN-сервер).
  */
 final class VpnNodeSettingsService
 {
@@ -37,6 +37,13 @@ final class VpnNodeSettingsService
     {
         if (!$this->isServerMode()) {
             throw new AccessDeniedException(sprintf('%s: переведите узел в режим «Сервер».', $action));
+        }
+    }
+
+    public function assertRelayCapable(string $action = 'Операция доступна только в ролях «Узел на цепочке» и «VPN-сервер»'): void
+    {
+        if (!$this->getSettings()->canRelay()) {
+            throw new AccessDeniedException(sprintf('%s: смените роль узла на странице «Узел, роль и порты».', $action));
         }
     }
 

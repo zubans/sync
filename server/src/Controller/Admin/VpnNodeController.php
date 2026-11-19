@@ -5,6 +5,7 @@ namespace App\Controller\Admin;
 use App\Entity\NodeSettings;
 use App\Entity\User;
 use App\Repository\PortForwardRuleRepository;
+use App\Repository\RelayRouteRepository;
 use App\Repository\VpnChainRepository;
 use App\Repository\VpnConnectionRepository;
 use App\Repository\VpnServerServiceRepository;
@@ -12,7 +13,9 @@ use App\Repository\VpnUserRepository;
 use App\Security\RequiresFeature;
 use App\Service\CepExportService;
 use App\Service\FeatureManager;
+use App\Service\NodePortPlan;
 use App\Service\NodeRuntimeExporter;
+use App\Service\VpnChainRouteDescriber;
 use App\Service\VpnNodeSettingsService;
 use App\Service\VpnServerProvisioner;
 use App\Vpn\VpnProtocol;
@@ -24,8 +27,9 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Security\Http\Attribute\IsGranted;
 
 /**
- * Управление ролью текущего узла («Клиент» / «VPN-сервер»), мастером превращения в VPN-сервер
- * и экспортом/синхронизацией локальных конфигов (desired-state.json, profiles.json, port-forward.sh).
+ * Управление ролью текущего узла («Клиент» / «Узел на цепочке» / «VPN-сервер»), планом портов узла,
+ * мастером превращения в VPN-сервер и экспортом/синхронизацией локальных конфигов
+ * (desired-state.json, profiles.json, port-forward.sh).
  */
 #[IsGranted(User::ROLE_ADMIN)]
 #[RequiresFeature(FeatureManager::VPN)]
@@ -45,21 +49,33 @@ final class VpnNodeController extends AbstractController
         VpnServerServiceRepository $serviceRepository,
         PortForwardRuleRepository $forwardRepository,
         VpnUserRepository $userRepository,
+        RelayRouteRepository $relayRepository,
+        NodePortPlan $portPlan,
+        VpnChainRouteDescriber $routeDescriber,
     ): Response {
         $settings = $settingsService->getSettings();
         $runtimeDir = $runtimeExporter->getRuntimeDir();
+        $activeChain = $settings->getActiveClientChainId() !== null
+            ? $chainRepository->find($settings->getActiveClientChainId())
+            : null;
 
         return $this->render('admin/vpn_node.html.twig', [
             'settings' => $settings,
             'modes' => NodeSettings::MODES,
+            'modeLabels' => NodeSettings::MODE_LABELS,
             'protocols' => VpnProtocol::CHOICES,
             'chains' => $chainRepository->findEnabledOrdered(),
+            'activeChain' => $activeChain,
+            'activeChainRoute' => $activeChain !== null ? $routeDescriber->describe($activeChain) : [],
+            'ports' => $portPlan->build($settings),
+            'portConflicts' => $portPlan->findConflicts($settings),
             'counts' => [
                 'connections' => $connectionRepository->count([]),
                 'chains' => $chainRepository->count([]),
                 'services' => $serviceRepository->count([]),
                 'forwards' => $forwardRepository->count([]),
                 'users' => $userRepository->count([]),
+                'relays' => $relayRepository->count([]),
             ],
             'runtimeDir' => $runtimeDir,
             'runtimeFiles' => $this->listRuntimeFiles($runtimeDir),
@@ -107,8 +123,8 @@ final class VpnNodeController extends AbstractController
             );
             $sync = $runtimeExporter->sync();
             $this->addFlash('success', sprintf(
-                'Режим узла сохранён: %s. %s',
-                $settings->isServerMode() ? 'VPN-сервер' : 'Клиент',
+                'Роль узла сохранена: %s. %s',
+                $settings->getModeLabel(),
                 $sync['message'],
             ));
         } catch (\InvalidArgumentException $e) {

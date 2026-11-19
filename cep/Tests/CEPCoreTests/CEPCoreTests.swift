@@ -230,3 +230,19 @@ final class InnerNetworkTests: XCTestCase {
         XCTAssertNil(RouteList.maskLength("255.0.255.0"))
     }
 }
+
+final class ArgonPortTests: XCTestCase {
+    func testArgonPortDecodedAndUsedForUnderlay() throws {
+        let json = #"{"id":"11111111-2222-3333-4444-555555555555","name":"V","proto":"vless","uri":"vless://u@example.com:443","useArgon":true,"argonPort":51821,"argonPassword":"wrap"}"#
+        let profile = try JSONDecoder().decode(Profile.self, from: Data(json.utf8))
+        XCTAssertEqual(profile.argonPort, 51821)
+        XCTAssertEqual(profile.argonUnderlayPort, 51821)
+    }
+
+    func testArgonPortDefaultsTo51820() throws {
+        let json = #"{"id":"11111111-2222-3333-4444-555555555555","name":"V","proto":"vless","uri":"vless://u@example.com:443","useArgon":true,"argonPassword":"wrap"}"#
+        let profile = try JSONDecoder().decode(Profile.self, from: Data(json.utf8))
+        XCTAssertNil(profile.argonPort)
+        XCTAssertEqual(profile.argonUnderlayPort, 51820)
+    }
+}

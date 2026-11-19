@@ -507,3 +507,23 @@ func TestProbeProfileMTUAndChainBudget(t *testing.T) {
 		t.Fatalf("ожидалось автоматическое сужение TUN MTU ниже %d при суженном транзите, получено %v", tunMTU, mtuVal)
 	}
 }
+
+func TestUseArgonHonoursArgonPort(t *testing.T) {
+	plan, err := parsePlan(testPlan(
+		Profile{Name: "V", Proto: "vless", URI: "vless://11111111-2222-3333-4444-555555555555@example.com:8443?security=tls", UseArgon: true, ArgonPort: 51821, ArgonPassword: "wrap-secret"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := buildConfig(plan, []string{"2.2.2.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	underlay := cfg["endpoints"].([]any)[0].(map[string]any)
+	if underlay["server"] != "2.2.2.2:51821" || underlay["target"] != "2.2.2.2:8443" {
+		t.Fatalf("обёртка Argon4 должна идти на argonPort узла: %v", underlay)
+	}
+	if got := hopTargetAddress(&plan.Hops[0]); got != "example.com:51821" {
+		t.Fatalf("адрес узла для подбора MTU должен указывать на порт обёртки, получено %q", got)
+	}
+}

@@ -50,7 +50,7 @@ final class FeatureModulesAdminTest extends DatabaseWebTestCase
         $menuText = $this->client->getCrawler()->filter('.main-sidebar, #sidebar, aside')->text();
         self::assertStringContainsString('Модули и функции ИИ', $menuText);
         self::assertStringContainsString('Провайдеры ИИ и агенты', $menuText);
-        self::assertStringNotContainsString('Узел и роль', $menuText);
+        self::assertStringNotContainsString('Узел, роль и порты', $menuText);
         self::assertStringNotContainsString('Лента', $menuText);
         self::assertStringContainsString('Приложения', $menuText);
 

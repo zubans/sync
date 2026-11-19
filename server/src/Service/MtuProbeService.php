@@ -132,6 +132,9 @@ final readonly class MtuProbeService
         $draft->setClientSecret(isset($payload['clientSecret']) ? (string) $payload['clientSecret'] : null);
         $draft->setUseArgon((bool) ($payload['useArgon'] ?? false));
         $draft->setArgonPassword(isset($payload['argonPassword']) ? (string) $payload['argonPassword'] : null);
+        if (isset($payload['argonPort']) && is_numeric($payload['argonPort'])) {
+            $draft->setArgonPort((int) $payload['argonPort']);
+        }
         if (isset($payload['argonProtocolVersion']) && is_numeric($payload['argonProtocolVersion'])) {
             $draft->setArgonProtocolVersion((int) $payload['argonProtocolVersion']);
         }
@@ -526,9 +529,8 @@ final readonly class MtuProbeService
             return [
                 'ok' => true,
                 'host' => $parsed['host'],
-                'port' => ($conn->getServer() !== null && $conn->getServer() !== '' && $parsed['port'] !== null)
-                    ? $parsed['port']
-                    : VpnProtocol::defaultPort(VpnProtocol::ARGON4),
+                // Порт обёртки Argon4 на узле, а не порт внутренней службы из URI/конфига.
+                'port' => $conn->getEffectiveArgonPort(),
                 'transport' => 'udp',
                 'usesArgon' => true,
             ];

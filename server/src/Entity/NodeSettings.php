@@ -7,19 +7,34 @@ use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
 /**
- * Настройки роли текущего узла (Клиент или VPN-сервер) и сетевые параметры устройства,
- * на котором развёрнута данная инсталляция sync.
+ * Настройки роли текущего узла и сетевые параметры устройства, на котором развёрнута инсталляция sync.
+ *
+ * Роли:
+ * - «Клиент» — устройство само подключается к цепочке узлов, ничего не принимает извне;
+ * - «Узел на цепочке» — принимает трафик на своих портах и передаёт его следующему узлу,
+ *   не расшифровывая (слепой Argon4-транзит или DNAT);
+ * - «VPN-сервер» — поднимает службы VPN, расшифровывает трафик и выпускает его в сеть;
+ *   может одновременно работать и как узел на цепочке.
  */
 #[ORM\Entity(repositoryClass: NodeSettingsRepository::class)]
 #[ORM\Table(name: 'node_settings')]
 class NodeSettings
 {
     public const MODE_CLIENT = 'client';
+    public const MODE_RELAY = 'relay';
     public const MODE_SERVER = 'server';
 
     public const MODES = [
         self::MODE_CLIENT => 'Клиент (подключение к удалённым узлам и цепочкам)',
+        self::MODE_RELAY => 'Узел на цепочке (пропускает трафик к следующему узлу)',
         self::MODE_SERVER => 'VPN-сервер (приём подключений, сервисы, проброс портов, пользователи)',
+    ];
+
+    /** @var array<string, string> Короткие названия ролей для бейджей и сообщений. */
+    public const MODE_LABELS = [
+        self::MODE_CLIENT => 'Клиент',
+        self::MODE_RELAY => 'Узел на цепочке',
+        self::MODE_SERVER => 'VPN-сервер',
     ];
 
     #[ORM\Id]
@@ -84,7 +99,7 @@ class NodeSettings
 
     public function setMode(string $mode): void
     {
-        if (!in_array($mode, [self::MODE_CLIENT, self::MODE_SERVER], true)) {
+        if (!array_key_exists($mode, self::MODES)) {
             throw new \InvalidArgumentException(sprintf('Неизвестный режим узла «%s»', $mode));
         }
         $this->mode = $mode;
@@ -99,6 +114,22 @@ class NodeSettings
     public function isClientMode(): bool
     {
         return $this->mode === self::MODE_CLIENT;
+    }
+
+    public function isRelayMode(): bool
+    {
+        return $this->mode === self::MODE_RELAY;
+    }
+
+    /** Узел принимает трафик извне и может пропускать его дальше по цепочке (роли «Узел на цепочке» и «VPN-сервер»). */
+    public function canRelay(): bool
+    {
+        return $this->mode === self::MODE_RELAY || $this->mode === self::MODE_SERVER;
+    }
+
+    public function getModeLabel(): string
+    {
+        return self::MODE_LABELS[$this->mode] ?? $this->mode;
     }
 
     public function getNodeName(): string

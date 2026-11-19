@@ -103,7 +103,7 @@ public enum MTUProbe {
               let ep = try? Endpoint.of(nextProfile)
         else { return nil }
         let port = nextProfile.useArgon && nextProfile.proto != .argon4 && nextProfile.proto != .transit
-            ? 51820
+            ? nextProfile.argonUnderlayPort
             : (ep.port ?? defaultPort(for: nextProfile.proto))
         if ep.host.contains(":") && !ep.host.hasPrefix("[") {
             return "[\(ep.host)]:\(port)"
@@ -133,7 +133,7 @@ public enum MTUProbe {
         do {
             let ep = try Endpoint.of(profile)
             let isArgonTarget = profile.useArgon && profile.proto != .argon4 && profile.proto != .transit
-            let port = isArgonTarget ? 51820 : (ep.port ?? defaultPort(for: profile.proto))
+            let port = isArgonTarget ? profile.argonUnderlayPort : (ep.port ?? defaultPort(for: profile.proto))
             let transport: String
             if isArgonTarget {
                 transport = "udp"
@@ -590,6 +590,7 @@ public enum MTUProbe {
             "link": profile.uri,
             "use_argon": profile.useArgon,
             "argon_password": profile.argonPassword,
+            "argon_port": profile.argonUnderlayPort,
         ]
         if profile.proto == .amneziawg && !profile.config.isEmpty { req["wireguard_config"] = profile.config }
         if profile.proto == .openvpn && !profile.config.isEmpty { req["openvpn_config"] = profile.config }

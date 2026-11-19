@@ -33,7 +33,7 @@ final class VpnAdminTest extends DatabaseWebTestCase
         $crawler = $this->client->request('GET', '/admin');
         self::assertResponseIsSuccessful();
         $menuText = $crawler->filter('.main-sidebar, #sidebar, aside')->text();
-        self::assertStringContainsString('Узел и роль', $menuText);
+        self::assertStringContainsString('Узел, роль и порты', $menuText);
         self::assertStringContainsString('Подключения (все типы)', $menuText);
         self::assertStringContainsString('Цепочки узлов', $menuText);
         self::assertStringNotContainsString('Пользователи VPN / системы', $menuText);
@@ -41,7 +41,7 @@ final class VpnAdminTest extends DatabaseWebTestCase
 
         $this->client->request('GET', '/admin/vpn-node');
         self::assertResponseIsSuccessful();
-        self::assertSelectorTextContains('body', 'Режим: Клиент');
+        self::assertSelectorTextContains('body', 'Сейчас: Клиент');
 
         foreach ([
             '/admin/vpn-user',
@@ -284,7 +284,7 @@ final class VpnAdminTest extends DatabaseWebTestCase
         $pfValues['PortForwardRule']['targetPort'] = '51820';
         $this->client->request('POST', $pfForm->getUri(), $pfValues);
         self::assertResponseStatusCodeSame(422);
-        self::assertSelectorTextContains('body', 'занят активным серверным сервисом');
+        self::assertSelectorTextContains('body', 'уже занят: служба «Сервис Argon4»');
 
         // Корректный проброс диапазона портов для игрового сервера клиенту Елена.
         $pfValues['PortForwardRule']['name'] = 'Minecraft на Елену';
@@ -314,7 +314,7 @@ final class VpnAdminTest extends DatabaseWebTestCase
         $pfValues2['PortForwardRule']['targetPort'] = '25566';
         $this->client->request('POST', $pfForm2->getUri(), $pfValues2);
         self::assertResponseStatusCodeSame(422);
-        self::assertSelectorTextContains('body', 'Конфликт портов');
+        self::assertSelectorTextContains('body', 'уже занят: проброс порта');
 
         // Создание и валидация серверного слепого транзита + генерация клиентского профиля.
         $crawler = $this->client->request('GET', '/admin/vpn-server-service/new');

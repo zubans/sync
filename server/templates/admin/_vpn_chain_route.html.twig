@@ -1,0 +1,26 @@
+{# Путь трафика по цепочке: участки, адрес подключения, что видно на проводе и где расшифровывается Argon4. #}
+{% if segments is empty %}
+    <span class="text-muted">Нет узлов</span>
+{% else %}
+    <ol class="list-unstyled mb-0 small">
+        {% for s in segments %}
+            <li class="mb-1">
+                <span class="fw-semibold">{{ s.from }}</span>
+                <i class="fa fa-arrow-right mx-1 text-muted"></i>
+                <span class="fw-semibold">{{ s.to }}</span>
+                {% if s.address %}<code class="ms-1">{{ s.address }}</code>{% endif %}
+                <br>
+                {% if loop.last %}
+                    <span class="badge bg-light text-dark border">{{ s.wire }}</span>
+                {% elseif s.obfuscated %}
+                    <span class="badge bg-success"><i class="fa fa-mask"></i> {{ s.wire }}</span>
+                {% else %}
+                    <span class="badge bg-warning text-dark"><i class="fa fa-eye"></i> {{ s.wire }}</span>
+                {% endif %}
+                {% if s.decryptedAt %}
+                    <span class="text-muted">расшифровывается на узле</span>
+                {% endif %}
+            </li>
+        {% endfor %}
+    </ol>
+{% endif %}

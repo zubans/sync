@@ -165,7 +165,7 @@ final class Engine {
                         log("узел \(i + 1) «\(hop.name)»: слепой транзит → \(connectIP):\(connectPort) (внешн_mtu=\(effectiveBlindOuter.map(String.init) ?? "авто"), бюджет=\(nestedUDPBudget.map(String.init) ?? "авто"))")
                     } else {
                         let nextHop = plan.hops[i + 1]
-                        let nextPort = nextHop.useArgon ? 51820 : (try Endpoint.resolvedPort(for: nextHop))
+                        let nextPort = nextHop.useArgon ? nextHop.argonUnderlayPort : (try Endpoint.resolvedPort(for: nextHop))
                         let target = "\(serverIPs[i + 1][0]):\(nextPort)"
                         let targetProto = nextHop.useArgon ? "udp" : ArgonTransportProto.of(nextHop)
 
@@ -232,7 +232,7 @@ final class Engine {
                     } else {
                         try addRoutes(serverIPs[i], routeInterface)
                         argonIP = serverIPs[i][0]
-                        argonPort = 51820
+                        argonPort = effectiveHop.argonUnderlayPort
                     }
 
                     let ready = try runArgonHelper(

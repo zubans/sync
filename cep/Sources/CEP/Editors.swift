@@ -73,6 +73,17 @@ struct ProfileEditor: View {
                 Section {
                     Toggle("Шифровать подключение через Argon4", isOn: p.useArgon)
                     if p.wrappedValue.useArgon {
+                        TextField("Порт обёртки Argon4", text: Binding<String>(
+                            get: { p.wrappedValue.argonPort.map(String.init) ?? "" },
+                            set: { raw in
+                                let digits = String(raw.filter(\.isNumber).prefix(5))
+                                if digits.isEmpty {
+                                    p.wrappedValue.argonPort = nil
+                                } else if let port = Int(digits), (1...65535).contains(port) {
+                                    p.wrappedValue.argonPort = port
+                                }
+                            }
+                        ), prompt: Text("51820"))
                         SecureField("Мастер-пароль Argon4", text: p.argonPassword)
                         TextField("Client ID (необязательно)", text: p.clientID)
                         SecureField("Client Secret (необязательно)", text: p.clientSecret)
@@ -80,7 +91,7 @@ struct ProfileEditor: View {
                 } header: {
                     Text("Argon4-надстройка")
                 } footer: {
-                    Text("Трафик к этому узлу (порт 51820) или через предыдущий транзитный шлюз дополнительно шифруется Argon4 (туннель или L4-транзит). Для пустого Client ID используется идентификатор профиля.")
+                    Text("Трафик к этому узлу идёт на порт обёртки Argon4 узла (по умолчанию 51820) или через предыдущий транзитный шлюз и дополнительно шифруется Argon4. Узел расшифровывает его и передаёт службе как обычный. Для пустого Client ID используется идентификатор профиля.")
                 }
             }
             if p.wrappedValue.proto == .argon4 || p.wrappedValue.proto == .transit || p.wrappedValue.useArgon {

@@ -7,6 +7,7 @@ use App\Security\RequiresFeature;
 use App\Service\FeatureManager;
 use App\Service\MtuProbeService;
 use App\Service\NodeRuntimeExporter;
+use App\Service\VpnChainRouteDescriber;
 use App\Service\VpnChainValidator;
 use App\Service\VpnNodeSettingsService;
 use Doctrine\ORM\EntityManagerInterface;
@@ -25,6 +26,7 @@ use Symfony\Bridge\Doctrine\Attribute\MapEntity;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Security\Csrf\CsrfTokenManagerInterface;
+use Twig\Environment;
 
 /**
  * Многохоповые цепочки CEP (например: Слепой Transit → L4 Transit → Argon4 v5 video-call)
@@ -43,6 +45,8 @@ final class VpnChainCrudController extends AbstractCrudController
         private readonly VpnNodeSettingsService $settingsService,
         private readonly NodeRuntimeExporter $runtimeExporter,
         private readonly MtuProbeService $mtuProbe,
+        private readonly VpnChainRouteDescriber $routeDescriber,
+        private readonly Environment $twig,
         private readonly CsrfTokenManagerInterface $csrf,
     ) {
     }
@@ -59,8 +63,8 @@ final class VpnChainCrudController extends AbstractCrudController
             ->setEntityLabelInPlural('Цепочки узлов')
             ->setDefaultSort(['id' => 'DESC'])
             ->setSearchFields(['name', 'description'])
-            ->setHelp(Crud::PAGE_INDEX, 'Собранные цепочки экспортируются в profiles.json; слепые транзитные узлы прозрачно передают Argon4 v5 без доступа к содержимому.')
-            ->setHelp(Crud::PAGE_NEW, 'Добавьте шаги цепочки по порядку (Шаг №1 → Шаг №2 → ...). Последним узлом должен быть выходной узел, а не Transit.')
+            ->setHelp(Crud::PAGE_INDEX, 'Цепочка — порядок узлов, через которые устройство выходит в интернет. Откройте цепочку («Показать»), чтобы увидеть путь трафика: на каком участке он обфусцирован Argon4, где расшифровывается и на какой порт идёт подключение.')
+            ->setHelp(Crud::PAGE_NEW, 'Добавьте узлы по порядку от устройства к выходу. Узел на цепочке без расшифровки добавляется подключением «Argon4 Transit» без пароля — за ним должен идти узел с Argon4 или с обёрткой Argon4. Последним должен быть выходной узел, а не Transit.')
             ->setHelp(Crud::PAGE_EDIT, 'Валидатор проверяет совместимость промежуточных транзитов, вложенного MTU и video-call поверх UDP.');
     }
 
@@ -90,7 +94,20 @@ final class VpnChainCrudController extends AbstractCrudController
         yield IdField::new('id')->hideOnForm();
         yield TextField::new('name', 'Название цепочки');
         yield BooleanField::new('enabled', 'Включена');
-        yield TextField::new('hopsSummary', 'Маршрут узлов')->hideOnForm();
+        yield TextField::new('hopsSummary', 'Маршрут узлов')->onlyOnIndex();
+        yield TextField::new('trafficRoute', 'Путь трафика и обфускация')
+            ->setVirtual(true)
+            ->formatValue(fn ($value, VpnChain $entity): string => $this->twig->render('admin/_vpn_chain_route.html.twig', [
+                'segments' => $this->routeDescriber->describe($entity),
+            ]))
+            ->renderAsHtml()
+            ->onlyOnDetail();
+        yield TextField::new('obfuscationSummary', 'Обфускация')
+            ->setVirtual(true)
+            ->formatValue(fn ($value, VpnChain $entity): string => $this->routeDescriber->hasPlainSegment($entity)
+                ? 'Есть участки без Argon4'
+                : 'Argon4 на всех участках')
+            ->onlyOnIndex();
         yield TextField::new('chainMtuSummary', 'MTU и бюджет цепочки')
             ->setVirtual(true)
             ->formatValue(fn ($value, VpnChain $entity): string => $this->mtuProbe->analyzeChainMtu($entity)['summary'])

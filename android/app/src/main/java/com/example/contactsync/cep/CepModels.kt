@@ -68,6 +68,8 @@ data class CepProfile(
     val routes: String = "",
     /** Подключаться к узлу внутри обфускации Argon4 (без отдельного поля сервера). */
     val useArgon: Boolean = false,
+    /** Порт обёртки Argon4 на узле при useArgon; null — 51820. */
+    val argonPort: Int? = null,
     val argonPassword: String = "",
     val argonProtocolVersion: Int? = null,
     val argonPaddingProfile: String? = null,

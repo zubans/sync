@@ -4,9 +4,11 @@ namespace App\Service;
 
 use App\Entity\NodeSettings;
 use App\Entity\PortForwardRule;
+use App\Entity\RelayRoute;
 use App\Entity\VpnServerService;
 use App\Entity\VpnUser;
 use App\Repository\PortForwardRuleRepository;
+use App\Repository\RelayRouteRepository;
 use App\Repository\VpnChainRepository;
 use App\Repository\VpnConnectionRepository;
 use App\Repository\VpnServerServiceRepository;
@@ -19,6 +21,11 @@ use Symfony\Component\Process\Process;
 /**
  * Генератор детерминированного состояния узла (desired-state.json, конфиги демонов,
  * скрипт проброса портов iptables, клиентский profiles.json) и опциональный запуск host reconciler.
+ *
+ * Каждый процесс argon-tunnel-server описывается отдельным .env: основная служба Argon4 —
+ * argon-server.env, остальные — services/argon-*.env (дополнительные службы Argon4, транзиты,
+ * обёртки Argon4 служб, слепые пропуски узла на цепочке). Скрипт применения на хосте запускает
+ * по одному экземпляру argon-tunnel@<имя>.service на каждый такой файл.
  */
 final class NodeRuntimeExporter
 {
@@ -33,6 +40,8 @@ final class NodeRuntimeExporter
         private readonly VpnServerServiceRepository $serviceRepository,
         private readonly PortForwardRuleRepository $forwardRepository,
         private readonly VpnUserRepository $userRepository,
+        private readonly RelayRouteRepository $relayRepository,
+        private readonly NodePortPlan $portPlan,
         private readonly CepExportService $cepExport,
         private readonly EntityManagerInterface $entityManager,
         private readonly ?FeatureManager $featureManager = null,
@@ -68,7 +77,7 @@ final class NodeRuntimeExporter
             $emptyProfiles = $this->cepExport->buildStorePayload($settings, [], [], null);
             $this->writeJson('profiles.json', $emptyProfiles);
             $this->clearServerServiceEnvFiles();
-            $this->writeFile('port-forward.sh', $this->renderPortForwardScript($settings, []), 0o750);
+            $this->writeFile('port-forward.sh', $this->renderPortForwardScript($settings, [], []), 0o750);
             $desiredState = $this->buildDesiredState($settings, null, [], [], []);
             $desiredState['vpnModuleEnabled'] = false;
             $desiredState['server']['enabled'] = false;
@@ -116,27 +125,30 @@ final class NodeRuntimeExporter
         $services = $isServer ? $this->serviceRepository->findEnabledOrdered() : [];
         $forwards = $isServer ? $this->forwardRepository->findEnabledOrdered() : [];
         $users = $isServer ? $this->userRepository->findEnabledOrdered() : [];
+        $relays = $settings->canRelay() ? $this->relayRepository->findEnabledOrdered() : [];
 
+        $this->clearServerServiceEnvFiles();
         if ($isServer) {
             foreach ($this->writeServerArtifacts($settings, $services, $users) as $file) {
                 $writtenFiles[] = $file;
             }
-        } else {
-            $this->clearServerServiceEnvFiles();
+        }
+        foreach ($this->writeRelayArtifacts($settings, $relays) as $file) {
+            $writtenFiles[] = $file;
         }
 
-        $portForwardScript = $this->renderPortForwardScript($settings, $isServer ? $forwards : []);
+        $portForwardScript = $this->renderPortForwardScript($settings, $forwards, $relays);
         $this->writeFile('port-forward.sh', $portForwardScript, 0o750);
         $writtenFiles[] = 'port-forward.sh';
 
-        $desiredState = $this->buildDesiredState($settings, $activeChain?->getExternalId(), $services, $forwards, $users);
+        $desiredState = $this->buildDesiredState($settings, $activeChain?->getExternalId(), $services, $forwards, $users, $relays);
         $this->writeJson('desired-state.json', $desiredState);
         $writtenFiles[] = 'desired-state.json';
 
         $status = 'synced';
         $message = sprintf(
             'Конфигурация узла (%s) записана в %s (%d файлов).',
-            $isServer ? 'Сервер' : 'Клиент',
+            $settings->getModeLabel(),
             $this->runtimeDir,
             count($writtenFiles),
         );
@@ -184,6 +196,7 @@ final class NodeRuntimeExporter
      * @param list<VpnServerService> $services
      * @param list<PortForwardRule>  $forwards
      * @param list<VpnUser>          $users
+     * @param list<RelayRoute>       $relays
      * @return array<string, mixed>
      */
     private function buildDesiredState(
@@ -192,9 +205,10 @@ final class NodeRuntimeExporter
         array $services,
         array $forwards,
         array $users,
+        array $relays = [],
     ): array {
         return [
-            'schemaVersion' => 1,
+            'schemaVersion' => 2,
             'generatedAt' => (new \DateTimeImmutable())->format(\DateTimeInterface::ATOM),
             'node' => [
                 'mode' => $settings->getMode(),
@@ -208,6 +222,20 @@ final class NodeRuntimeExporter
             'client' => [
                 'activeChain' => $activeChainExternalId,
                 'profilesFile' => 'profiles.json',
+            ],
+            // Все порты, которые узел слушает снаружи: скрипт применения открывает их в firewall.
+            'ports' => ($services === [] && $forwards === [] && $relays === []) ? [] : $this->portPlan->exportForRuntime($settings),
+            'relay' => [
+                'enabled' => $settings->canRelay(),
+                'routes' => array_map(static fn (RelayRoute $r): array => [
+                    'id' => $r->getId(),
+                    'name' => $r->getName(),
+                    'method' => $r->getMethod(),
+                    'listenPort' => $r->getListenPort(),
+                    'transportProto' => $r->getEffectiveTransport(),
+                    'target' => $r->getTargetAddress(),
+                    'sourceCidr' => $r->getSourceCidr(),
+                ], $relays),
             ],
             'server' => [
                 'enabled' => $settings->isServerMode(),
@@ -224,6 +252,7 @@ final class NodeRuntimeExporter
                     'argonBehaviorProfile' => $s->getArgonBehaviorProfile(),
                     'argonPaddingProfile' => $s->getArgonPaddingProfile(),
                     'argonPathMtu' => $s->getArgonPathMtu(),
+                    'argonWrapPort' => $s->hasArgonWrap() ? ($s->getArgonWrapPort() ?? VpnProtocol::ARGON_DEFAULT_PORT) : null,
                 ], $services),
                 'portForwards' => array_map(static fn (PortForwardRule $r): array => [
                     'id' => $r->getId(),
@@ -256,19 +285,26 @@ final class NodeRuntimeExporter
      */
     private function writeServerArtifacts(NodeSettings $settings, array $services, array $users): array
     {
-        $this->clearServerServiceEnvFiles();
         $files = [];
         $primaryArgonWritten = false;
         $vlessInbounds = [];
 
         foreach ($services as $svc) {
+            if ($svc->hasArgonWrap()) {
+                $envName = sprintf('services/argon-wrap-%d.env', $svc->getId() ?? 0);
+                $this->writeFile($envName, $this->renderArgonWrapEnv($settings, $svc), 0o600);
+                $files[] = $envName;
+            }
+
             switch ($svc->getProto()) {
                 case VpnProtocol::ARGON4:
+                    // У каждого туннеля Argon4 свой TUN-интерфейс, иначе второй процесс не поднимется.
+                    $tunName = $primaryArgonWritten ? sprintf('argon%d', $svc->getId() ?? 0) : 'argon0';
                     $envName = $primaryArgonWritten
                         ? sprintf('services/argon-%d.env', $svc->getId() ?? 0)
                         : 'argon-server.env';
                     $primaryArgonWritten = true;
-                    $this->writeFile($envName, $this->renderArgonEnv($settings, $svc, $users));
+                    $this->writeFile($envName, $this->renderArgonEnv($settings, $svc, $users) . 'ARGON_TUN_NAME=' . $tunName . "\n");
                     $files[] = $envName;
                     break;
 
@@ -330,6 +366,66 @@ final class NodeRuntimeExporter
         }
 
         return $files;
+    }
+
+    /**
+     * Слепые Argon4-пропуски узла на цепочке получают свой процесс argon-tunnel-server;
+     * DNAT-пропуски попадают в port-forward.sh.
+     *
+     * @param list<RelayRoute> $relays
+     * @return list<string>
+     */
+    private function writeRelayArtifacts(NodeSettings $settings, array $relays): array
+    {
+        $files = [];
+        foreach ($relays as $route) {
+            if (!$route->isArgonBlind()) {
+                continue;
+            }
+            $envName = sprintf('services/argon-relay-%d.env', $route->getId() ?? 0);
+            $this->writeFile($envName, implode("\n", [
+                '# Сгенерировано панелью управления sync: слепой пропуск узла на цепочке «' . str_replace(["\r", "\n"], ' ', $route->getName()) . '»',
+                'ARGON_LISTEN_ADDR=' . self::envValue(sprintf('0.0.0.0:%d', $route->getListenPort())),
+                'ARGON_MODE=transit',
+                'ARGON_TRANSIT_BLIND=1',
+                'ARGON_TRANSIT_TARGET=' . self::envValue($route->getTargetAddress()),
+                'ARGON_ENABLE_NAT=0',
+                'ARGON_OUT_INTERFACE=' . self::envValue($settings->getWanInterface()),
+                'ARGON_PATH_MTU=' . $route->getArgonPathMtu(),
+            ]) . "\n");
+            $files[] = $envName;
+        }
+
+        return $files;
+    }
+
+    /**
+     * Обёртка Argon4 у службы — аутентифицированный L4-транзит, пригвождённый к локальному порту
+     * службы: клиент с useArgon проходит рукопожатие Argon4, узел расшифровывает поток и
+     * отдаёт его службе на 127.0.0.1 как обычное подключение. Никуда, кроме этой службы,
+     * обёртка трафик не пускает.
+     */
+    private function renderArgonWrapEnv(NodeSettings $settings, VpnServerService $svc): string
+    {
+        $wrapPort = $svc->getArgonWrapPort() ?? VpnProtocol::ARGON_DEFAULT_PORT;
+
+        return implode("\n", [
+            '# Сгенерировано панелью управления sync: обёртка Argon4 службы «' . str_replace(["\r", "\n"], ' ', $svc->getName()) . '»',
+            'ARGON_LISTEN_ADDR=' . self::envValue(sprintf('%s:%d', $svc->getListenHost(), $wrapPort)),
+            'ARGON_MODE=transit',
+            'ARGON_TRANSIT_BLIND=0',
+            'ARGON_TRANSIT_TARGET=' . self::envValue(sprintf('127.0.0.1:%d', $svc->getListenPort())),
+            'ARGON_TRANSIT_ALLOW=',
+            'ARGON_ENABLE_NAT=0',
+            'ARGON_OUT_INTERFACE=' . self::envValue($settings->getWanInterface()),
+            'ARGON_MASTER_PASSWORD=' . self::envValue($svc->getArgonWrapPassword() ?? ''),
+            'ARGON_PROTOCOL_VERSION=' . $svc->getArgonProtocolVersion(),
+            'ARGON_ALLOW_V4=' . ($svc->isArgonDisallowV4() ? '0' : '1'),
+            'ARGON_PADDING_PROFILE=' . self::envValue($svc->getArgonPaddingProfile()),
+            'ARGON_PATH_MTU=' . $svc->getArgonPathMtu(),
+            'ARGON_BEHAVIOR_PROFILE=' . self::envValue($svc->getArgonBehaviorProfile() ?? ''),
+            'ARGON_ALLOW_VIDEO_CALL=' . ($svc->isArgonAllowVideoCall() ? '1' : '0'),
+        ]) . "\n";
     }
 
     /** @param list<VpnUser> $users */
@@ -581,9 +677,28 @@ final class NodeRuntimeExporter
         ]) . "\n";
     }
 
-    /** @param list<PortForwardRule> $forwards */
-    private function renderPortForwardScript(NodeSettings $settings, array $forwards): string
+    /**
+     * @param list<PortForwardRule> $forwards
+     * @param list<RelayRoute>      $relays   DNAT-пропуски превращаются в правила проброса с MASQUERADE
+     */
+    private function renderPortForwardScript(NodeSettings $settings, array $forwards, array $relays = []): string
     {
+        foreach ($relays as $route) {
+            if ($route->isArgonBlind()) {
+                continue;
+            }
+            // Ответ следующего узла должен вернуться через этот узел, поэтому MASQUERADE обязателен.
+            $rule = new PortForwardRule();
+            $rule->setName('Пропуск: ' . $route->getName());
+            $rule->setProtocol($route->getTransportProto());
+            $rule->setListenPort($route->getListenPort());
+            $rule->setTargetIp($route->getTargetHost());
+            $rule->setTargetPort($route->getTargetPort());
+            $rule->setSourceCidr($route->getSourceCidr());
+            $rule->setEnableMasquerade(true);
+            $forwards[] = $rule;
+        }
+
         $lines = [
             '#!/usr/bin/env bash',
             'set -euo pipefail',

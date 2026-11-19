@@ -1,0 +1,17 @@
+[Unit]
+Description=Argon4 Tunnel (%i), управляется панелью sync
+After=network-online.target
+Wants=network-online.target
+PartOf=sync-vpn-runtime.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/argon-tunnel/instances/%i.env
+ExecStart=/usr/local/bin/argon-tunnel-server
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
