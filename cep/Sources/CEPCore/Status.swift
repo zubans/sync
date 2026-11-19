@@ -26,7 +26,7 @@ public struct HopStatus: Codable, Sendable, Identifiable {
 }
 
 public enum EnginePhase: String, Codable, Sendable {
-    case starting, connecting, connected, stopping, stopped, failed
+    case starting, connecting, connected, reconnecting, stopping, stopped, failed
 }
 
 public struct EngineStatus: Codable, Sendable {
@@ -34,6 +34,16 @@ public struct EngineStatus: Codable, Sendable {
     public var chainName: String
     public var hops: [HopStatus]
     public var error: String?
+    /// Исключения цепочки, проложенные через исходный шлюз, и те, что добавить не удалось.
+    public var bypass: [String]?
+    public var bypassFailed: [String]?
+    /// Номер попытки переподключения и когда она начнётся; nil — цепочка не переподключается.
+    public var reconnectAttempt: Int?
+    public var nextAttemptAt: Date?
+    /// Сколько раз цепочку уже поднимали заново после разрыва.
+    public var reconnects: Int?
+    /// Включена блокировка трафика мимо цепочки на время переподключения.
+    public var killSwitch: Bool?
     public var pid: Int32
     public var updatedAt: Date
 
@@ -46,7 +56,7 @@ public struct EngineStatus: Codable, Sendable {
     }
 
     public var isActive: Bool {
-        [.starting, .connecting, .connected, .stopping].contains(phase)
+        [.starting, .connecting, .connected, .reconnecting, .stopping].contains(phase)
     }
 }
 
@@ -59,6 +69,8 @@ public struct RunDirectory: Sendable {
     public var status: URL { url.appendingPathComponent("status.json") }
     public var stopRequest: URL { url.appendingPathComponent("stop") }
     public var engineLog: URL { url.appendingPathComponent("engine.log") }
+    /// Метка: стоят blackhole-маршруты kill switch. Если движок убили, следующий запуск их снимет.
+    public var killSwitchMarker: URL { url.appendingPathComponent("killswitch") }
     public func hopLog(_ i: Int) -> URL { url.appendingPathComponent("hop\(i + 1).log") }
 
     public func readStatus() -> EngineStatus? {

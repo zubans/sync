@@ -106,6 +106,7 @@ public enum XrayConfig {
             if let sni = link.sni { reality["serverName"] = sni }
             if let sid = link.q("sid") { reality["shortId"] = sid }
             if let spx = link.q("spx") { reality["spiderX"] = spx }
+            if let pqv = link.q("pqv") { reality["mldsa65Verify"] = pqv }
             stream["realitySettings"] = reality
         case "tls":
             var tls: [String: Any] = ["fingerprint": link.q("fp") ?? "chrome"]
@@ -139,6 +140,7 @@ public enum XrayConfig {
         case "grpc":
             var grpc: [String: Any] = ["serviceName": link.q("serviceName") ?? ""]
             if link.q("mode") == "multi" { grpc["multiMode"] = true }
+            if let authority = link.q("authority") { grpc["authority"] = authority }
             grpc["idle_timeout"] = 60
             grpc["health_check_timeout"] = 20
             grpc["permit_without_stream"] = true

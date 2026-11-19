@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @State private var linkSheet = false
+    @State private var subscriptionSheet = false
 
     var body: some View {
         NavigationSplitView {
@@ -20,6 +21,21 @@ struct ContentView: View {
                                 Button("Подключить") { model.connect(chain) }
                                 Button("Удалить", role: .destructive) { model.deleteChain(chain.id) }
                             }
+                    }
+                }
+                if !model.subscriptions.isEmpty {
+                    Section("Подписки") {
+                        ForEach(model.subscriptions) { s in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(s.name)
+                                Text("серверов: \(s.servers.count)").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .tag(SidebarItem.subscription(s.id))
+                            .contextMenu {
+                                Button("Обновить") { model.refreshSubscription(s.id) }
+                                Button("Удалить", role: .destructive) { model.deleteSubscription(s.id) }
+                            }
+                        }
                     }
                 }
                 Section("Профили") {
@@ -41,6 +57,7 @@ struct ContentView: View {
                     Button("Новая цепочка") { model.addChain() }
                     Divider()
                     Button("Профиль из ссылки…") { linkSheet = true }
+                    Button("Подписка…") { subscriptionSheet = true }
                     Divider()
                     Button("Экспорт профилей и цепочек…") { model.exportStore() }
                     Button("Импорт профилей и цепочек…") { model.importStore() }
@@ -59,6 +76,8 @@ struct ContentView: View {
                 ChainEditor(chainID: id).id(id)
             case .profile(let id) where model.profiles.contains { $0.id == id }:
                 ProfileEditor(profileID: id).id(id)
+            case .subscription(let id) where model.subscriptions.contains { $0.id == id }:
+                SubscriptionEditor(subscriptionID: id).id(id)
             case .tools:
                 ToolsView()
             default:
@@ -66,6 +85,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $linkSheet) { ImportLinkSheet() }
+        .sheet(isPresented: $subscriptionSheet) { AddSubscriptionSheet() }
         .alert("CEP", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {
             Button("OK") { model.alert = nil }
         } message: {

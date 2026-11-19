@@ -33,7 +33,20 @@ struct StatusView: View {
                     Text("Подтвердите пароль администратора").foregroundStyle(.secondary)
                 } else if let s = model.status {
                     Text(s.chainName).font(.title2)
-                    Text(s.phase.title.capitalized).foregroundStyle(.secondary)
+                    if s.phase == .reconnecting {
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            Text(reconnectNote(s)).foregroundStyle(.orange)
+                        }
+                    } else {
+                        Text(s.phase.title.capitalized).foregroundStyle(.secondary)
+                    }
+                    if s.killSwitch == true, s.phase == .reconnecting || s.phase == .connecting {
+                        Text("Kill switch: интернет мимо цепочки заблокирован до восстановления")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let n = s.reconnects, n > 0, s.phase == .connected {
+                        Text("переподключений после разрыва: \(n)").font(.caption).foregroundStyle(.secondary)
+                    }
                 } else {
                     Text("Не подключено").font(.title2)
                     Text("Выберите цепочку слева и нажмите «Подключить»").foregroundStyle(.secondary)
@@ -50,6 +63,13 @@ struct StatusView: View {
         }
     }
 
+    private func reconnectNote(_ s: EngineStatus) -> String {
+        let attempt = s.reconnectAttempt.map { "попытка \($0)" } ?? ""
+        guard let at = s.nextAttemptAt else { return "Переподключение: \(attempt)" }
+        let left = Int(at.timeIntervalSinceNow.rounded(.up))
+        return left > 0 ? "Разрыв — переподключение через \(left) с (\(attempt))" : "Переподключение: \(attempt)…"
+    }
+
     private func hops(_ s: EngineStatus) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -57,6 +77,14 @@ struct StatusView: View {
                 Text("Mac")
             }
             .foregroundStyle(.secondary)
+            if let bypass = s.bypass {
+                Text("мимо цепочки: \(bypass.joined(separator: ", "))")
+                    .font(.caption).foregroundStyle(.secondary).padding(.leading, 26).textSelection(.enabled)
+            }
+            if let failed = s.bypassFailed {
+                Text("не добавлены исключения: \(failed.joined(separator: "; "))")
+                    .font(.caption).foregroundStyle(.red).padding(.leading, 26).textSelection(.enabled)
+            }
             ForEach(s.hops) { hop in
                 HStack(alignment: .firstTextBaseline) {
                     Image(systemName: hop.state.symbol).foregroundStyle(hop.state.color)

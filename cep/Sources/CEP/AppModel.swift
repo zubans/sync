@@ -1,18 +1,23 @@
 import AppKit
 import CEPCore
 import Foundation
+import IOKit
 
 enum SidebarItem: Hashable {
     case status
     case tools
     case chain(UUID)
     case profile(UUID)
+    case subscription(UUID)
 }
 
 @MainActor
 final class AppModel: ObservableObject {
     @Published var profiles: [Profile] = [] { didSet { save() } }
     @Published var chains: [Chain] = [] { didSet { save() } }
+    @Published var subscriptions: [Subscription] = [] { didSet { save() } }
+    /// Подписки, которые сейчас обновляются.
+    @Published var refreshing: Set<UUID> = []
     @Published var status: EngineStatus?
     @Published var selection: SidebarItem? = .status
     @Published var alert: String?
@@ -28,6 +33,7 @@ final class AppModel: ObservableObject {
     private struct Store: Codable {
         var profiles: [Profile]
         var chains: [Chain]
+        var subscriptions: [Subscription]
     }
 
     init() {
@@ -38,6 +44,7 @@ final class AppModel: ObservableObject {
                                                  attributes: [.posixPermissions: 0o700])
         load()
         refreshStatus()
+        refreshStaleSubscriptions()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshStatus() }
         }
@@ -57,11 +64,13 @@ final class AppModel: ObservableObject {
             c.hops.removeAll { !ids.contains($0) }
             return c
         }
+        subscriptions = store.subscriptions ?? []
     }
 
     private struct StoredData: Decodable {
         var profiles: [Lossy<Profile>]
         var chains: [Chain]
+        var subscriptions: [Subscription]?
     }
 
     private struct Lossy<T: Decodable>: Decodable {
@@ -73,7 +82,7 @@ final class AppModel: ObservableObject {
         guard loaded else { return }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? enc.encode(Store(profiles: profiles, chains: chains)) else { return }
+        guard let data = try? enc.encode(Store(profiles: profiles, chains: chains, subscriptions: subscriptions)) else { return }
         // В файле пароли: читать может только владелец.
         FileManager.default.createFile(atPath: storeURL.path, contents: data, attributes: [.posixPermissions: 0o600])
     }
@@ -126,7 +135,7 @@ final class AppModel: ObservableObject {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
-            let data = try enc.encode(Store(profiles: profiles, chains: chains))
+            let data = try enc.encode(Store(profiles: profiles, chains: chains, subscriptions: subscriptions))
             try? FileManager.default.removeItem(at: url)
             guard FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
                 throw CocoaError(.fileWriteNoPermission)
@@ -150,7 +159,10 @@ final class AppModel: ObservableObject {
             for c in store.chains {
                 if let i = chains.firstIndex(where: { $0.id == c.id }) { chains[i] = c } else { chains.append(c) }
             }
-            alert = "Импортировано: профилей \(imported.count), цепочек \(store.chains.count)"
+            for s in store.subscriptions ?? [] {
+                if let i = subscriptions.firstIndex(where: { $0.id == s.id }) { subscriptions[i] = s } else { subscriptions.append(s) }
+            }
+            alert = "Импортировано: профилей \(imported.count), цепочек \(store.chains.count), подписок \(store.subscriptions?.count ?? 0)"
         } catch {
             alert = "Не удалось прочитать файл: \(error.localizedDescription)"
         }
@@ -161,6 +173,135 @@ final class AppModel: ObservableObject {
         for i in chains.indices { chains[i].hops.removeAll { $0 == id } }
         if selection == .profile(id) { selection = .status }
     }
+
+    // MARK: - Подписки
+
+    func subscription(_ id: UUID) -> Subscription? { subscriptions.first { $0.id == id } }
+
+    /// Новая подписка по адресу: сразу обновляется, имя берётся из ответа панели.
+    func addSubscription(url: String) {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let u = URL(string: trimmed), u.scheme == "https" || u.scheme == "http", u.host != nil else {
+            alert = "Это не адрес подписки: нужен https://…"
+            return
+        }
+        let s = Subscription(name: u.host ?? "Подписка", url: trimmed)
+        subscriptions.append(s)
+        selection = .subscription(s.id)
+        refreshSubscription(s.id)
+    }
+
+    func deleteSubscription(_ id: UUID) {
+        // Профили остаются с последней ссылкой, но больше не обновляются.
+        for i in profiles.indices where profiles[i].subscriptionID == id {
+            profiles[i].subscriptionID = nil
+        }
+        subscriptions.removeAll { $0.id == id }
+        if selection == .subscription(id) { selection = .status }
+    }
+
+    /// HWID этого Mac: sha256 от IOPlatformUUID — постоянный и не раскрывает сам идентификатор.
+    static let deviceHWID: String = {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+        defer { IOObjectRelease(service) }
+        let uuid = IORegistryEntryCreateCFProperty(service, "IOPlatformUUID" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? String
+        return SubscriptionParser.hwid(seed: uuid ?? Host.current().localizedName ?? "mac")
+    }()
+
+    func hwid(for s: Subscription) -> String {
+        let manual = s.hwid.trimmingCharacters(in: .whitespacesAndNewlines)
+        return manual.isEmpty ? Self.deviceHWID : manual
+    }
+
+    /// Скачивает список серверов и обновляет ссылки в профилях, выбравших серверы этой подписки.
+    func refreshSubscription(_ id: UUID) {
+        guard let s = subscription(id), let url = URL(string: s.url), !refreshing.contains(id) else { return }
+        refreshing.insert(id)
+        var request = URLRequest(url: url, timeoutInterval: 45)
+        request.setValue(SubscriptionParser.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(hwid(for: s), forHTTPHeaderField: "x-hwid")
+        request.setValue("macOS", forHTTPHeaderField: "x-device-os")
+        request.setValue(ProcessInfo.processInfo.operatingSystemVersionString, forHTTPHeaderField: "x-ver-os")
+        request.setValue(Self.model, forHTTPHeaderField: "x-device-model")
+        Task {
+            defer { refreshing.remove(id) }
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let http = response as? HTTPURLResponse
+                guard let http, (200..<300).contains(http.statusCode) else {
+                    throw ConfigError("сервер подписки ответил \(http?.statusCode ?? 0)")
+                }
+                let servers = SubscriptionParser.parse(data)
+                guard !servers.isEmpty else { throw ConfigError("в ответе нет ни одного сервера") }
+                // Remnawave без принятого HWID отдаёт заглушку «Приложение не поддерживается» с адресом 0.0.0.0
+                if servers.allSatisfy({ (try? ProxyLink.parse($0.uri))?.host == "0.0.0.0" }) {
+                    let limit = http.value(forHTTPHeaderField: "x-hwid-limit") == "true"
+                    throw ConfigError(limit
+                        ? "панель не приняла устройство: возможно, исчерпан лимит устройств подписки. Укажите HWID уже зарегистрированного устройства или освободите место у провайдера"
+                        : "панель вернула заглушку вместо серверов: «\(servers[0].name)»")
+                }
+                applySubscription(id, servers: servers,
+                                  title: SubscriptionParser.title(http.value(forHTTPHeaderField: "profile-title")),
+                                  info: SubscriptionParser.userInfo(http.value(forHTTPHeaderField: "subscription-userinfo")))
+            } catch {
+                alert = "Подписка «\(s.name)»: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func applySubscription(_ id: UUID, servers: [SubscriptionServer], title: String?, info: String?) {
+        guard let i = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        var s = subscriptions[i]
+        // Имя из панели — только пока пользователь не переименовал подписку (оно ещё равно адресу хоста).
+        if let title, !title.isEmpty, s.name == URL(string: s.url)?.host { s.name = title }
+        s.servers = servers
+        s.updatedAt = Date()
+        s.info = info
+        subscriptions[i] = s
+        for j in profiles.indices where profiles[j].subscriptionID == id {
+            guard let server = SubscriptionParser.match(servers, name: profiles[j].subscriptionServer, previousURI: profiles[j].uri),
+                  let proto = server.proto else { continue }
+            profiles[j].uri = server.uri
+            profiles[j].proto = proto
+            profiles[j].subscriptionServer = server.name
+        }
+    }
+
+    /// Подписки старше суток обновляются при запуске приложения.
+    private func refreshStaleSubscriptions() {
+        for s in subscriptions where (s.updatedAt ?? .distantPast) < Date().addingTimeInterval(-86_400) {
+            refreshSubscription(s.id)
+        }
+    }
+
+    /// Профиль с выбранным сервером подписки.
+    func addProfile(from server: SubscriptionServer, of subscriptionID: UUID) {
+        guard let proto = server.proto else { return }
+        var p = Profile(name: server.name, proto: proto)
+        p.uri = server.uri
+        p.subscriptionID = subscriptionID
+        p.subscriptionServer = server.name
+        profiles.append(p)
+        selection = .profile(p.id)
+    }
+
+    /// Профиль переключается на другой сервер той же подписки; имя меняется, только если было именем сервера.
+    func select(server: SubscriptionServer, for profileID: UUID) {
+        guard let i = profiles.firstIndex(where: { $0.id == profileID }), let proto = server.proto else { return }
+        if profiles[i].name == profiles[i].subscriptionServer { profiles[i].name = server.name }
+        profiles[i].uri = server.uri
+        profiles[i].proto = proto
+        profiles[i].subscriptionServer = server.name
+    }
+
+    private static let model: String = {
+        var size = 0
+        sysctlbyname("hw.model", nil, &size, nil, 0)
+        var buf = [CChar](repeating: 0, count: max(size, 1))
+        sysctlbyname("hw.model", &buf, &size, nil, 0)
+        return String(cString: buf)
+    }()
 
     func addChain() {
         let c = Chain(name: "Цепочка \(chains.count + 1)")
@@ -196,7 +337,9 @@ final class AppModel: ObservableObject {
             // Движок умер, не успев записать итог.
             var dead = s
             dead.phase = .failed
-            dead.error = dead.error ?? "движок завершился аварийно — см. журнал"
+            dead.error = s.killSwitch == true
+                ? "движок завершился аварийно во время переподключения, kill switch остался включён и интернет заблокирован. Подключите цепочку снова (движок снимет блокировку) или перезагрузите Mac"
+                : dead.error ?? "движок завершился аварийно — см. журнал"
             status = dead
         } else {
             status = s

@@ -53,6 +53,7 @@ extension EnginePhase {
         case .starting: "запуск"
         case .connecting: "подключение"
         case .connected: "подключено"
+        case .reconnecting: "переподключение"
         case .stopping: "отключение"
         case .stopped: "отключено"
         case .failed: "ошибка"
@@ -63,6 +64,7 @@ extension EnginePhase {
         switch self {
         case .starting, .connecting, .stopping: "link.badge.plus"
         case .connected: "lock.shield.fill"
+        case .reconnecting: "arrow.triangle.2.circlepath"
         case .stopped: "link"
         case .failed: "exclamationmark.triangle"
         }

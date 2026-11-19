@@ -49,6 +49,9 @@ data class CepProfile(
     val proto: String,
     /** Ссылка vless:// hysteria2:// hy2:// hysteria:// */
     val uri: String = "",
+    /** Профиль из подписки: id подписки и имя выбранного сервера. Ссылку uri берёт при обновлении подписки. */
+    val subscriptionID: String? = null,
+    val subscriptionServer: String = "",
     /** Текст .ovpn или .conf AmneziaWG. */
     val config: String = "",
     /** host:port — для Argon4; host, host:port или URL — для OpenConnect и SSTP. */
@@ -105,6 +108,37 @@ data class CepChain(
     /** DNS устройства, пока цепочка поднята; запросы к ним идут через цепочку. */
     val dns: List<String> = listOf("1.1.1.1", "8.8.8.8"),
     val blockIPv6: Boolean = true,
+    /** Сети и адреса мимо цепочки, напрямую через сеть устройства: «192.168.0.0/16, 203.0.113.7». */
+    val bypass: String = "",
+    /** После разрыва поднимать цепочку заново, пока пользователь не отключит её сам. */
+    val autoReconnect: Boolean = true,
+    /** Пока цепочка переподключается, не выпускать трафик мимо неё (кроме исключений). */
+    val killSwitch: Boolean = true,
+)
+
+/** Сервер из подписки: имя (метка #… ссылки) и сама ссылка. */
+@Serializable
+data class CepSubscriptionServer(val name: String, val uri: String) {
+    /** Протокол узла или null, если CEP такую ссылку не умеет (trojan, ss, vmess…). */
+    val protocol: VpnProtocol? get() = CepLogic.linkProtocol(uri)
+}
+
+/**
+ * Подписка провайдера: адрес, по которому панель (Remnawave, Marzban и т.п.) отдаёт список серверов.
+ * Профиль выбирает из неё один сервер и при обновлении подписки получает его свежую ссылку.
+ */
+@Serializable
+data class CepSubscription(
+    val id: String = newCepId(),
+    val name: String,
+    val url: String,
+    /** HWID вместо идентификатора этого телефона — чтобы не занимать новое место в лимите устройств. Пусто — свой. */
+    val hwid: String = "",
+    val servers: List<CepSubscriptionServer> = emptyList(),
+    /** Время обновления в секундах от 01.01.2001 — так дату пишет JSONEncoder на macOS. */
+    val updatedAt: Double? = null,
+    /** Трафик и срок действия из заголовка subscription-userinfo. */
+    val info: String? = null,
 )
 
 /** Содержимое profiles.json. */
@@ -112,6 +146,7 @@ data class CepChain(
 data class CepStore(
     val profiles: List<CepProfile> = emptyList(),
     val chains: List<CepChain> = emptyList(),
+    val subscriptions: List<CepSubscription> = emptyList(),
 )
 
 /** Задание движку: цепочка с развёрнутыми профилями (как Plan в CEPCore на macOS). */
@@ -121,6 +156,11 @@ data class CepPlan(
     val hops: List<CepProfile>,
     val dns: List<String>,
     val blockIPv6: Boolean,
+    val bypass: String = "",
+    val autoReconnect: Boolean = true,
+    val killSwitch: Boolean = true,
+    /** Адреса серверов с прошлого подключения — для переподключения под kill switch, когда DNS недоступен. */
+    val serverIPs: List<String>? = null,
 )
 
 /** UUID в верхнем регистре — так их пишет JSONEncoder на macOS. */

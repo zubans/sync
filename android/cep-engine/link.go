@@ -170,12 +170,12 @@ func singBoxOutbound(l *ProxyLink, server string) (map[string]any, error) {
 	return nil, fmt.Errorf("неизвестная схема %s://", l.Scheme)
 }
 
+// vlessOutbound — набросок outbound VLESS для sing-box. При запуске его заменяет SOCKS к встроенному xray
+// (xray.go), поэтому возможности, которых нет в sing-box (xhttp, encryption, tcp с HTTP-заголовком),
+// здесь не отклоняются: их проверяет и обслуживает xray.
 func vlessOutbound(l *ProxyLink, server string, tls map[string]any) (map[string]any, error) {
 	if l.UserInfo == "" {
 		return nil, fmt.Errorf("в ссылке VLESS нет UUID")
-	}
-	if enc := l.q("encryption"); enc != "" && enc != "none" {
-		return nil, fmt.Errorf("VLESS: encryption=%s не поддерживается", enc)
 	}
 	out := map[string]any{
 		"type":            "vless",
@@ -223,9 +223,6 @@ func vlessOutbound(l *ProxyLink, server string, tls map[string]any) (map[string]
 	host := l.q("host")
 	switch network := l.q("type"); network {
 	case "", "tcp", "raw":
-		if l.q("headerType") == "http" {
-			return nil, fmt.Errorf("VLESS: tcp с headerType=http на Android не поддерживается")
-		}
 	case "ws":
 		ws := map[string]any{"type": "ws"}
 		// path=/ws?ed=2048 — ранние данные в заголовке Sec-WebSocket-Protocol, как в xray
@@ -253,7 +250,7 @@ func vlessOutbound(l *ProxyLink, server string, tls map[string]any) (map[string]
 	case "grpc":
 		out["transport"] = map[string]any{"type": "grpc", "service_name": l.q("serviceName")}
 	case "xhttp", "splithttp":
-		return nil, fmt.Errorf("VLESS: транспорт xhttp на Android не поддерживается (нужен xray)")
+		// sing-box xhttp не умеет — узел целиком уходит в xray
 	default:
 		return nil, fmt.Errorf("VLESS: транспорт type=%s не поддерживается", network)
 	}

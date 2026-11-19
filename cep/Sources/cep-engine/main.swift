@@ -37,6 +37,15 @@ if let text = try? String(contentsOf: childrenFile, encoding: .utf8) {
     try? FileManager.default.removeItem(at: childrenFile)
 }
 
+// Kill switch от движка, который убили во время переподключения: без этого у Mac не будет сети.
+if FileManager.default.fileExists(atPath: dir.killSwitchMarker.path) {
+    log("снимаю оставшийся kill switch")
+    for net in ["0.0.0.0/1", "128.0.0.0/1"] {
+        Shell.run("/sbin/route", ["-n", "delete", "-net", net])
+    }
+    try? FileManager.default.removeItem(at: dir.killSwitchMarker)
+}
+
 let plan: Plan
 do {
     let data = try Data(contentsOf: dir.plan)

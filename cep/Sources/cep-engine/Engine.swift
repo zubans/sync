@@ -16,10 +16,20 @@ final class Engine {
     private var processes: [[Process]] = []
     private var hostRoutes: [String] = []
     private var netRoutes: [String] = []
+    /// Исключения цепочки через исходный шлюз: сеть и как её удалять (-host для /32, -net для остальных).
+    private var bypassRoutes: [(kind: String, target: String)] = []
     private var v6Blackhole = false
     private var dns: DNSOverride?
     private var splitDNS: [SplitDNS] = []
     private var argonRoutes: [Int: [String]] = [:]
+    /// Маршрут по умолчанию до подъёма цепочки: по нему видно, что Mac сменил сеть.
+    private var original: Net.DefaultRoute?
+    /// Адреса серверов с последнего удачного подключения: под kill switch системный DNS может быть недоступен.
+    private var cachedServerIPs: [[String]]?
+    /// Стоят blackhole-маршруты 0.0.0.0/1 и 128.0.0.0/1 на время переподключения.
+    private var killSwitchOn = false
+    /// Через что проложены исключения: после смены сети их надо проложить заново.
+    private var bypassVia: [String] = []
     private let hopTimeout: TimeInterval = 60
     /// Конфиги с паролями и скрипты: каталог root без пробелов в пути.
     /// openconnect запускает --script через /bin/sh, путь с «Application Support» там разваливается.
@@ -38,47 +48,92 @@ final class Engine {
 
     // MARK: - Жизненный цикл
 
+    /// Поднимает цепочку и держит её. После разрыва уже работавшей цепочки снимает всё и поднимает заново
+    /// с нарастающей паузой, пока не придёт команда остановки. Первая неудачная попытка — ошибка без повторов:
+    /// это почти всегда настройки, и пользователь как раз смотрит на экран.
     func run() -> Int32 {
         writeStatus()
-        try? FileManager.default.removeItem(at: privateDir)
-        do {
-            try FileManager.default.createDirectory(at: privateDir, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
-        } catch {
-            status.error = "не удалось создать \(privateDir.path): \(error.localizedDescription)"
-            status.phase = .failed
-            writeStatus()
-            return 1
+        var wasConnected = false
+        var attempt = 0
+        while true {
+            try? FileManager.default.removeItem(at: privateDir)
+            do {
+                try FileManager.default.createDirectory(at: privateDir, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
+                try connect()
+                if attempt > 0 { status.reconnects = (status.reconnects ?? 0) + 1 }
+                wasConnected = true
+                attempt = 0
+                status.phase = .connected
+                status.error = nil
+                status.reconnectAttempt = nil
+                status.nextAttemptAt = nil
+                writeStatus()
+                log("цепочка поднята: \(status.hops.compactMap(\.interface).joined(separator: " → "))")
+                try supervise()
+                teardown(phase: .stopped)
+                return 0
+            } catch {
+                log("ошибка: \(error.localizedDescription)")
+                status.error = error.localizedDescription
+                guard !Stop.requested, plan.autoReconnect, wasConnected else {
+                    teardown(phase: Stop.requested ? .stopped : .failed)
+                    return 1
+                }
+                release(keepProtection: plan.killSwitch)
+                if plan.killSwitch { setKillSwitch(true) }
+                attempt += 1
+                let delay = Reconnect.delay(attempt: attempt)
+                status.phase = .reconnecting
+                status.reconnectAttempt = attempt
+                status.nextAttemptAt = Date().addingTimeInterval(delay)
+                writeStatus()
+                log("переподключение: попытка \(attempt) через \(Int(delay)) с")
+                guard pause(delay) else {
+                    teardown(phase: .stopped)
+                    return 0
+                }
+            }
         }
-        do {
-            try connect()
-            status.phase = .connected
-            writeStatus()
-            log("цепочка поднята: \(status.hops.compactMap(\.interface).joined(separator: " → "))")
-            try supervise()
-            teardown(phase: .stopped)
-            return 0
-        } catch {
-            log("ошибка: \(error.localizedDescription)")
-            status.error = error.localizedDescription
-            teardown(phase: Stop.requested ? .stopped : .failed)
-            return 1
+    }
+
+    /// Пауза между попытками; false — пришла команда остановки.
+    private func pause(_ seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if Stop.requested || FileManager.default.fileExists(atPath: dir.stopRequest.path) {
+                log("получена команда остановки")
+                Stop.requested = true
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.5)
         }
+        return true
     }
 
     private func connect() throws {
         let problems = ChainValidation.problems(plan)
         guard problems.isEmpty else { throw EngineError(problems.joined(separator: "; ")) }
+        status.hops = plan.hops.enumerated().map { HopStatus(index: $0.offset, name: $0.element.name, proto: $0.element.proto) }
+        writeStatus()
         guard let original = Net.defaultRoute() else { throw EngineError("нет маршрута по умолчанию — нет сети?") }
+        self.original = original
         log("исходный маршрут: \(original.gateway ?? "-") через \(original.interface)")
 
         // Все адреса разрешаем заранее системным DNS, пока цепочка не изменила маршруты.
+        // Под kill switch DNS заблокирован вместе с остальным трафиком — берём адреса прошлого подключения.
         var serverIPs: [[String]] = []
-        for hop in plan.hops {
-            let host = try Endpoint.of(hop).host
-            let ips = try Net.resolveAllIPv4(host)
-            log("\(hop.name): \(host) → \(ips.joined(separator: ", "))")
-            serverIPs.append(ips)
+        if killSwitchOn, let cached = cachedServerIPs {
+            serverIPs = cached
+            log("адреса серверов — с прошлого подключения: \(cached.map { $0.joined(separator: ", ") }.joined(separator: "; "))")
+        } else {
+            for hop in plan.hops {
+                let host = try Endpoint.of(hop).host
+                let ips = try Net.resolveAllIPv4(host)
+                log("\(hop.name): \(host) → \(ips.joined(separator: ", "))")
+                serverIPs.append(ips)
+            }
+            cachedServerIPs = serverIPs
         }
 
         let addRoutes = { (ips: [String], interface: String?) throws in
@@ -92,6 +147,8 @@ final class Engine {
                 }
             }
         }
+
+        try routeBypass(original)
 
         status.phase = .connecting
         var previousInterface: String?
@@ -283,21 +340,33 @@ final class Engine {
         }
 
         guard let last = previousInterface else { throw EngineError("пустая цепочка") }
+        setKillSwitch(false)
         for net in ["0.0.0.0/1", "128.0.0.0/1"] {
             try route(["add", "-net", net, "-interface", last])
             netRoutes.append(net)
         }
-        if plan.blockIPv6 {
+        if plan.blockIPv6 && !v6Blackhole {
             v6Blackhole = Shell.run("/sbin/route", ["-n", "add", "-inet6", "-net", "2000::/3", "::1", "-blackhole"]).status == 0
         }
-        if !plan.dns.isEmpty {
+        if let current = dns, current.isStale {
+            current.restore()
+            dns = nil
+        }
+        if dns != nil {
+            dns?.apply()
+        } else if !plan.dns.isEmpty {
             dns = DNSOverride(servers: plan.dns)
             dns?.apply()
             log("DNS: \(plan.dns.joined(separator: ", "))")
         }
     }
 
+    /// Следит за цепочкой. Падение процесса узла — разрыв всегда. Остальные признаки разрыва проверяются
+    /// только с автопереподключением: без него цепочка, как и раньше, остаётся висеть до ручного отключения.
     private func supervise() throws {
+        let health = Reconnect.healthTargets(dns: plan.dns, bypass: bypassRoutes.map { $0.kind == "-host" ? "\($0.target)/32" : $0.target })
+        var healthFailures = 0
+        var noNetwork = 0
         var tick = 0
         while true {
             Thread.sleep(forTimeInterval: 0.5)
@@ -316,33 +385,177 @@ final class Engine {
             if tick % 20 == 0 {
                 dns?.reapplyIfChanged()
             }
+            guard plan.autoReconnect else { continue }
+            if tick % 4 == 0 {
+                try checkInterfaces()
+            }
+            if tick % 10 == 0 {
+                try checkNetwork(&noNetwork)
+            }
+            // первая проверка через 30 с после подъёма, затем каждые 15 с; разрыв — после трёх неудач подряд
+            if !health.isEmpty, tick >= 60, tick % 30 == 0 {
+                if health.contains(where: { Reconnect.dnsAnswers($0) }) {
+                    healthFailures = 0
+                } else {
+                    healthFailures += 1
+                    log("нет ответа через цепочку от \(health.joined(separator: ", ")) (\(healthFailures)/3)")
+                    if healthFailures >= 3 {
+                        throw EngineError("цепочка не отвечает: нет ответа DNS от \(health.joined(separator: ", ")) за 45 с")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Интерфейс узла исчез (utun закрыт), а процесс ещё жив.
+    private func checkInterfaces() throws {
+        let present = Net.interfaces()
+        for (i, hop) in status.hops.enumerated() where plan.hops[i].proto != .transit {
+            if let iface = hop.interface, present[iface] == nil {
+                setHop(i) { $0.state = .failed; $0.message = "интерфейс \(iface) пропал" }
+                throw EngineError("узел \(i + 1) «\(hop.name)»: интерфейс \(iface) пропал")
+            }
+        }
+    }
+
+    /// Mac сменил сеть (другой Wi-Fi, кабель): маршрут до первого сервера смотрит на старый шлюз.
+    /// Пропажу сети терпим 15 с — на короткий обрыв Wi-Fi клиенты узлов переживут его сами.
+    private func checkNetwork(_ noNetwork: inout Int) throws {
+        guard let original else { return }
+        guard let now = Net.defaultRoute() else {
+            noNetwork += 1
+            if noNetwork >= 3 { throw EngineError("пропала сеть: нет маршрута по умолчанию") }
+            return
+        }
+        noNetwork = 0
+        let ours = Set(status.hops.compactMap(\.interface))
+        if ours.contains(now.interface) { return }
+        if now.interface != original.interface || now.gateway != original.gateway {
+            throw EngineError("сменилась сеть: \(original.gateway ?? "-") через \(original.interface) → \(now.gateway ?? "-") через \(now.interface)")
         }
     }
 
     private func teardown(phase: EnginePhase) {
         status.phase = .stopping
         writeStatus()
-        dns?.restore()
-        splitDNS.forEach { $0.remove() }
-        for net in netRoutes {
-            Shell.run("/sbin/route", ["-n", "delete", "-net", net])
+        release(keepProtection: false)
+        setKillSwitch(false)
+        for i in status.hops.indices where status.hops[i].state == .up || status.hops[i].state == .connecting {
+            status.hops[i].state = .stopped
         }
-        if v6Blackhole {
-            Shell.run("/sbin/route", ["-n", "delete", "-inet6", "-net", "2000::/3"])
-        }
-        for (i, procs) in processes.enumerated().reversed() {
-            for p in procs.reversed() { terminate(p) }
-            setHop(i) { if $0.state == .up || $0.state == .connecting { $0.state = .stopped } }
-        }
-        for ip in hostRoutes.reversed() {
-            Shell.run("/sbin/route", ["-n", "delete", "-host", ip])
-        }
-        try? FileManager.default.removeItem(at: privateDir)
+        status.reconnectAttempt = nil
+        status.nextAttemptAt = nil
         try? FileManager.default.removeItem(at: dir.stopRequest)
-        try? FileManager.default.removeItem(at: dir.url.appendingPathComponent("children.pid"))
         status.phase = phase
         writeStatus()
         log("остановлено")
+    }
+
+    /// Снимает всё, что поставила цепочка: DNS, маршруты, процессы узлов, секреты. Движок после этого
+    /// может поднять цепочку заново. keepProtection — переподключение под kill switch: подмена DNS,
+    /// блокировка IPv6 и исключения остаются, чтобы ни запросы, ни IPv6 не ушли мимо цепочки.
+    private func release(keepProtection: Bool) {
+        if !keepProtection {
+            dns?.restore()
+            dns = nil
+        }
+        splitDNS.forEach { $0.remove() }
+        splitDNS = []
+        for net in netRoutes {
+            Shell.run("/sbin/route", ["-n", "delete", "-net", net])
+        }
+        netRoutes = []
+        if !keepProtection {
+            removeBypass()
+        }
+        if v6Blackhole && !keepProtection {
+            Shell.run("/sbin/route", ["-n", "delete", "-inet6", "-net", "2000::/3"])
+            v6Blackhole = false
+        }
+        for procs in processes.reversed() {
+            for p in procs.reversed() { terminate(p) }
+        }
+        processes = []
+        for ip in hostRoutes.reversed() {
+            Shell.run("/sbin/route", ["-n", "delete", "-host", ip])
+        }
+        hostRoutes = []
+        argonRoutes = [:]
+        try? FileManager.default.removeItem(at: privateDir)
+        try? FileManager.default.removeItem(at: dir.url.appendingPathComponent("children.pid"))
+    }
+
+    /// Исключения цепочки: сети и адреса через исходный шлюз. Они точнее 0.0.0.0/1 и 128.0.0.0/1,
+    /// поэтому обходят цепочку, но не мешают host-маршрутам до серверов узлов (/32 точнее любой сети).
+    /// Ставятся до узлов: сеть, совпадающая с внутренней сетью узла, остаётся за исключением.
+    /// При переподключении под kill switch они уже стоят — заново прокладываются, только если сменилась сеть.
+    private func routeBypass(_ original: Net.DefaultRoute) throws {
+        let cidrs = try RouteList.parse(plan.bypass)
+        guard !cidrs.isEmpty else { return }
+        let via: [String]
+        if let gw = original.gateway, !gw.hasPrefix("link#") {
+            via = [gw]
+        } else {
+            via = ["-interface", original.interface]
+        }
+        if via == bypassVia, status.bypass != nil || status.bypassFailed != nil { return }
+        removeBypass()
+        bypassVia = via
+        var applied: [String] = []
+        var failed: [String] = []
+        for cidr in cidrs {
+            let host = cidr.hasSuffix("/32")
+            let kind = host ? "-host" : "-net"
+            let target = host ? String(cidr.dropLast(3)) : cidr
+            let r = Shell.run("/sbin/route", ["-n", "add", kind, target] + via)
+            if r.status == 0 {
+                bypassRoutes.append((kind, target))
+                applied.append(cidr)
+            } else if r.output.contains("File exists") {
+                // сеть уже маршрутизирована мимо будущей цепочки (локальная подсеть) — исключение и так работает
+                applied.append(cidr)
+                log("исключение \(cidr): маршрут уже есть, оставлен как есть")
+            } else {
+                failed.append("\(cidr): \(r.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+        log("мимо цепочки через \(via.joined(separator: " ")): \(applied.joined(separator: ", "))")
+        for f in failed { log("исключение не добавлено — \(f)") }
+        status.bypass = applied.isEmpty ? nil : applied
+        status.bypassFailed = failed.isEmpty ? nil : failed
+        writeStatus()
+    }
+
+    private func removeBypass() {
+        for r in bypassRoutes.reversed() {
+            Shell.run("/sbin/route", ["-n", "delete", r.kind, r.target])
+        }
+        bypassRoutes = []
+        bypassVia = []
+        status.bypass = nil
+        status.bypassFailed = nil
+    }
+
+    /// Kill switch: на время переподключения 0.0.0.0/1 и 128.0.0.0/1 уходят в blackhole. Локальная сеть,
+    /// исключения и host-маршруты до серверов узлов точнее, поэтому работают, и цепочка может подняться.
+    private func setKillSwitch(_ on: Bool) {
+        guard on != killSwitchOn else { return }
+        for net in ["0.0.0.0/1", "128.0.0.0/1"] {
+            Shell.run("/sbin/route", ["-n", "delete", "-net", net])
+            if on {
+                let r = Shell.run("/sbin/route", ["-n", "add", "-net", net, "127.0.0.1", "-blackhole"])
+                log("kill switch: \(net) → blackhole: \(r.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+        if on {
+            FileManager.default.createFile(atPath: dir.killSwitchMarker.path, contents: nil)
+        } else {
+            try? FileManager.default.removeItem(at: dir.killSwitchMarker)
+            log("kill switch снят")
+        }
+        killSwitchOn = on
+        status.killSwitch = on ? true : nil
+        writeStatus()
     }
 
     // MARK: - Узлы

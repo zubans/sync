@@ -32,6 +32,16 @@ class VpnConnection
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $uri = null;
 
+    /**
+     * Подключение из подписки: externalId подписки и имя выбранного сервера. Ссылку uri и протокол
+     * подключение получает из подписки при её обновлении. Без внешнего ключа: так же, как в profiles.json.
+     */
+    #[ORM\Column(length: 64, nullable: true)]
+    private ?string $subscriptionId = null;
+
+    #[ORM\Column(length: 255, nullable: true)]
+    private ?string $subscriptionServer = null;
+
     #[ORM\Column(type: Types::TEXT, nullable: true)]
     private ?string $config = null;
 
@@ -186,6 +196,28 @@ class VpnConnection
     public function setUri(?string $uri): void
     {
         $this->uri = self::cleanNullable($uri);
+        $this->touch();
+    }
+
+    public function getSubscriptionId(): ?string
+    {
+        return $this->subscriptionId;
+    }
+
+    public function setSubscriptionId(?string $subscriptionId): void
+    {
+        $this->subscriptionId = self::cleanNullable($subscriptionId);
+        $this->touch();
+    }
+
+    public function getSubscriptionServer(): ?string
+    {
+        return $this->subscriptionServer;
+    }
+
+    public function setSubscriptionServer(?string $subscriptionServer): void
+    {
+        $this->subscriptionServer = self::cleanNullable($subscriptionServer);
         $this->touch();
     }
 
